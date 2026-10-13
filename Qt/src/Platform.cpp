@@ -1,8 +1,8 @@
 #include "AppIdentity.h"
+#include "AppStorage.h"
 #include "Host.h"
 #include "qrcodegen.hpp"
 #include <QPainter>
-#include <QSettings>
 
 QImage platformQR(const QString &text) {
     const auto utf8 = text.toUtf8();
@@ -26,10 +26,10 @@ QImage platformQR(const QString &text) {
 }
 #ifndef Q_OS_MACOS
 bool platformActivates() {
-    return QSettings().value(AppIdentity::PlayerPreference, false).toBool();
+    return AppStorage::settings().value(AppIdentity::PlayerPreference, false).toBool();
 }
 void platformSetActivates(bool value) {
-    QSettings().setValue(AppIdentity::PlayerPreference, value);
+    AppStorage::settings().setValue(AppIdentity::PlayerPreference, value);
 }
 #endif
 

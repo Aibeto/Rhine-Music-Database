@@ -31,7 +31,7 @@ const env = {
 };
 for (const name of Object.keys(env)) {
     if (
-        /^(?:PATH|QT_PLUGIN_PATH|QT_QPA_PLATFORM_PLUGIN_PATH|QML_IMPORT_PATH|QML2_IMPORT_PATH|RHINE_RESOURCES)$/i.test(
+        /^(?:PATH|QT_PLUGIN_PATH|QT_QPA_PLATFORM_PLUGIN_PATH|QML_IMPORT_PATH|QML2_IMPORT_PATH|RHINE_RESOURCES|QT_MEDIA_BACKEND)$/i.test(
             name,
         )
     ) {
@@ -44,6 +44,7 @@ if (!mac) {
 }
 env.PATH = mac ? '/usr/bin:/bin' : `${systemRoot}\\System32;${systemRoot}`;
 env.QT_QPA_PLATFORM = 'offscreen';
+env.QT_LOGGING_RULES = 'qt.multimedia.plugin=true';
 env.RHINE_GPU_TEST = mac ? process.env.RHINE_GPU_TEST || '0' : '1';
 env.RHINE_SOFTWARE_GPU = '1';
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'rhine package smoke '));
@@ -88,6 +89,8 @@ async function main() {
                     reject(failure);
                 } else if (status !== 0) {
                     reject(new Error(`Package failed: exit=${status}, signal=${signal}`));
+                } else if (!/Loading media backend "ffmpeg"/.test(stderr)) {
+                    reject(new Error('Package did not initialize its default FFmpeg backend'));
                 } else {
                     resolve();
                 }

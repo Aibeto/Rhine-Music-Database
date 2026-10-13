@@ -1,4 +1,5 @@
 #include "AppIdentity.h"
+#include "AppStorage.h"
 #include "Engine.h"
 #include "Hud.h"
 #include "RhiScene.h"
@@ -10,6 +11,7 @@
 #include <QLoggingCategory>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
+#include <QQuickGraphicsConfiguration>
 #include <QQuickWindow>
 #include <QTimer>
 #include <cstdio>
@@ -21,6 +23,18 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output);
  * 离线测试与正式播放沿用同一入口，资源只从独立应用读取。
  */
 int main(int argc, char **argv) {
+#ifdef Q_OS_WIN
+    const auto storageError = AppStorage::initializePortable(AppStorage::executableDirectory());
+    if (!storageError.isEmpty()) {
+        std::fprintf(stderr, "%s\n", storageError.toUtf8().constData());
+        return 1;
+    }
+#endif
+    // 两个平台都明确使用 FFmpeg，设备切换和重连由播放器独立处理。
+    // 必须在 Qt 初始化多媒体前选择后端，显式环境变量仍可用于兼容性对照。
+    if (qEnvironmentVariableIsEmpty("QT_MEDIA_BACKEND")) {
+        qputenv("QT_MEDIA_BACKEND", "ffmpeg");
+    }
     // Windows GUI 子系统默认可能将 Qt 日志送到调试器；测试必须写入 CTest 的标准错误管道。
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--ui-self-test") == 0) {
@@ -79,6 +93,10 @@ int main(int argc, char **argv) {
     qmlRegisterType<Hud>("Rhine.Native", 1, 0, "Hud");
     qmlRegisterUncreatableType<Engine>("Rhine.Native", 1, 0, "Engine", "Provided by application");
     QQmlApplicationEngine engine;
+#ifdef Q_OS_WIN
+    // 创建窗口时先保持隐藏，配置管线缓存后再显示，避免首次渲染写到系统缓存。
+    engine.setInitialProperties({{"visible", false}});
+#endif
     const auto fontId = QFontDatabase::addApplicationFont(root + "/RhineMiSans-regular.otf");
     const auto families = QFontDatabase::applicationFontFamilies(fontId);
     engine.rootContext()->setContextProperty("rhineFontFamily",
@@ -92,6 +110,17 @@ int main(int argc, char **argv) {
         return 1;
     }
     auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+#ifdef Q_OS_WIN
+    QQuickGraphicsConfiguration graphics;
+    graphics.setAutomaticPipelineCache(false);
+    const auto pipelineCache = AppStorage::cacheDirectory() + "/shaders/pipeline.cache";
+    if (QFileInfo::exists(pipelineCache)) {
+        graphics.setPipelineCacheLoadFile(pipelineCache);
+    }
+    graphics.setPipelineCacheSaveFile(pipelineCache);
+    window->setGraphicsConfiguration(graphics);
+    window->show();
+#endif
     window->installEventFilter(&backend);
     if (args.contains("--ui-self-test")) {
         return runUiChecks(backend, qobject_cast<QQuickWindow *>(engine.rootObjects().first()),

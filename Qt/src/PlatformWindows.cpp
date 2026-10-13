@@ -1,11 +1,10 @@
 #include "Host.h"
+#include "AppStorage.h"
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QSaveFile>
-#include <QSettings>
-#include <QStandardPaths>
 #include <QUrl>
 #include <QWindow>
 #include <mutex>
@@ -22,7 +21,7 @@
 #include <winrt/Windows.Media.h>
 
 static QString credentialPath() {
-    return QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation) + "/account.dpapi";
+    return AppStorage::dataDirectory() + "/account.dpapi";
 }
 QByteArray platformCredential() {
     QFile file(credentialPath());
@@ -61,12 +60,7 @@ void platformDeleteCredential() {
     QFile::remove(credentialPath());
 }
 void platformPlay(const QString &id, bool activate, std::function<void(QString)> done) {
-    // 从系统协议注册表交给官方客户端，不自行解析执行注册表中的命令行。
-    QSettings protocol("HKEY_CLASSES_ROOT\\orpheus", QSettings::NativeFormat);
-    if (!protocol.contains("URL Protocol")) {
-        done("未安装或未注册网易云音乐客户端，请安装官方客户端后重试");
-        return;
-    }
+    // 将协议交给 Windows Shell，不直接读取或修改注册表，也不自行解析启动命令。
     const auto payload =
         QString("{\"type\":\"song\",\"id\":\"%1\",\"cmd\":\"play\"}").arg(id).toUtf8().toBase64();
     const auto url = QString("orpheus://") + QString::fromLatin1(payload);
@@ -76,8 +70,13 @@ void platformPlay(const QString &id, bool activate, std::function<void(QString)>
     info.lpVerb = L"open";
     info.lpFile = reinterpret_cast<LPCWSTR>(url.utf16());
     info.nShow = activate ? SW_SHOWNORMAL : SW_SHOWNOACTIVATE;
-    done(ShellExecuteExW(&info) ? QStringLiteral("已交给网易云；若冷启动未切歌，可手动重试")
-                                : QStringLiteral("交付失败：无法启动网易云客户端"));
+    if (ShellExecuteExW(&info)) {
+        done(QStringLiteral("已交给网易云；若冷启动未切歌，可手动重试"));
+    } else if (GetLastError() == ERROR_NO_ASSOCIATION) {
+        done(QStringLiteral("未安装或未注册网易云音乐客户端，请安装官方客户端后重试"));
+    } else {
+        done(QStringLiteral("交付失败：无法启动网易云客户端"));
+    }
 }
 
 namespace {

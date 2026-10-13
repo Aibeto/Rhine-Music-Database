@@ -142,6 +142,78 @@ function buildQt() {
     };
 }
 /**
+ * MSVC 运行库部署
+ * 仅从当前开发环境的可分发目录取 DLL；缺少运行库时禁止生成不完整的发布包。
+ */
+function deployWindowsRuntime(app, config) {
+    let redist = process.env.VCToolsRedistDir;
+    if (!redist) {
+        const base = path.join(process.env.VCINSTALLDIR || '', 'Redist/MSVC');
+        if (!fs.existsSync(base)) {
+            throw new Error('MSVC redist directory missing; build in a Visual Studio developer shell');
+        }
+        const versions = fs.readdirSync(base).filter((name) => /^\d+\.\d+\.\d+$/.test(name));
+        versions.sort((first, second) => second.localeCompare(first, undefined, { numeric: true }));
+        if (!versions.length) {
+            throw new Error('MSVC redistributable runtime missing');
+        }
+        redist = path.join(base, versions[0]);
+    }
+    const debug = config === 'Debug';
+    const architecture = path.join(redist, ...(debug ? ['debug_nonredist', 'x64'] : ['x64']));
+    const directory = fs
+        .readdirSync(architecture)
+        .find((name) => (debug ? /^Microsoft\.VC\d+\.DebugCRT$/ : /^Microsoft\.VC\d+\.CRT$/).test(name));
+    if (!directory) {
+        throw new Error('MSVC x64 runtime DLL directory missing');
+    }
+    const runtime = path.join(architecture, directory);
+    const libraries = fs.readdirSync(runtime).filter((name) => name.toLowerCase().endsWith('.dll'));
+    const suffix = debug ? 'd.dll' : '.dll';
+    for (const name of ['msvcp140' + suffix, 'vcruntime140' + suffix, 'vcruntime140_1' + suffix]) {
+        if (!libraries.includes(name)) {
+            throw new Error(`MSVC runtime library missing: ${name}`);
+        }
+    }
+    for (const name of libraries) {
+        fs.copyFileSync(path.join(runtime, name), path.join(app, name));
+    }
+}
+
+/**
+ * 根据 Qt 插件实际依赖部署 FFmpeg 动态库，避免 Mac 发布包静默回落到原生后端。
+ * 只复制当前 kit 中被引用的库，兼容不同 Qt 补丁版本使用的 FFmpeg 主版本。
+ */
+function deployMacAudioLibraries(qt, app) {
+    const frameworks = path.join(app, 'Contents/Frameworks');
+    fs.mkdirSync(frameworks, { recursive: true });
+    const plugin = path.join(app, 'Contents/PlugIns/multimedia/libffmpegmediaplugin.dylib');
+    const pending = [plugin];
+    const deployed = new Set();
+    while (pending.length) {
+        const binary = pending.pop();
+        const result = spawnSync('otool', ['-L', binary], { encoding: 'utf8' });
+        if (result.status !== 0) {
+            throw new Error(`Cannot inspect multimedia dependency: ${binary}`);
+        }
+        const pattern =
+            /@(?:rpath|loader_path)\/(lib(?:avcodec|avformat|avutil|avfilter|avdevice|swresample|swscale)\.\d+(?:\.\d+)*\.dylib)/g;
+        for (const match of result.stdout.matchAll(pattern)) {
+            const name = match[1];
+            if (deployed.has(name)) {
+                continue;
+            }
+            const source = path.join(qt, 'lib', name);
+            fs.copyFileSync(source, path.join(frameworks, name));
+            deployed.add(name);
+            pending.push(source);
+        }
+    }
+    // 插件位于 Contents/PlugIns/multimedia；音频库位于 Contents/Frameworks。
+    run('install_name_tool', ['-add_rpath', '@loader_path/../../Frameworks', plugin]);
+}
+
+/**
  * 组装独立应用并执行平台部署和签名，所有文件沿用原资源清单。
  */
 function deployApp(qt, config, existingBundle = '') {
@@ -192,6 +264,7 @@ function deployApp(qt, config, existingBundle = '') {
             'imageformats/libqico.dylib',
             'tls/libqsecuretransportbackend.dylib',
             'multimedia/libdarwinmediaplugin.dylib',
+            'multimedia/libffmpegmediaplugin.dylib',
         ]) {
             const dest = path.join(app, 'Contents/PlugIns', plugin);
             fs.mkdirSync(path.dirname(dest), {
@@ -199,6 +272,7 @@ function deployApp(qt, config, existingBundle = '') {
             });
             fs.copyFileSync(path.join(qt, 'plugins', plugin), dest);
         }
+        deployMacAudioLibraries(qt, app);
         if (config === 'Debug') {
             for (const plugin of ['local', 'server', 'preview', 'quickprofiler', 'quickeventreplay']) {
                 const dest = path.join(app, 'Contents/PlugIns/qmltooling', `libqmldbg_${plugin}.dylib`);
@@ -231,8 +305,10 @@ function deployApp(qt, config, existingBundle = '') {
             path.join(root, 'Qt/qml'),
             '--no-translations',
             '--no-system-d3d-compiler',
+            '--no-compiler-runtime',
             path.join(app, 'RHINE MUSIC DATABASE.exe'),
         ]);
+        deployWindowsRuntime(app, config);
         // windeployqt 默认只带 Windows 平台插件；离线发布包测试也需要 offscreen 插件。
         const offscreen = config === 'Debug' ? 'qoffscreend.dll' : 'qoffscreen.dll';
         fs.mkdirSync(path.join(app, 'platforms'), {

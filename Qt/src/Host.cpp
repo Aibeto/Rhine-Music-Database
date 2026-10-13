@@ -1,4 +1,5 @@
 #include "Host.h"
+#include "AppStorage.h"
 #include <QBuffer>
 #include <QClipboard>
 #include <QCryptographicHash>
@@ -18,8 +19,6 @@
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
-#include <QSettings>
-#include <QStandardPaths>
 #include <QStyleHints>
 #include <QUrlQuery>
 #include <QUuid>
@@ -126,7 +125,7 @@ QString Host::cacheKey(QString scope, QString route, QJsonObject params) {
     return hash((scope + route).toUtf8() + QJsonDocument(params).toJson(QJsonDocument::Compact));
 }
 QString Host::diskPath(QString key) const {
-    return QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/metadata/" + key + ".json";
+    return AppStorage::cacheDirectory() + "/metadata/" + key + ".json";
 }
 /**
  * 接收脚本层请求，在协议外层执行缓存、合并和限流。
@@ -212,7 +211,7 @@ void Host::send(QString key) {
         return;
     }
     if (child.state() == QProcess::NotRunning) {
-        temporary = std::make_unique<QTemporaryDir>(QDir::tempPath() + "/rhine-music-XXXXXX");
+        temporary = std::make_unique<QTemporaryDir>(AppStorage::temporaryDirectory() + "/rhine-music-XXXXXX");
         if (!temporary->isValid()) {
             finish(key, {}, "无法创建音乐服务临时目录");
             return;
@@ -220,12 +219,16 @@ void Host::send(QString key) {
         QProcessEnvironment env;
 #ifdef Q_OS_WIN
         const auto system = QProcessEnvironment::systemEnvironment();
-        for (const auto &name : {"SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA"}) {
+        for (const auto &name : {"SystemRoot", "WINDIR"}) {
             if (system.contains(name)) {
                 env.insert(name, system.value(name));
             }
         }
         env.insert("PATH", system.value("SystemRoot") + "/System32");
+        // 上游运行时的用户目录和临时目录也限定在绿色版目录，不继承旧版缓存位置。
+        env.insert("USERPROFILE", AppStorage::dataDirectory());
+        env.insert("APPDATA", AppStorage::dataDirectory());
+        env.insert("LOCALAPPDATA", AppStorage::dataDirectory());
         env.insert("TEMP", temporary->path());
         env.insert("TMP", temporary->path());
 #else
@@ -616,7 +619,7 @@ void Host::invalidateMetadata() {
     if (offline) {
         return;
     }
-    QDir metadata(QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/metadata");
+    QDir metadata(AppStorage::cacheDirectory() + "/metadata");
     for (const auto &name : metadata.entryList({"*.json"}, QDir::Files)) {
         metadata.remove(name);
     }
@@ -627,14 +630,14 @@ QString Host::preference(QString key) const {
                         .contains(key)) {
         return {};
     }
-    return QSettings().value("panel/" + key).toString();
+    return AppStorage::settings().value("panel/" + key).toString();
 }
 void Host::setPreference(QString key, QString value) {
     if (!offline && value.size() < 262144 &&
         QStringList{"search-history", "play-history", "theme", "motion", "volume", "quality",
                     "alternate-source", "provider", "welcome-name-netease", "welcome-name-qq"}
             .contains(key)) {
-        QSettings().setValue("panel/" + key, value);
+        AppStorage::settings().setValue("panel/" + key, value);
     }
 }
 bool Host::activates() const {

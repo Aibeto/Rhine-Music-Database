@@ -20,6 +20,9 @@ find_package(
 if(NOT TARGET Qt6::GuiPrivate)
     find_package(Qt6GuiPrivate REQUIRED)
 endif()
+if(NOT TARGET Qt6::MultimediaPrivate)
+    find_package(Qt6MultimediaPrivate REQUIRED)
+endif()
 qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 NEW)
 set_source_files_properties(Qt/qml/Main.qml PROPERTIES QT_RESOURCE_ALIAS Main.qml)
@@ -30,6 +33,8 @@ qt_add_executable(
     MACOSX_BUNDLE
     Qt/src/AudioPlayer.cpp
     Qt/src/AudioPlayer.h
+    Qt/src/AppStorage.cpp
+    Qt/src/AppStorage.h
     Qt/src/DiscGeometry.cpp
     Qt/src/DiscGeometry.h
     Qt/tests/UiChecks.cpp
@@ -128,7 +133,8 @@ elseif(WIN32)
     configure_file(Qt/WindowsIcon.rc.in "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc" @ONLY)
     target_sources(RhineMusicDatabase PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc")
     target_sources(RhineMusicDatabase PRIVATE Qt/src/PlatformWindows.cpp)
-    target_link_libraries(RhineMusicDatabase PRIVATE crypt32 shell32 user32 windowsapp runtimeobject)
+    target_link_libraries(RhineMusicDatabase PRIVATE crypt32 shell32 user32 windowsapp runtimeobject
+                                                     Qt6::MultimediaPrivate)
     target_compile_options(RhineMusicDatabase PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 else()
     message(FATAL_ERROR "Supported desktop platforms are macOS and Windows")
@@ -166,6 +172,28 @@ if(APPLE AND RHINE_PACKAGE_APP)
         VERBATIM)
 endif()
 enable_testing()
+qt_add_executable(RhinePlatformRegression Qt/tests/PlatformRegression.cpp Qt/src/AppStorage.cpp
+                  Qt/src/AudioPlayer.cpp)
+target_include_directories(RhinePlatformRegression PRIVATE Qt/src)
+target_link_libraries(RhinePlatformRegression PRIVATE Qt6::Core Qt6::Gui Qt6::Multimedia
+                                                      Qt6::MultimediaPrivate)
+if(WIN32)
+    target_sources(RhinePlatformRegression PRIVATE Qt/src/PlatformWindows.cpp)
+    target_link_libraries(
+        RhinePlatformRegression
+        PRIVATE Qt6::Qml
+                Qt6::Network
+                crypt32
+                shell32
+                user32
+                windowsapp
+                runtimeobject)
+    target_compile_definitions(RhinePlatformRegression PRIVATE RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}")
+    target_compile_options(RhinePlatformRegression PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+endif()
+add_test(NAME qt_platform_regression COMMAND RhinePlatformRegression
+                                             "${CMAKE_CURRENT_BINARY_DIR}/platform-regression")
+set_tests_properties(qt_platform_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 add_test(NAME qt_offline COMMAND RhineMusicDatabase --self-test)
 set_tests_properties(
     qt_offline
