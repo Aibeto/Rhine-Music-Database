@@ -1,0 +1,208 @@
+const http = require('node:http');
+const crypto = require('node:crypto');
+const path = require('node:path');
+const allowed = new Set([
+    '/login/qr/key',
+    '/login/qr/create',
+    '/login/qr/check',
+    '/login/qr/cancel',
+    '/login/status',
+    '/logout',
+    '/user/detail',
+    '/user/playlist',
+    '/user/albums',
+    '/user/liked-songs',
+    '/user/playlist-detail',
+    '/getSearchByKey',
+    '/getSmartbox',
+    '/getSongInfo',
+    '/getSongListDetail',
+    '/getAlbumInfo',
+    '/getSingerHotsong',
+    '/getSingerAlbum',
+    '/getRecommend',
+    '/getTopLists',
+    '/getRanks',
+    '/getNewDisks',
+    '/getSongListCategories',
+    '/getSongLists',
+    '/getMusicPlay',
+]);
+let ready;
+let server;
+let sessions = [];
+async function charts(route, params) {
+    // 沿用原包的 HTTP 传输与榜单操作，仅传递 GetAll 返回的真实周期。
+    // 原 getRanks 控制器把日榜周期强制转成周数，会使日榜返回空列表。
+    const root = path.dirname(require.resolve('@yakult-green-tea/qq-music-api'));
+    const common = require(path.join(root, 'services/UCommon/UCommon.js')).default;
+    const list = route === '/getTopLists';
+    if (
+        !list &&
+        (!/^\d+$/.test(String(params.topId)) ||
+            !/^\d{4}(?:-\d{2}-\d{2}|_\d{1,2})$/.test(String(params.period)))
+    ) {
+        throw new Error('Invalid chart');
+    }
+    const operation = {
+        module: 'musicToplist.ToplistInfoServer',
+        method: list ? 'GetAll' : 'GetDetail',
+        param: list
+            ? {}
+            : {
+                  topId: Number(params.topId),
+                  period: params.period,
+                  offset: Math.max(0, Number(params.page) || 0),
+                  num: Math.min(100, Math.max(1, Number(params.limit) || 20)),
+              },
+    };
+    const result = await common({
+        method: 'get',
+        params: {
+            format: 'json',
+            data: JSON.stringify({
+                comm: {
+                    ct: 24,
+                },
+                req_1: operation,
+            }),
+        },
+        option: {
+            timeout: 24000,
+        },
+    });
+    const module = result.data?.req_1;
+    if (result.data?.code !== 0 || module?.code !== 0) {
+        throw new Error('QQ charts unavailable');
+    }
+    if (!list) {
+        return {
+            body: {
+                response: result.data,
+            },
+            cookies: [],
+            qqSessions: sessions,
+        };
+    }
+    const topList = (module.data?.group || [])
+        .flatMap((group) => group.toplist || [])
+        .map((chart) => ({
+            id: chart.topId,
+            topTitle: chart.title,
+            period: chart.period,
+            total: chart.totalNum,
+            picUrl: String(chart.frontPicUrl || chart.headPicUrl || '').replace(/^http:/, 'https:'),
+        }));
+    return {
+        body: {
+            response: {
+                code: 0,
+                data: {
+                    topList,
+                },
+            },
+        },
+        cookies: [],
+        qqSessions: sessions,
+    };
+}
+/**
+ * 建立仅回环可访问的 QQ 桥接服务。
+ * 用随机认证值保护请求，认证记录只保存到已配置的凭据仓库。
+ */
+async function start(cookies) {
+    // 上游测试入口只跳过自动监听；在桥内创建仅回环可访问、带随机认证的服务。
+    const previous = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'test';
+    process.env.QQ_AUTH_STATE_PATH = 'memory';
+    process.env.QQ_ENABLE_UPDATE_CHECK = 'false';
+    const qq = require('@yakult-green-tea/qq-music-api');
+    if (previous === undefined) {
+        delete process.env.NODE_ENV;
+    } else {
+        process.env.NODE_ENV = previous;
+    }
+    sessions = Array.isArray(cookies.__qqSessions) ? cookies.__qqSessions : [];
+    qq.configureAuthSessionRepository({
+        kind: 'rhine-system-credential',
+        load: () => sessions,
+        save: (values) => {
+            sessions = values;
+        },
+    });
+    const secret = crypto.randomBytes(32).toString('hex');
+    const callback = qq.default.callback();
+    server = http.createServer((req, res) => {
+        if (req.headers['x-rhine-bridge'] !== secret) {
+            res.writeHead(403);
+            res.end();
+            return;
+        }
+        callback(req, res);
+    });
+    await new Promise((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', resolve);
+    });
+    return {
+        port: server.address().port,
+        secret,
+    };
+}
+/**
+ * 校验 QQ 路由并通过私有回环服务调用锁定上游。
+ * 保留响应封装和会话交付，不把敏感错误原文送入界面。
+ */
+async function dispatch(message) {
+    const route = message.route.slice(3);
+    if (!allowed.has(route)) {
+        throw new Error('Unsupported QQ route');
+    }
+    ready ||= start(message.cookies || {}).catch((error) => {
+        ready = undefined;
+        throw error;
+    });
+    const { port, secret } = await ready;
+    if (route === '/getTopLists' || route === '/getRanks') {
+        return charts(route, message.params || {});
+    }
+    const url = new URL(`http://127.0.0.1:${port}${route}`);
+    for (const [key, value] of Object.entries(message.params || {})) {
+        url.searchParams.set(key, String(value));
+    }
+    const response = await fetch(url, {
+        headers: {
+            'x-rhine-bridge': secret,
+            'x-qq-session': message.cookies?.qqmusic_session || '',
+        },
+        signal: AbortSignal.timeout(24000),
+        redirect: 'error',
+    });
+    const body = await response.json();
+    const cookies = response.headers.getSetCookie();
+    if (typeof body.cookie === 'string') {
+        cookies.push(body.cookie);
+        delete body.cookie;
+    }
+    if (!response.ok) {
+        // 不把上游异常原文或包含签名的 URL 交给界面。
+        return {
+            body: {
+                code: response.status,
+                message:
+                    response.status === 401 ? 'QQ 登录已失效，请重新登录' : 'QQ 音乐暂不可用，请稍后重试',
+                retryAfterMs: body.retryAfterMs,
+            },
+            cookies: [],
+            qqSessions: sessions,
+        };
+    }
+    return {
+        body,
+        cookies,
+        qqSessions: sessions,
+    };
+}
+module.exports = {
+    dispatch,
+};

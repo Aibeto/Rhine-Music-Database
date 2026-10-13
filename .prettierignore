@@ -1,0 +1,8 @@
+node_modules/
+output/
+vendor/
+MusicBridge/upstream/
+Assets/
+Resources/*.json
+licenses/
+**/package-lock.json

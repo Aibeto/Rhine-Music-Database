@@ -1,0 +1,9 @@
+# 固定文本换行，确保两端检出后的上游文件哈希一致。
+* text=auto eol=lf
+*.glb -text
+*.bin -text
+*.otf -text
+*.ttf -text
+*.png -text
+*.ico -text
+*.pdf -text
