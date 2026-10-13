@@ -1,0 +1,80 @@
+name: Publish Existing Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Existing build Run ID"
+        required: true
+        type: string
+      tag:
+        description: "Release tag (e.g. v1.0.0)"
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Validate build run
+        id: build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run_id }}
+        run: |
+          set -euo pipefail
+
+          STATUS=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" \
+            --jq '.conclusion')
+
+          SHA=$(gh api \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" \
+            --jq '.head_sha')
+
+          if [ "$STATUS" != "success" ]; then
+            echo "Build run is not successful: $STATUS"
+            exit 1
+          fi
+
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Download existing artifacts
+        uses: actions/download-artifact@v4
+        with:
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+
+      - name: Collect ZIP files
+        run: |
+          set -euo pipefail
+
+          mkdir -p release
+
+          find artifacts -type f -name '*.zip' \
+            -exec cp -n {} release/ \;
+
+          count=$(find release -maxdepth 1 -type f -name '*.zip' | wc -l)
+
+          if [ "$count" -ne 2 ]; then
+            echo "Expected exactly 2 ZIP files, found $count"
+            exit 1
+          fi
+
+          ls -lh release/
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          name: ${{ inputs.tag }}
+          target_commitish: ${{ steps.build.outputs.sha }}
+          files: release/*.zip
+          generate_release_notes: true
+          fail_on_unmatched_files: true
