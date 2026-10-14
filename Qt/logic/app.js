@@ -122,8 +122,8 @@ export function create(host, glyphs, runtime, content) {
         key(key, command) {
             hud.key(key, command);
         },
-        wheel(x, y, delta, steps) {
-            hud.wheel(x, y, delta, steps);
+        wheel(x, y, delta, steps, distance) {
+            hud.wheel(x, y, delta, steps, distance);
         },
         pointer(type, x, y) {
             if (hud.modal) {
@@ -154,6 +154,7 @@ export function create(host, glyphs, runtime, content) {
         animating(t) {
             return (
                 !hud.motion.finished ||
+                hud.lyricsAnimating(t) ||
                 hud.closing ||
                 t - (hud.resultStart ?? -100) < 0.5 ||
                 Object.values(hud.rolling).some((label) => label.active?.(t))

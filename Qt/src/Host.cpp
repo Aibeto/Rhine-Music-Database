@@ -738,24 +738,53 @@ void Host::invalidateMetadata() {
     }
 }
 QString Host::preference(QString key) const {
-    if (offline ||
-        !QStringList{"search-history", "play-history", "theme", "motion", "volume", "quality",
-                     "alternate-source", "provider", "welcome-name-netease", "welcome-name-qq",
-                     "welcome-name-kugou", "account-id-netease", "account-id-qq", "account-id-kugou",
-                     "kugou-edition", "welcome-name-kugou-standard", "welcome-name-kugou-lite",
-                     "account-id-kugou-standard", "account-id-kugou-lite"}
-             .contains(key)) {
+    if (offline || !QStringList{"search-history",
+                                "play-history",
+                                "theme",
+                                "motion",
+                                "volume",
+                                "quality",
+                                "alternate-source",
+                                "provider",
+                                "lyrics-cache",
+                                "welcome-name-netease",
+                                "welcome-name-qq",
+                                "welcome-name-kugou",
+                                "account-id-netease",
+                                "account-id-qq",
+                                "account-id-kugou",
+                                "kugou-edition",
+                                "welcome-name-kugou-standard",
+                                "welcome-name-kugou-lite",
+                                "account-id-kugou-standard",
+                                "account-id-kugou-lite"}
+                        .contains(key)) {
         return {};
     }
     return AppStorage::settings().value("panel/" + key).toString();
 }
 void Host::setPreference(QString key, QString value) {
     if (!offline && value.size() < 262144 &&
-        QStringList{"search-history", "play-history", "theme", "motion", "volume", "quality",
-                    "alternate-source", "provider", "welcome-name-netease", "welcome-name-qq",
-                    "welcome-name-kugou", "account-id-netease", "account-id-qq", "account-id-kugou",
-                    "kugou-edition", "welcome-name-kugou-standard", "welcome-name-kugou-lite",
-                    "account-id-kugou-standard", "account-id-kugou-lite"}
+        QStringList{"search-history",
+                    "play-history",
+                    "theme",
+                    "motion",
+                    "volume",
+                    "quality",
+                    "alternate-source",
+                    "provider",
+                    "lyrics-cache",
+                    "welcome-name-netease",
+                    "welcome-name-qq",
+                    "welcome-name-kugou",
+                    "account-id-netease",
+                    "account-id-qq",
+                    "account-id-kugou",
+                    "kugou-edition",
+                    "welcome-name-kugou-standard",
+                    "welcome-name-kugou-lite",
+                    "account-id-kugou-standard",
+                    "account-id-kugou-lite"}
             .contains(key)) {
         AppStorage::settings().setValue("panel/" + key, value);
     }

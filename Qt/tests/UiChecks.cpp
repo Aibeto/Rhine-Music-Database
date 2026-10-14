@@ -462,6 +462,57 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     if (!output.isEmpty()) {
         window->grabWindow().save(output + "/player.png");
     }
+    // 歌词入口立即打开正在播放的歌曲，真实 QJSEngine 使用公共时间轴定位。
+    evaluate(R"(
+        App.music.player.lyrics.currentKey = 'netease:' + uiSongs[0].id;
+        App.music.player.lyrics.accept({version:1, source:'netease', timing:'line', offsetMs:0,
+            plainText:'', lines:[
+                {startMs:0,endMs:null,text:'风穿过安静的街道',translation:'',words:[]},
+                {startMs:1000,endMs:null,text:'我们听见远处的回声',translation:'',words:[]},
+                {startMs:2000,endMs:null,text:'每一束光都落在这里',translation:'',words:[]},
+                {startMs:3000,endMs:null,text:'让这首歌继续流动',translation:'',words:[]}
+            ]}, uiSongs[0]);
+    )");
+    refresh();
+    check(click("player:lyrics"), "lyrics button native click");
+    refresh();
+    check(evaluate("App.hud.lyricsMode && App.music.current.id === App.music.player.current.id").toBool(),
+          "lyrics opens playing song immediately");
+    check(evaluate("App.hud.commands.some(function(c){return c[0]==='text' && c[1]==='每一束光都落在这里';})")
+              .toBool(),
+          "lyrics replaces detail card");
+    if (!output.isEmpty()) {
+        window->grabWindow().save(output + "/lyrics.png");
+    }
+    check(click("player:lyric-line:1"), "lyric line native seek click");
+    wait.restart();
+    while (qAbs(backend.host.mediaState().value("position").toLongLong() - 1000) >= 100 &&
+           wait.elapsed() < 3000) {
+        settle();
+    }
+    check(qAbs(backend.host.mediaState().value("position").toLongLong() - 1000) < 100,
+          "lyric click seeks actual audio position");
+    backend.action("player:lyrics-follow");
+    check(evaluate("App.music.player.lyrics.index === 1").toBool(),
+          "shared lyrics engine follows native seek");
+    backend.action("player:lyrics-earlier");
+    refresh();
+    check(evaluate("App.music.player.lyrics.offsetMs === 200").toBool(), "lyrics advance direction");
+    check(evaluate("App.hud.commands.some(function(c){return c[0]==='text' && c[1]==='已提前 0.2s';})")
+              .toBool(),
+          "lyrics offset label states direction");
+    evaluate("App.music.player.lyrics.load(uiSongs[0]);");
+    refresh();
+    check(evaluate("App.music.player.lyrics.offsetMs === 0").toBool(), "cached replay resets manual offset");
+    backend.wheel(width * .7, 500, -2, true);
+    refresh();
+    check(evaluate("App.hud.lyricsBrowse > App.hud.lyricsLayout[1].top && "
+                   "App.hud.lyricsBrowse < App.hud.lyricsLayout[1].top + 10")
+              .toBool(),
+          "sub-row trackpad pixels move lyrics continuously");
+    backend.action("player:lyrics-close");
+    backend.host.mediaControl("seek", 2000);
+    refresh();
     // 不同字号的文字与音量条必须以真实可见轮廓对齐，而非文本框名义高度。
     check(evaluate(R"(
         (function () {

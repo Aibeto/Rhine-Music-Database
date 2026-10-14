@@ -201,6 +201,7 @@ void Engine::setVisible(bool value) {
         call("pointer", {"pointercancel", 0, 0});
         m_pressed = m_wheelPending = false;
         m_wheelDelta = m_wheelSteps = 0;
+        m_wheelDistance = 0;
         timer.stop();
         m_sleeping = true;
     } else {
@@ -259,10 +260,11 @@ void Engine::tick() {
     flushPointer();
     if (m_wheelPending) {
         const int steps = int(m_wheelSteps);
-        call("wheel", {m_wheelX, m_wheelY, m_wheelDelta, steps});
+        call("wheel", {m_wheelX, m_wheelY, m_wheelDelta, steps, m_wheelDistance});
         m_wheelSteps -= steps;
         m_wheelPending = false;
         m_wheelDelta = 0;
+        m_wheelDistance = 0;
     }
     if (now - m_lastInput >= 750 && !m_pressed) {
         scene.energyIdle(true);
@@ -334,6 +336,8 @@ void Engine::wheel(double x, double y, double delta, bool pixels) {
     m_wheelY = y;
     m_wheelDelta += delta;
     m_wheelSteps += pixels ? -delta / 15. : (delta < 0 ? 1 : -1);
+    // 单独保留连续舞台位移，避免触控板不足一行的输入被整数行索引吞掉。
+    m_wheelDistance += pixels ? -delta / (m_height / 1080.) : -delta / 120. * 65;
     m_wheelPending = true;
     wake();
 }

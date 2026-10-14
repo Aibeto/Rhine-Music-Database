@@ -14,7 +14,7 @@
 
 ![列表](Assets/previews/list.png)
 
-![封面查看器](Assets/previews/cover-viewer.png)
+![封面查看器](Assets/previews/lyrics.png)
 
 ![面板设置](Assets/previews/settings.png)
 
@@ -54,7 +54,8 @@ macOS 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BA
 - [x] 歌曲加入或移出歌单
 - [x] 每日推荐、推荐歌单、排行榜、新专辑、分类歌单
 - [x] 面板内播放与网易云官方客户端入口
-- [ ] 歌词、MV、评论社交、云盘、电台
+- [x] 同步歌词与逐句滚动
+- [ ] MV、评论社交、云盘、电台
 - [ ] 音乐下载
 
 ### QQ 音乐
@@ -68,7 +69,8 @@ macOS 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BA
 - [x] 面板内播放与来源网页入口
 - [ ] 完整分页搜索与专辑、歌单、歌手独立搜索
 - [ ] 账号内容编辑（喜欢、收藏及歌单管理）
-- [ ] 歌词、MV、评论社交、电台
+- [x] 同步歌词与逐句滚动
+- [ ] MV、评论社交、电台
 - [ ] 音乐下载
 
 ### 酷狗音乐（标准版 / 概念版）
@@ -80,7 +82,8 @@ macOS 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BA
 - [x] 歌手单曲和发行专辑浏览
 - [x] 按文档注册设备取得 dfid，再调用 `/song/url`；高音质不可用时回退标准音质
 - [ ] 收藏专辑读取与账号内容编辑
-- [ ] 歌词、MV、评论社交、云盘、电台、下载
+- [x] 同步歌词与逐句滚动
+- [ ] MV、评论社交、云盘、电台、下载
 
 
 ### 面板本身
@@ -90,13 +93,17 @@ macOS 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BA
 - [x] 按歌手或专辑分组浏览已载入结果
 - [x] 网易云 / QQ / 酷狗直接选择与账号、请求、缓存隔离
 - [x] 播放、暂停、切歌、进度与音量控制
+- [x] 播放栏歌词入口、当前歌曲歌词页面、点击歌词跳转、单曲时间校准与离线歌词缓存
+
 - [x] 播放队列、删除待播曲目、循环与随机播放
 - [x] 搜索历史、播放历史与本机偏好保存
 - [x] 亮色、暗色、跟随系统与减少动效
 - [x] 音质选择、试听提示与可选替代音源
 - [x] macOS 系统媒体按钮
 - [x] macOS Apple Silicon 与 Windows x64 构建和打包
-- [ ] 歌词显示与 MV 播放
+- [ ] MV 播放
+
+
 
 **音质和完整播放取决于账号权限与音源可用性；返回试听时会明确提示。替代音源默认关闭，开启时使用锁定上游的匹配实现，音质由匹配来源决定，失败时可使用官方入口。本项目不提供音乐下载。**
 
@@ -158,6 +165,10 @@ Qt RHI 使用私有头文件，升级 Qt 后需重新编译并验证。
 - **[MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi)**: 酷狗音乐标准版及概念版接入
 - **[yakult-green-tea/qq-music-api](https://github.com/yakult-green-tea/qq-music-api)**: QQ 音乐接入
 - **[LBEILC / RhineLabUI](https://github.com/LBEILC/RhineLabUI)**：特别感谢原界面、模型与场景作者，版权声明随项目保留。
+- **[LyricsX](https://github.com/MxIris-LyricsX-Project/LyricsX)**：歌词获取、解析与显示分层参考。
+- **[LyricsKit](https://github.com/MxIris-LyricsX-Project/LyricsKit)**：LRC、YRC、KRC 格式解析移植，
+  `MusicBridge/lyrics-format.cjs` 单独采用 MPL-2.0，固定版本与许可随包保留。
+- **[Lyrimuse](https://github.com/Yudaotor/lyrimuse)**：统一时间轴、歌词同步与录音版本匹配思路参考。
 
 ## 开源许可
 

@@ -156,3 +156,10 @@ Its source and licenses are preserved in the packaged dependency directory.
 KuGouMusicApi，MIT。来源：https://github.com/MakcRe/KuGouMusicApi ，锁定提交
 ba3645f2c89e6b9d4fec82ff783c15287e4c5f43（包版本 1.6.2）。原始程序化 API、签名、加密和设备注册模块
 随运行时依赖原样分发，完整许可证保留在 MusicBridge/node_modules/kugoumusicapi/LICENSE。
+
+## 歌词格式归一化
+
+MusicBridge/lyrics-format.cjs 移植 LyricsKit 的 LyricsCore LRC 与 LyricsService YRC/KRC
+解析逻辑，采用 MPL-2.0。固定来源、版本及改编文件见 MusicBridge/lyrics-source.json；
+完整许可见 MusicBridge/LyricsKit-LICENSE。该文件的 MPL 许可单独保留，其他自维护源码沿用原许可。
+来源：https://github.com/MxIris-LyricsX-Project/LyricsKit 。发布包随附此文件的可编辑 JavaScript 源码。

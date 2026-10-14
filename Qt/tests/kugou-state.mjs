@@ -69,7 +69,8 @@ await assert.rejects(
     failure.dispatch({ route: '/kugou/search', cookies: { __kugou: { dfid: 'registered' } } }),
     (error) => !JSON.stringify(error.body).includes('private-secret'),
 );
-for (const route of ['/lyric', '/mv/detail', '/comment/music', '/user/cloud', '/song/url/new']) {
+assert(ROUTES.includes('/lyric') && ROUTES.includes('/search/lyric'));
+for (const route of ['/mv/detail', '/comment/music', '/user/cloud', '/song/url/new']) {
     assert.equal(ROUTES.includes(route), false);
     await assert.rejects(bridge.dispatch({ route: '/kugou' + route }));
 }

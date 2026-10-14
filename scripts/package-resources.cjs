@@ -38,7 +38,15 @@ const target = path.join(out, 'MusicBridge');
 fs.mkdirSync(target, {
     recursive: true,
 });
-for (const name of ['worker.cjs', 'qq.cjs', 'kugou.cjs', 'NODE-LICENSE']) {
+for (const name of [
+    'worker.cjs',
+    'qq.cjs',
+    'kugou.cjs',
+    'lyrics-format.cjs',
+    'lyrics-source.json',
+    'LyricsKit-LICENSE',
+    'NODE-LICENSE',
+]) {
     fs.copyFileSync(path.join(bridge, name), path.join(target, name));
 }
 const nodeName = process.platform === 'win32' ? 'node.exe' : 'node';

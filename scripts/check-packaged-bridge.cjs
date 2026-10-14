@@ -175,6 +175,30 @@ async function main() {
         const kugouDevice = JSON.parse(fs.readFileSync(path.join(temp, 'kugou-device.json')));
         assert.equal(kugouDevice.KUGOU_API_GUID, kugouLogin.kugouCredentials.KUGOU_API_GUID);
         assert.equal(kugouDevice.token, undefined);
+        // 发布包通过真实锁定协议和解码器读取三种形态，再交付相同毫秒模型。
+        const neteaseLyrics = await request('lyrics-netease', '/lyric/new', { id: '1' });
+        const qqLyrics = await request('lyrics-qq', '/qq/getLyric', { songmid: 'fixtureMID' });
+        const lyricSearch = await request('lyrics-kugou-search', '/kugou/search/lyric', {
+            hash: 'A'.repeat(32),
+        });
+        assert.equal(lyricSearch.body.candidates[0].id, '42');
+        const kugouLyrics = await request('lyrics-kugou', '/kugou/lyric', {
+            id: '42',
+            accesskey: 'fixture-key',
+            fmt: 'krc',
+            decode: true,
+        });
+        for (const response of [neteaseLyrics, qqLyrics, kugouLyrics]) {
+            assert.equal(response.body.code, 200);
+            assert.deepEqual(
+                response.body.document.lines.map((line) => line.startMs),
+                [1000, 3000],
+            );
+            assert.equal(response.body.document.lines[0].text, '本地歌词');
+        }
+        assert.equal(kugouLyrics.body.document.timing, 'word');
+        assert.equal(kugouLyrics.body.document.lines[0].words[1].startMs, 1500);
+        assert(fs.existsSync(path.join(bridge, 'LyricsKit-LICENSE')));
         // 验证原服务失败诊断
         const failedLogin = await request('failed-login', '/qq/login/qr/key', { channel: 'qq' });
         assert.equal(failedLogin.body.code, 502);
@@ -188,9 +212,7 @@ async function main() {
             '/cloud',
             '/mv/url',
             '/personal_fm',
-            '/qq/getLyric',
             '/qq/getComments',
-            '/kugou/lyric',
             '/kugou/user/cloud',
             '/kugou/song/url/new',
         ]) {

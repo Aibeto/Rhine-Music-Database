@@ -50,6 +50,8 @@ const routes = Object.freeze({
     '/playlist/catlist': 'playlist_catlist',
     '/toplist': 'toplist',
     '/song/wiki/summary': 'song_wiki_summary',
+    '/lyric/new': 'lyric_new',
+    '/lyric': 'lyric',
 });
 // 沿用上游 main.js 的函数适配方式，只加载允许的接口。
 // 接口和加密文件保持上游原始字节内容。
@@ -161,7 +163,9 @@ async function dispatch(message) {
               params: p,
           }));
     return {
-        body,
+        body: ['/lyric', '/lyric/new'].includes(message.route)
+            ? require('./lyrics-format.cjs').normalizeLyrics('netease', body, message.params)
+            : body,
         cookies: responseCookies,
     };
 }

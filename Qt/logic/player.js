@@ -1,3 +1,4 @@
+import { Lyrics } from './lyrics.js';
 const identity = (v) => (v.provider || 'netease') + ':' + v.id;
 // 播放元数据确认后通知资料库，迟到请求不能覆盖当前曲目。
 export class Player {
@@ -5,6 +6,7 @@ export class Player {
         this.host = host;
         this.api = api;
         this.changed = changed;
+        this.lyrics = new Lyrics(host, changed);
         this.queue = [];
         this.index = -1;
         this.current = null;
@@ -84,6 +86,7 @@ export class Player {
         const token = ++this.generation;
         this.host.mediaControl?.('stop');
         this.current = value;
+        this.lyrics.clear();
         this.coverImage = '';
         this.loading = true;
         this.failed = false;
@@ -114,6 +117,7 @@ export class Player {
             }
             // 先同步资料库选中项，再准备当前曲目的音源。
             this.onTrack?.(value);
+            this.lyrics.load(value);
             const track = this.api.playback
                 ? await this.api.playback(
                       value,
@@ -190,6 +194,7 @@ export class Player {
             ...this.state,
             ...this.host.mediaState(),
         };
+        this.lyrics.sync(this.state.position);
         if (Object.keys(this.state).some((key) => this.state[key] !== previous[key])) {
             this.changed();
         }
@@ -277,6 +282,7 @@ export class Player {
      */
     stop() {
         ++this.generation;
+        this.lyrics.clear();
         this.loading = false;
         this.failed = false;
         this.status = '';

@@ -29,6 +29,7 @@ for (const script of [
     'Qt/tests/list-navigation.mjs',
     'Qt/tests/search-groups.mjs',
     'Qt/tests/player-state.mjs',
+    'Qt/tests/lyrics-state.mjs',
     'Qt/tests/discover-state.mjs',
     'Qt/tests/account-actions.mjs',
     'Qt/tests/qq-state.mjs',

@@ -13,7 +13,7 @@ import {
 } from './hud-labels.js';
 import { groupRows } from './groups.js';
 import { pad, time } from './music-items.js';
-import { RollingLabel, SurfaceMotion } from './motion.js';
+import { ReelCurve, RollingLabel, SurfaceMotion } from './motion.js';
 import { PROVIDERS } from './providers.js';
 import { QQ_DEVICE_NOTICE } from './login-state.js';
 // 所有坐标沿用 1080 高的原舞台；文字仍绘制授权字体的原始轮廓。
@@ -45,6 +45,10 @@ export class HUD {
         this.resultStart = 0;
         this.artistTab = 'songs';
         this.queueOffset = 0;
+        this.lyricsMode = false;
+        this.lyricsScroll = 0;
+        this.lyricsScrollStart = -100;
+        this.lyricsBrowse = null;
         this.themeMode = host.preference?.('theme') || 'light';
         this.dark = this.themeMode === 'system' ? !!host.systemDark?.() : this.themeMode === 'dark';
         this.reduced = host.preference?.('motion') === 'reduced';
@@ -236,8 +240,9 @@ export class HUD {
             this.navigation(w);
             this.footer(w);
             if (this.modal !== 'search') {
-                if (frame.mode === 'detail') {
-                    this.detail(w, frame.detail);
+                if (frame.mode === 'detail' || (this.lyricsMode && this.s.player.current)) {
+                    // 歌词入口立即显示正文，左侧唱片仍按原有顺序完成入场动画。
+                    this.detail(w, this.lyricsMode ? 1 : frame.detail);
                 } else {
                     this.archive(w);
                 }
@@ -402,23 +407,37 @@ export class HUD {
             return;
         }
         const x = w * 0.56;
+        if (
+            this.lyricsMode &&
+            (item.id !== music.player.current?.id ||
+                (item.provider || 'netease') !== (music.player.current?.provider || 'netease'))
+        ) {
+            this.lyricsMode = false;
+        }
         const width = w - x - 59;
         const gap = 12;
         const buttonWidth = (width - gap * 2) / 3;
         this.save();
         this.alpha(opacity);
-        this.fill(
-            x - 24,
-            260,
-            width + 48,
-            696,
-            this.dark ? [0.08, 0.095, 0.09, 0.96] : [0.929, 0.922, 0.894, 0.96],
-        );
+        if (!this.lyricsMode) {
+            this.fill(
+                x - 24,
+                260,
+                width + 48,
+                696,
+                this.dark ? [0.08, 0.095, 0.09, 0.96] : [0.929, 0.922, 0.894, 0.96],
+            );
+        }
         this.button('← 返回资料库   ESC', 59, 211, 360, 54, 'back', 20, 'demibold');
         this.limited(item.id, 60, 845, 37, 330);
         this.text('MUSIC DATABASE', 60, 893, 10);
         this.text('DRAG TO INSPECT', 60, 917, 10);
         this.button('查看封面 ↗', 60, 944, 260, 35, 'viewer', 14);
+        if (this.lyricsMode) {
+            this.lyricsPanel(x, width);
+            this.restore();
+            return;
+        }
         this.text('SONG ID / ' + item.id, x, 278, 12);
         const titleLines = this.g.wrap(item.title, width, 32);
         titleLines
@@ -512,6 +531,130 @@ export class HUD {
             );
         }
         this.restore();
+    }
+
+    /**
+     * 大字歌词列表
+     */
+    lyricsPanel(x, width) {
+        const player = this.s.player;
+        const lyrics = player.lyrics;
+        const muted = this.ink.slice();
+        muted[3] = 0.45;
+        this.limited(player.current?.title || '', x, 278, 20, width - 85, 'demibold');
+        this.limited(player.current?.artist || '', x, 310, 13, width - 85);
+        this.button('关闭', x + width - 60, 278, 60, 40, 'player:lyrics-close', 14);
+        const top = 360;
+        const bottom = 889;
+        const document = lyrics?.document;
+        if (!document?.lines.length) {
+            this.save();
+            this.clip(x, top, width, bottom - top);
+            const message = document?.plainText || lyrics?.message || '播放歌曲后显示歌词';
+            const rows = this.g.wrap(message, width - 24, document?.plainText ? 27 : 24);
+            this.lyricsPlainOffset = Math.min(this.lyricsPlainOffset || 0, Math.max(0, rows.length - 9));
+            rows.slice(this.lyricsPlainOffset || 0, (this.lyricsPlainOffset || 0) + 9).forEach((line, i) => {
+                this.text(line, x, top + 55 + i * 48, document?.plainText ? 27 : 24, 'bold', 0, muted);
+            });
+            this.restore();
+            if (lyrics?.status === 'error' || lyrics?.status === 'empty') {
+                this.button('重新查找歌词 ↗', x, 909, 170, 36, 'player:lyrics-retry', 14);
+            }
+            return;
+        }
+        const size = 34;
+        // 换歌、换歌词或窗口宽度变化时重新排版，普通进度轮询复用行高。
+        if (this.lyricsLayoutDocument !== document || this.lyricsLayoutWidth !== width) {
+            this.lyricsLayoutDocument = document;
+            this.lyricsLayoutWidth = width;
+            let height = 0;
+            this.lyricsLayout = document.lines.map((line) => {
+                const text = this.g.wrap(line.text || '•••', width - 24, size, 'bold');
+                const translation = line.translation ? this.g.wrap(line.translation, width - 24, 17) : [];
+                const row = { top: height, text, translation };
+                height += Math.max(1, text.length) * 47 + translation.length * 26 + 32;
+                return row;
+            });
+            this.lyricsLayoutHeight = height;
+            this.lyricsBrowse = null;
+            this.lyricsPlainOffset = 0;
+            this.lyricsTarget = null;
+            this.lyricsCurve = null;
+            this.lyricsScroll = this.lyricsLayout[Math.max(0, lyrics.index)].top;
+        }
+        const active = Math.max(0, lyrics.index);
+        const target = this.lyricsBrowse ?? this.lyricsLayout[active].top;
+        // 在接收新目标前先采样旧曲线，连续滚动接续真实位置和速度，不反复从静止重新起步。
+        const [position, velocity] = this.lyricsCurve?.sample(this.lastTime) || [this.lyricsScroll, 0];
+        this.lyricsScroll = position;
+        if (target !== this.lyricsTarget) {
+            this.lyricsTarget = target;
+            this.lyricsScrollStart = this.lastTime;
+            if (this.reduced) {
+                this.lyricsScroll = target;
+                this.lyricsCurve = null;
+            } else {
+                this.lyricsCurve = new ReelCurve(
+                    position,
+                    target,
+                    velocity,
+                    this.lastTime,
+                    this.lyricsBrowse === null ? 0.42 : 0.18,
+                );
+            }
+        }
+        const focusY = top + 155;
+        const activeTime = document.lines[lyrics.index]?.startMs;
+        this.save();
+        this.clip(x - 4, top, width + 8, bottom - top);
+        document.lines.forEach((line, index) => {
+            const row = this.lyricsLayout[index];
+            const y = focusY + row.top - this.lyricsScroll;
+            const height = row.text.length * 47 + row.translation.length * 26;
+            if (y + height < top || y > bottom) {
+                return;
+            }
+            const color = this.ink.slice();
+            const isActive = lyrics.index >= 0 && line.startMs === activeTime;
+            const edge = Math.max(0, Math.min(1, (y + height - top) / 55, (bottom - y) / 55));
+            color[3] = (isActive ? 1 : 0.28) * edge;
+            row.text.forEach((text, i) => this.text(text, x, y + i * 47, size, 'bold', 0, color));
+            const translatedColor = color.slice();
+            translatedColor[3] *= 0.65;
+            row.translation.forEach((text, i) =>
+                this.text(text, x, y + row.text.length * 47 + i * 26, 17, 'regular', 0, translatedColor),
+            );
+            if (player.state.seekable) {
+                const hitY = Math.max(top, y);
+                this.hit(
+                    x,
+                    hitY,
+                    width,
+                    Math.max(0, Math.min(bottom, y + height + 20) - hitY),
+                    'player:lyric-line:' + index,
+                    line.text || '间奏',
+                );
+            }
+        });
+        this.restore();
+        this.button('歌词提前 0.2s', x, 914, 132, 32, 'player:lyrics-earlier', 13);
+        this.button('歌词延后 0.2s', x + 142, 914, 132, 32, 'player:lyrics-later', 13);
+        let offsetLabel = '未校准';
+        if (lyrics.offsetMs !== 0) {
+            const direction = lyrics.offsetMs > 0 ? '已提前 ' : '已延后 ';
+            offsetLabel = direction + (Math.abs(lyrics.offsetMs) / 1000).toFixed(1) + 's';
+        }
+        this.text(offsetLabel, x + 284, 922, 12, 'regular', 0, muted);
+        this.button('回到当前句', x + width - 125, 914, 125, 32, 'player:lyrics-follow', 13);
+    }
+
+    lyricsAnimating(time) {
+        return (
+            this.lyricsMode &&
+            !this.modal &&
+            !!this.lyricsCurve &&
+            time - this.lyricsCurve.start < this.lyricsCurve.duration
+        );
     }
 
     body() {
@@ -1270,6 +1413,9 @@ export class HUD {
             );
         }
         this.hit(center + 55, y + 14, 44, 56, 'player:next', '下一首');
+        const lyricsX = width * 0.591;
+        this.centeredText('歌词', lyricsX, cy, 15, this.lyricsMode ? 'demibold' : 'regular', true);
+        this.hit(lyricsX - 27, cy - 23, 54, 46, 'player:lyrics', '当前歌曲歌词');
         const stamp = this.clock(p.state.position) + ' / ' + this.clock(p.state.duration);
         this.centeredText(stamp, center, y + 84, 13, 'regular', true);
         const vx = width - 239;
@@ -1371,6 +1517,13 @@ export class HUD {
             ],
             ['酷狗音乐 API / KuGouMusicApi ↗', 'project-kugou', 'https://github.com/MakcRe/KuGouMusicApi'],
             ['界面原项目 / RhineLabUI ↗', 'project-rhine', 'https://github.com/LBEILC/RhineLabUI'],
+            ['歌词参考 / LyricsX ↗', 'project-lyricsx', 'https://github.com/MxIris-LyricsX-Project/LyricsX'],
+            [
+                '格式移植 / LyricsKit ↗',
+                'project-lyricskit',
+                'https://github.com/MxIris-LyricsX-Project/LyricsKit',
+            ],
+            ['同步与匹配参考 / Lyrimuse ↗', 'project-lyrimuse', 'https://github.com/Yudaotor/lyrimuse'],
         ];
     }
 
@@ -1619,6 +1772,45 @@ export class HUD {
             const p = music.player;
             const n = Number(parts[2]);
             switch (parts[1]) {
+                case 'lyrics':
+                    if (p.current) {
+                        this.modal = null;
+                        this.closing = false;
+                        this.lyricsMode = true;
+                        this.lyricsBrowse = null;
+                        music.followPlayback(p.current);
+                        this.r.setMode('detail');
+                        if (this.frame) {
+                            this.frame.mode = 'detail';
+                        }
+                    }
+                    break;
+                case 'lyrics-close':
+                    this.lyricsMode = false;
+                    break;
+                case 'lyrics-follow':
+                    this.lyricsBrowse = null;
+                    break;
+                case 'lyrics-earlier':
+                    p.lyrics.adjustOffset(200);
+                    break;
+                case 'lyrics-later':
+                    p.lyrics.adjustOffset(-200);
+                    break;
+                case 'lyrics-retry':
+                    if (p.current) {
+                        p.lyrics.load(p.current, true);
+                    }
+                    break;
+                case 'lyric-line': {
+                    const line = p.lyrics.document?.lines[n];
+                    if (line && p.state.seekable) {
+                        const position = line.startMs - p.lyrics.document.offsetMs - p.lyrics.offsetMs;
+                        this.host.mediaControl('seek', Math.max(0, Math.min(p.state.duration, position)));
+                        this.lyricsBrowse = null;
+                    }
+                    break;
+                }
                 case 'open':
                     this.openModal('player');
                     break;
@@ -1898,6 +2090,9 @@ export class HUD {
                 case 'project-author':
                 case 'project-player':
                 case 'project-rhine':
+                case 'project-lyricsx':
+                case 'project-lyricskit':
+                case 'project-lyrimuse':
                 case 'project-kugou': {
                     const link = this.links.find((l) => l[1] === parts[1]);
                     if (link) {
@@ -2014,6 +2209,7 @@ export class HUD {
                 this.r.setMode('archive');
                 break;
             case 'back':
+                this.lyricsMode = false;
                 this.r.setMode('archive');
                 break;
             case 'search':
@@ -2128,7 +2324,7 @@ export class HUD {
         this.listOffset = Math.min(desired, Math.max(0, this.rows(lane).length - 5));
     }
 
-    wheel(x, y, delta, steps = undefined) {
+    wheel(x, y, delta, steps = undefined, distance = undefined) {
         if (!this.frame) {
             return;
         }
@@ -2182,6 +2378,15 @@ export class HUD {
             ) {
                 music.loadMoreSource(lane);
             }
+            return;
+        }
+        if (this.lyricsMode && music.current?.kind === 'song' && x >= this.w * 0.56 && y >= 360 && y < 889) {
+            const lastTop = this.lyricsLayout?.[this.lyricsLayout.length - 1]?.top || 0;
+            // 歌词滚动距离处理
+            const movement = distance ?? (-delta / 120) * 65;
+            const current = this.lyricsBrowse ?? this.lyricsScroll;
+            this.lyricsBrowse = Math.max(0, Math.min(lastTop, current + movement));
+            this.lyricsPlainOffset = Math.max(0, (this.lyricsPlainOffset || 0) + step);
             return;
         }
         if (this.frame.mode === 'detail' && music.current?.kind !== 'song') {

@@ -439,7 +439,10 @@ qqPlayer.quality = 'exhigh';
 await qqPlayer.play(parsed, [parsed]);
 assert.match(qqPlayer.status, /已切换为标准音质/);
 assert.deepEqual(
-    calls.slice(-2).map((v) => v.params.quality),
+    calls
+        .filter((call) => call.route === '/qq/getMusicPlay')
+        .slice(-2)
+        .map((v) => v.params.quality),
     ['320', '128'],
 );
 host.request = (route, params, done) => {

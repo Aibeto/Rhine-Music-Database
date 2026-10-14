@@ -27,6 +27,7 @@ const allowed = new Set([
     '/getSongListCategories',
     '/getSongLists',
     '/getMusicPlay',
+    '/getLyric',
 ]);
 let ready;
 let server;
@@ -229,7 +230,10 @@ async function dispatch(message) {
         };
     }
     return {
-        body,
+        body:
+            route === '/getLyric'
+                ? require('./lyrics-format.cjs').normalizeLyrics('qq', body, message.params)
+                : body,
         cookies,
         qqSessions: sessions,
     };

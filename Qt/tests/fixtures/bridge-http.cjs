@@ -12,6 +12,32 @@ const upstreamCrypto = require(
 axios.defaults.adapter = async (settings) => {
     const destination = (settings.baseURL || '') + settings.url;
     if (/\.kugou\.com/.test(destination)) {
+        if (destination.endsWith('/v1/search')) {
+            return {
+                status: 200,
+                data: { status: 200, candidates: [{ id: '42', accesskey: 'fixture-key' }] },
+                headers: {},
+                config: settings,
+            };
+        }
+        if (destination.endsWith('/download')) {
+            const content = '[1000,1000]<0,500,0>本地<500,500,0>歌词\n[3000,1000]<0,1000,0>第二句';
+            const bytes = require('node:zlib').deflateSync(Buffer.from(content));
+            const key = [64, 71, 97, 119, 94, 50, 116, 71, 81, 54, 49, 45, 206, 210, 110, 105];
+            for (let i = 0; i < bytes.length; i++) {
+                bytes[i] ^= key[i % key.length];
+            }
+            return {
+                status: 200,
+                data: {
+                    status: 200,
+                    contenttype: 0,
+                    content: Buffer.concat([Buffer.from('krc1'), bytes]).toString('base64'),
+                },
+                headers: {},
+                config: settings,
+            };
+        }
         // 保留酷狗原包的签名和 Cookie 注入，只提供本地 HTTP 响应。
         if (!settings.params?.mid || !settings.params?.signature) {
             throw new Error('Kugou upstream device or signature missing');
@@ -82,6 +108,12 @@ axios.defaults.adapter = async (settings) => {
                   },
               ],
           };
+    if (destination.includes('/song/lyric/v1')) {
+        data = { code: 200, lrc: { lyric: '[00:01.00]本地歌词\n[00:03.00]第二句' } };
+    }
+    if (destination.includes('fcg_query_lyric_new.fcg')) {
+        data = { code: 0, lyric: Buffer.from('[00:01.00]本地歌词\n[00:03.00]第二句').toString('base64') };
+    }
     if (qq && settings.params?.data) {
         const request = JSON.parse(settings.params.data);
         if (request.req_1?.method === 'GetAll') {

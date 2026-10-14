@@ -115,6 +115,7 @@ class Engine : public QObject {
     double m_wheelY = 0;
     double m_wheelDelta = 0;
     double m_wheelSteps = 0;
+    double m_wheelDistance = 0;
     qint64 m_lastTick = 0, m_lastInput = 0;
     double m_animationTime = 0;
     quint64 m_steps = 0, m_sceneUpdates = 0, m_hudUpdates = 0;

@@ -29,6 +29,8 @@ const ROUTES = Object.freeze([
     '/artist/detail',
     '/artist/audios',
     '/artist/albums',
+    '/search/lyric',
+    '/lyric',
 ]);
 const SECRET_KEYS = new Set([
     'token',
@@ -104,7 +106,10 @@ function createBridge(api, device) {
             await call('/login/token');
         }
         const raw = await call(route, params);
-        let body = publicBody(raw);
+        let body =
+            route === '/lyric'
+                ? require('./lyrics-format.cjs').normalizeLyrics('kugou', raw, params)
+                : publicBody(raw);
         if (route === '/login/qr/key') {
             body = { code: 200, data: { unikey: raw?.data?.qrcode } };
         } else if (route === '/login/qr/create') {

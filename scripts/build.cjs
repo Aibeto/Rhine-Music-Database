@@ -63,7 +63,16 @@ function prepareResources() {
     fs.mkdirSync(bridge, {
         recursive: true,
     });
-    for (const file of ['worker.cjs', 'qq.cjs', 'kugou.cjs', 'package.json', 'package-lock.json']) {
+    for (const file of [
+        'worker.cjs',
+        'qq.cjs',
+        'kugou.cjs',
+        'lyrics-format.cjs',
+        'lyrics-source.json',
+        'LyricsKit-LICENSE',
+        'package.json',
+        'package-lock.json',
+    ]) {
         fs.copyFileSync(path.join('MusicBridge', file), path.join(bridge, file));
     }
     fs.cpSync('MusicBridge/upstream', path.join(bridge, 'upstream'), {
