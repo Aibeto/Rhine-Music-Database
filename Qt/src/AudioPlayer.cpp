@@ -169,9 +169,11 @@ bool AudioPlayer::load(QString input, bool offline, bool alternative, QString pr
     QUrl url(input);
     const auto host = url.host();
     const bool qq = provider == "qq" && (host == "qqmusic.qq.com" || host.endsWith(".qqmusic.qq.com"));
+    const bool kugou = provider == "kugou" && (host.endsWith(".kugou.com") || host.endsWith(".kugou.net"));
     const bool trusted =
-        qq || (provider == "netease" && (host == "music.126.net" || host.endsWith(".music.126.net") ||
-                                         host == "music.163.com" || host.endsWith(".music.163.com")));
+        qq || kugou ||
+        (provider == "netease" && (host == "music.126.net" || host.endsWith(".music.126.net") ||
+                                   host == "music.163.com" || host.endsWith(".music.163.com")));
     const QStringList providers{"qq.com", "gtimg.com", "kuwo.cn", "kugou.com", "migu.cn"};
     const bool alternateHost =
         alternative && std::any_of(providers.begin(), providers.end(), [&](const auto &domain) {
@@ -181,7 +183,8 @@ bool AudioPlayer::load(QString input, bool offline, bool alternative, QString pr
                 : (!(trusted || alternateHost) || !QStringList{"http", "https"}.contains(url.scheme()))) {
         return false;
     }
-    if (url.scheme() == "http") {
+    // 酷狗音源沿用上游返回的协议与签名地址
+    if (url.scheme() == "http" && !kugou) {
         url.setScheme("https");
     }
     player->stop();

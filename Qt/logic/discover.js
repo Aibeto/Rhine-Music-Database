@@ -31,11 +31,12 @@ export class Discover {
         this.s.changed();
         try {
             const qq = this.s.provider === 'qq';
+            const external = this.s.provider !== 'netease';
             const valid = () => token === this.generation && account === this.s.accountGeneration;
             if (tab === 'daily' && !qq && !this.s.uid) {
                 throw new Error('登录后查看每日推荐');
             }
-            if (tab === 'artists' && (!this.s.uid || qq)) {
+            if (tab === 'artists' && (!this.s.uid || external)) {
                 throw new Error('登录网易云后查看收藏歌手');
             }
             let next;
@@ -45,7 +46,7 @@ export class Discover {
                 next = this.s.player.history.filter(
                     (v) => (v.provider || 'netease') === (this.s.provider || 'netease'),
                 );
-            } else if (qq) {
+            } else if (external) {
                 const p = await this.s.api.discover(tab, offset, this.category, valid);
                 next = p.items;
                 rawCount = p.rawCount;
@@ -154,7 +155,7 @@ export class Discover {
         const account = this.s.accountGeneration;
         try {
             let values;
-            if (this.s.provider === 'qq') {
+            if (this.s.provider !== 'netease') {
                 values = await this.s.api.categories(
                     () => token === this.generation && account === this.s.accountGeneration,
                 );

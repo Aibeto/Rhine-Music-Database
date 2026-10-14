@@ -1,4 +1,5 @@
 // 网易云请求与响应校验；登录协议和 Cookie 持久化仍由 Host 与锁定上游处理。
+import { providerName } from './providers.js';
 import { parse } from './music-items.js';
 import { safeLoginDetails } from './login-state.js';
 const parsed = (raw, kind) => (raw || []).map((rawItem) => parse(rawItem, kind)).filter(Boolean);
@@ -40,7 +41,7 @@ export class API {
                 }
                 if (body.code !== undefined && !allow.includes(body.code)) {
                     const failure = new Error(
-                        (this.provider === 'qq' ? 'QQ 音乐' : '网易云') +
+                        providerName(this.provider) +
                             '返回 ' +
                             body.code +
                             '：' +
@@ -51,7 +52,11 @@ export class API {
                     reject(failure);
                     return;
                 }
-                this.host.acceptCookies(JSON.stringify(response.cookies || []), response._epoch);
+                this.host.acceptCookies(
+                    JSON.stringify(response.cookies || []),
+                    response._epoch,
+                    response._credentialKey || '',
+                );
                 resolve(body);
             }),
         );

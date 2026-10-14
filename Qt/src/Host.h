@@ -28,7 +28,8 @@ class Host : public QObject {
     Q_INVOKABLE QString saveCredential();
     Q_INVOKABLE void logout();
     Q_INVOKABLE void setProvider(QString provider);
-    Q_INVOKABLE void acceptCookies(QString json, int responseEpoch);
+    Q_INVOKABLE void setKugouEdition(QString edition);
+    Q_INVOKABLE void acceptCookies(QString json, int responseEpoch, QString credentialKey = {});
     Q_INVOKABLE QString fromLink(QString input) const;
     Q_INVOKABLE void cover(QString url, QJSValue callback);
     Q_INVOKABLE QString qr(QString key);
@@ -108,7 +109,9 @@ class Host : public QObject {
     mutable QCache<QString, QImage> images{32 * 1024};
     qint64 lastStart = 0;
     QHash<QString, qint64> blockedUntil;
+    QHash<QString, QJsonObject> privateCredentials;
     QString provider = "netease";
+    QString kugouEdition = "standard";
     QString active;
     bool stopped = false;
     void pump();

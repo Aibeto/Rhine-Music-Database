@@ -150,3 +150,9 @@ Optional alternative audio matching uses the unchanged @unblockneteasemusic/serv
 0.28.0 dependency from the locked API package (LGPL-3.0-only).
 Source: https://github.com/UnblockNeteaseMusic/server
 Its source and licenses are preserved in the packaged dependency directory.
+
+## 酷狗音乐 API
+
+KuGouMusicApi，MIT。来源：https://github.com/MakcRe/KuGouMusicApi ，锁定提交
+ba3645f2c89e6b9d4fec82ff783c15287e4c5f43（包版本 1.6.2）。原始程序化 API、签名、加密和设备注册模块
+随运行时依赖原样分发，完整许可证保留在 MusicBridge/node_modules/kugoumusicapi/LICENSE。

@@ -91,6 +91,22 @@ bool storageRegression(const QString &directory) {
 
 class AudioPlayerRegression {
   public:
+    // 没有输出设备时不会访问网络，可验证真实 load 路径是否改写了上游地址。
+    static bool sourceRegression() {
+        AudioPlayer audio;
+        audio.defaultOutput = [] { return QAudioDevice(); };
+        audio.followDefaultOutput();
+        const QString raw("http://fs.kugou.com/fixture.mp3?key=fixture&filename=a%20b");
+        bool ok = check(audio.load(raw, false, false, "kugou") && audio.pendingSource == QUrl(raw),
+                        "Kugou preserves upstream scheme and signed query");
+        audio.control("stop");
+        ok &= check(audio.load("http://music.126.net/fixture.mp3", false, false, "netease") &&
+                        audio.pendingSource.scheme() == "https",
+                    "NetEase keeps existing CDN compatibility");
+        audio.control("stop");
+        return ok;
+    }
+
     static bool layoutRegression() {
 #if defined(Q_OS_WIN) && QT_VERSION < QT_VERSION_CHECK(6, 9, 0)
         bool ok = true;
@@ -216,7 +232,8 @@ int main(int argc, char **argv) {
         return 1;
     }
     const bool storage = storageRegression(fixture.path());
-    const bool audio = AudioPlayerRegression::run() && AudioPlayerRegression::layoutRegression();
+    const bool audio = AudioPlayerRegression::run() && AudioPlayerRegression::layoutRegression() &&
+                       AudioPlayerRegression::sourceRegression();
     qInfo() << "Portable storage and default audio output regressions:"
             << (storage && audio ? "PASS" : "FAIL");
     return storage && audio ? 0 : 1;

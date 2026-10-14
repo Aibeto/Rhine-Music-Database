@@ -63,7 +63,7 @@ function prepareResources() {
     fs.mkdirSync(bridge, {
         recursive: true,
     });
-    for (const file of ['worker.cjs', 'qq.cjs', 'package.json', 'package-lock.json']) {
+    for (const file of ['worker.cjs', 'qq.cjs', 'kugou.cjs', 'package.json', 'package-lock.json']) {
         fs.copyFileSync(path.join('MusicBridge', file), path.join(bridge, file));
     }
     fs.cpSync('MusicBridge/upstream', path.join(bridge, 'upstream'), {
@@ -72,6 +72,7 @@ function prepareResources() {
     const bridgePackages = {
         '@neteasecloudmusicapienhanced/api': '4.41.1',
         '@yakult-green-tea/qq-music-api': '3.1.5',
+        kugoumusicapi: '1.6.2',
     };
     if (
         Object.entries(bridgePackages).some(([name, version]) => {

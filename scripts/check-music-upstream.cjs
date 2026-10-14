@@ -21,6 +21,10 @@ assert.equal(pkg.integrity, source.apiIntegrity);
 const qq = lock.packages['node_modules/@yakult-green-tea/qq-music-api'];
 assert.equal(qq.version, '3.1.5');
 assert.equal(qq.integrity, source.qqIntegrity);
+const kugou = lock.packages['node_modules/kugoumusicapi'];
+assert.equal(kugou.version, source.kugouVersion);
+assert.equal(kugou.integrity, source.kugouIntegrity);
+assert.equal(kugou.resolved, 'https://codeload.github.com/MakcRe/KuGouMusicApi/tar.gz/' + source.kugouCommit);
 // 状态编排和拆分后的请求层都不得复制原生协议实现。
 const api = ['Qt/logic/music.js', 'Qt/logic/music-api.js']
     .map((file) => fs.readFileSync(file, 'utf8'))

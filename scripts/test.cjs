@@ -32,6 +32,8 @@ for (const script of [
     'Qt/tests/discover-state.mjs',
     'Qt/tests/account-actions.mjs',
     'Qt/tests/qq-state.mjs',
+    'Qt/tests/kugou-state.mjs',
+    'Qt/tests/kugou-device.cjs',
     'Qt/tests/login-state.mjs',
     'Qt/tests/device-state.cjs',
     'Qt/tests/performance.mjs',
@@ -42,6 +44,7 @@ run('ctest', ['--test-dir', 'output/qt-build', '--output-on-failure']);
 const app = mac ? 'output/RHINE MUSIC DATABASE.app' : 'output/windows/RHINE MUSIC DATABASE';
 const resources = mac ? app + '/Contents/Resources' : app + '/resources';
 run(process.execPath, ['scripts/check-packaged-bridge.cjs', resources + '/MusicBridge']);
+run(process.execPath, ['Qt/tests/kugou-device.cjs', resources + '/MusicBridge']);
 if (mac) {
     run('codesign', ['--verify', '--deep', '--strict', app]);
 }

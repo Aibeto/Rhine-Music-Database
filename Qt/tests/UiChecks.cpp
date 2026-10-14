@@ -354,6 +354,29 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     if (!output.isEmpty()) {
         window->grabWindow().save(output + "/artist-groups.png");
     }
+    // 空歌手目录必须能通过真实按钮和 ESC 返回，不能因缺少首曲而停留在详情模式。
+    for (const bool useKeyboard : {false, true}) {
+        evaluate(R"(
+            App.hud.modal = null;
+            App.music.directory = {
+                item: { kind: 'artist', id: '789658', key: 'kugou:artist:789658', title: 'HOYO-MiX' },
+                songs: [], ids: [], index: 0, parentLane: 0,
+                parentPhysical: App.music.physicalSlots[0][0], parentItem: uiSongs[0],
+            };
+            App.music.showDirectoryInfo();
+        )");
+        check(backend.scene.review("detail"), "empty artist detail scene");
+        refresh();
+        if (useKeyboard) {
+            QKeyEvent escapeEvent(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(window, &escapeEvent);
+            refresh();
+        } else {
+            check(click("music:directory"), "empty artist return button is clickable");
+        }
+        check(evaluate("App.music.directory===null && !App.music.directoryInfo").toBool(),
+              "empty artist restores parent directory");
+    }
     // 静音 PCM 文件验证真实系统解码，不访问网络也不打扰用户。
     QTemporaryDir audioFixture;
     QFile audioFile(audioFixture.filePath("silent.wav"));
@@ -501,6 +524,36 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
           "QQ QR includes device limit guidance");
     if (!output.isEmpty()) {
         window->grabWindow().save(output + "/qq-login.png");
+    }
+    evaluate("App.hud.action('provider');");
+    refresh();
+    check(evaluate("App.hud.hits.filter(function(h){return h.action.indexOf('provider:')===0;}).length===3")
+              .toBool(),
+          "three directly selectable music providers");
+    if (!output.isEmpty()) {
+        window->grabWindow().save(output + "/providers.png");
+    }
+    evaluate("App.music.switchProvider('kugou');App.hud.openModal('login');App.music.loginMethod='qr';");
+    refresh();
+    check(!accountField->isVisible() && !passwordField->isVisible(), "Kugou native QR hides password form");
+    check(evaluate("App.hud.hits.filter(function(h){return h.action.indexOf('music:kugou-edition:')===0;})"
+                   ".length===2")
+              .toBool(),
+          "Kugou standard and concept app choices");
+    if (!output.isEmpty()) {
+        window->grabWindow().save(output + "/kugou-login.png");
+    }
+    evaluate("App.music.switchProvider('kugou','lite');App.hud.openModal('login');");
+    refresh();
+    check(evaluate("App.music.kugouEdition==='lite' && App.music.providerName==='酷狗概念版'").toBool(),
+          "Kugou concept edition selection");
+    if (!output.isEmpty()) {
+        window->grabWindow().save(output + "/kugou-concept-login.png");
+    }
+    evaluate("App.hud.openModal('settings');");
+    refresh();
+    if (!output.isEmpty()) {
+        window->grabWindow().save(output + "/kugou-settings.png");
     }
     const auto previousVisibility = window->visibility();
     backend.action("window:fullscreen");

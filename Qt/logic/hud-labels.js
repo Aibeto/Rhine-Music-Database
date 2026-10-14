@@ -4,6 +4,8 @@ export function sessionLabel(music) {
     if (music.uid) {
         if (music.provider === 'qq') {
             return 'QQ SESSION';
+        } else if (music.provider === 'kugou') {
+            return 'KUGOU SESSION';
         } else {
             return 'NETEASE SESSION';
         }
@@ -75,13 +77,17 @@ export function modalCategory(modal) {
 }
 // 按既有优先级选择界面文案，不修改音乐状态。
 export function modalTitle(modal, music) {
-    if (modal === 'settings') {
+    if (modal === 'provider') {
+        return 'MUSIC PLATFORM';
+    } else if (modal === 'settings') {
         return 'SYSTEM SETTINGS';
     } else if (modal === 'saved') {
         return 'MY MUSIC';
     } else if (modal === 'login') {
         if (music.provider === 'qq') {
             return 'QQ MUSIC LOGIN';
+        } else if (music.provider === 'kugou') {
+            return music.kugouEdition === 'lite' ? 'KUGOU CONCEPT LOGIN' : 'KUGOU LOGIN';
         } else {
             return 'NETEASE LOGIN';
         }
@@ -101,12 +107,16 @@ export function modalTitle(modal, music) {
 }
 // 按既有优先级选择界面文案，不修改音乐状态。
 export function modalSubtitle(modal, music) {
-    if (modal === 'saved') {
+    if (modal === 'provider') {
+        return '直接选择音乐平台 / 各平台账号独立保存';
+    } else if (modal === 'saved') {
         return '我的音乐 / ' + music.nickname;
     } else if (modal === 'settings') {
         return '终端偏好设置';
     } else if (modal === 'login') {
-        return '可选登录，公开搜索不需要账号';
+        return music.provider === 'kugou'
+            ? '使用对应版本酷狗 App 扫码；搜索与个人音乐需要登录'
+            : '可选登录，公开搜索不需要账号';
     } else if (modal === 'player') {
         return '播放队列 / QUEUE';
     } else if (modal === 'discover') {

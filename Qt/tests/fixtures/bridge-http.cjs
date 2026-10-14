@@ -11,6 +11,32 @@ const upstreamCrypto = require(
 );
 axios.defaults.adapter = async (settings) => {
     const destination = (settings.baseURL || '') + settings.url;
+    if (/\.kugou\.com/.test(destination)) {
+        // 保留酷狗原包的签名和 Cookie 注入，只提供本地 HTTP 响应。
+        if (!settings.params?.mid || !settings.params?.signature) {
+            throw new Error('Kugou upstream device or signature missing');
+        }
+        let data = { status: 1, data: { info: [{ rankid: 1, rankname: '本地榜单' }] } };
+        if (destination.endsWith('/v2/qrcode')) {
+            const config = require(path.join(bridge, 'node_modules/kugoumusicapi/util/config.json'));
+            const appid = process.env.RHINE_KUGOU_EDITION === 'lite' ? config.liteAppid : config.appid;
+            if (!settings.params.qrcode_txt.includes('appid=' + appid + '&')) {
+                throw new Error('Kugou QR used the wrong edition appid');
+            }
+            data = { status: 1, data: { qrcode: 'fixture-kugou-qr' } };
+        } else if (destination.endsWith('/v2/get_userinfo_qrcode')) {
+            data = { status: 1, data: { status: 4, token: 'fixture-kugou-token', userid: 42 } };
+        } else if (destination.endsWith('/v2/search/song')) {
+            if (settings.params.token !== 'fixture-kugou-token' || settings.params.dfid !== 'fixture-dfid') {
+                throw new Error('Kugou credentials or registered device missing');
+            }
+            data = {
+                status: 1,
+                data: { lists: [{ FileHash: 'A'.repeat(32), SongName: '本地歌曲' }], total: 1 },
+            };
+        }
+        return { status: 200, data, headers: {}, config: settings };
+    }
     if (!/music\.163\.com|y\.qq\.com/.test(destination)) {
         throw new Error('Unexpected upstream');
     }

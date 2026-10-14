@@ -131,7 +131,7 @@ export class Player {
                 throw new Error('此歌曲暂无可用音源，请检查登录和歌曲权限');
             }
             this.host.mediaMetadata?.(value.title, value.artist || '', value.album || '');
-            if (!this.host.mediaLoad(track.url, this.api.provider === 'qq' ? false : this.alternative)) {
+            if (!this.host.mediaLoad(track.url, this.api.provider === 'netease' && this.alternative)) {
                 throw new Error('音频地址不可用');
             }
             this.endSerial = this.host.mediaState?.().ended ?? 0;

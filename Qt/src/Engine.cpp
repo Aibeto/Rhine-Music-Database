@@ -520,20 +520,32 @@ int Engine::selfTest() {
     ok &= Host::lifetime("/search") == 900 && Host::lifetime("/login/qr/check") == 0 &&
           Host::cacheKey("guest", "/search", {{"keywords", "x"}, {"timestamp", 1}}) ==
               Host::cacheKey("guest", "/search", {{"timestamp", 2}, {"keywords", "x"}});
-    // 本地凭据样本验证两个平台互不退出，原始 QQ 记录不会进入脚本回调。
-    host.cookies = {{"MUSIC_U", "fixture-netease"},
-                    {"qqmusic_session", "fixture-qq"},
-                    {"__qqSessions", QJsonArray{QJsonObject{{"credential", "fixture-secret"}}}}};
+    // 本地凭据样本
+    host.cookies = {
+        {"MUSIC_U", "fixture-netease"},
+        {"qqmusic_session", "fixture-qq"},
+        {"__qqSessions", QJsonArray{QJsonObject{{"credential", "fixture-secret"}}}},
+        {"__kugou", QJsonObject{{"standard", QJsonObject{{"token", "fixture-kugou"}, {"userid", "42"}}},
+                                {"lite", QJsonObject{{"token", "fixture-concept"}, {"userid", "43"}}}}}};
     host.setProvider("qq");
     ok &= host.authenticated();
     host.setProvider("netease");
     host.logout();
     ok &= !host.authenticated() && host.cookies["qqmusic_session"].toString() == "fixture-qq" &&
-          host.cookies["__qqSessions"].isArray();
+          host.cookies["__qqSessions"].isArray() && host.hasCredential("kugou");
     host.setProvider("qq");
     ok &= host.authenticated();
     host.logout();
-    ok &= !host.authenticated() && !host.cookies.contains("__qqSessions");
+    ok &= !host.authenticated() && !host.cookies.contains("__qqSessions") && host.hasCredential("kugou");
+    host.setProvider("kugou");
+    ok &= host.authenticated();
+    host.logout();
+    ok &= !host.authenticated();
+    host.setKugouEdition("lite");
+    ok &= host.authenticated();
+    host.logout();
+    ok &= !host.authenticated() && host.cookies.isEmpty();
+    host.setKugouEdition("standard");
     host.setProvider("netease");
     const auto originalFixture = host.fixture;
     host.fixture = [](QString, QJsonObject) {
@@ -548,6 +560,27 @@ int Engine::selfTest() {
         QCoreApplication::processEvents();
     }
     ok &= check("qqPrivateResult");
+    host.fixture = [](QString, QJsonObject) {
+        return QJsonObject{
+            {"body", QJsonObject{{"code", 803}}},
+            {"kugouCredentials", QJsonObject{{"token", "fixture-kugou-secret"}, {"userid", "42"}}}};
+    };
+    // 代数失效的回调不接受私有认证
+    evaluate("var kgStaleDone=false;App.music.api.request('/kugou/login/qr/check',{},[803],function(){"
+             "return false;}).catch(function(){kgStaleDone=true;});");
+    wait.restart();
+    while (!js.globalObject().property("kgStaleDone").toBool() && wait.elapsed() < 2000) {
+        QCoreApplication::processEvents();
+    }
+    ok &= check("kgStaleDone") && !host.hasCredential("kugou");
+    evaluate("var kgPrivateDone=false;Host.request('/kugou/login/qr/check',{},function(raw){"
+             "var r=JSON.parse(raw);kgPrivateDone=!('kugouCredentials' in r)&&"
+             "raw.indexOf('fixture-kugou-secret')<0;Host.acceptCookies('[]',r._epoch,r._credentialKey);});");
+    wait.restart();
+    while (!js.globalObject().property("kgPrivateDone").toBool() && wait.elapsed() < 2000) {
+        QCoreApplication::processEvents();
+    }
+    ok &= check("kgPrivateDone") && host.hasCredential("kugou");
     host.fixture = originalFixture;
     host.cookies = {};
     QFile fixtureFile(root() + "/scene-fixture.json");

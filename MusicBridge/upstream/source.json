@@ -13,5 +13,10 @@
   "qqVersion": "3.1.5",
   "qqRepository": "https://github.com/yakult-green-tea/qq-music-api",
   "apiIntegrity": "sha512-0QDKtLrSLfz4iP2M57nQTqRQuJkzJV2AUOjHSCSBgqOFQEoGkw4zSue8bbfkzz/lFRLvnIr9SjsrPj95BThxUQ==",
-  "qqIntegrity": "sha512-4qzGd5y+i0BOmyoBTH2yzOI/T+ICkNC0K/8tXCLQzPmSmrIRerZ2wc7jFsWYgRYf/LYKYNA54xedHwRp8Y6E3g=="
+  "qqIntegrity": "sha512-4qzGd5y+i0BOmyoBTH2yzOI/T+ICkNC0K/8tXCLQzPmSmrIRerZ2wc7jFsWYgRYf/LYKYNA54xedHwRp8Y6E3g==",
+  "kugouPackage": "kugoumusicapi",
+  "kugouVersion": "1.6.2",
+  "kugouRepository": "https://github.com/MakcRe/KuGouMusicApi",
+  "kugouCommit": "ba3645f2c89e6b9d4fec82ff783c15287e4c5f43",
+  "kugouIntegrity": "sha512-WDgG7BZRkupBKA5wMmp4Krj2EozmUN+6VTioANGJhUaddslnj/KJwUcwGvkpgFwRuyh4A8RNYswplepCW5HExg=="
 }

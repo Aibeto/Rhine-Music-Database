@@ -24,6 +24,7 @@ async function main() {
                     LANG: 'en_US.UTF-8',
                     RHINE_TEST_BRIDGE: bridge,
                     RHINE_QQ_DEVICE_STATE_PATH: path.join(temp, 'qq-device.json'),
+                    RHINE_KUGOU_DEVICE_STATE_PATH: path.join(temp, 'kugou-device.json'),
                 },
                 stdio: ['pipe', 'pipe', 'pipe'],
             },
@@ -148,6 +149,32 @@ async function main() {
             page: 0,
         });
         assert.equal(chart.body.response.req_1.data.songInfoList[0].mid, 'fixtureMID');
+        const kugouKey = await request('kugou-key', '/kugou/login/qr/key');
+        assert.equal(kugouKey.body.data.unikey, 'fixture-kugou-qr');
+        const kugouImage = await request('kugou-image', '/kugou/login/qr/create', {
+            key: kugouKey.body.data.unikey,
+            qrimg: true,
+            timestamp: Date.now(),
+        });
+        assert.match(kugouImage.body.data.qrimg, /^data:image\/png;base64,/);
+        const kugouLogin = await request('kugou-login', '/kugou/login/qr/check', {
+            key: kugouKey.body.data.unikey,
+        });
+        assert.equal(kugouLogin.body.code, 803);
+        assert.equal(kugouLogin.kugouCredentials.token, 'fixture-kugou-token');
+        assert.equal(JSON.stringify(kugouLogin.body).includes('fixture-kugou-token'), false);
+        const kugouSearch = await request(
+            'kugou-search',
+            '/kugou/search',
+            { keywords: '本地歌曲', type: 'song' },
+            {
+                __kugou: { ...kugouLogin.kugouCredentials, dfid: 'fixture-dfid' },
+            },
+        );
+        assert.equal(kugouSearch.body.data.lists[0].SongName, '本地歌曲');
+        const kugouDevice = JSON.parse(fs.readFileSync(path.join(temp, 'kugou-device.json')));
+        assert.equal(kugouDevice.KUGOU_API_GUID, kugouLogin.kugouCredentials.KUGOU_API_GUID);
+        assert.equal(kugouDevice.token, undefined);
         // 验证原服务失败诊断
         const failedLogin = await request('failed-login', '/qq/login/qr/key', { channel: 'qq' });
         assert.equal(failedLogin.body.code, 502);
@@ -157,7 +184,16 @@ async function main() {
         assert.equal(backedOff.body.code, 429);
         assert.equal(backedOff.body.failureReason, 'local-backoff');
         assert.equal(backedOff.body.lastFailure.failureStage, 'device-bootstrap');
-        for (const route of ['/cloud', '/mv/url', '/personal_fm', '/qq/getLyric', '/qq/getComments']) {
+        for (const route of [
+            '/cloud',
+            '/mv/url',
+            '/personal_fm',
+            '/qq/getLyric',
+            '/qq/getComments',
+            '/kugou/lyric',
+            '/kugou/user/cloud',
+            '/kugou/song/url/new',
+        ]) {
             const rejected = await request(route, route);
             assert.equal(rejected.body.code, 503);
         }

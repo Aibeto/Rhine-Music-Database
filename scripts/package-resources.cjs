@@ -38,7 +38,7 @@ const target = path.join(out, 'MusicBridge');
 fs.mkdirSync(target, {
     recursive: true,
 });
-for (const name of ['worker.cjs', 'qq.cjs', 'NODE-LICENSE']) {
+for (const name of ['worker.cjs', 'qq.cjs', 'kugou.cjs', 'NODE-LICENSE']) {
     fs.copyFileSync(path.join(bridge, name), path.join(target, name));
 }
 const nodeName = process.platform === 'win32' ? 'node.exe' : 'node';
@@ -106,7 +106,7 @@ function copyPackage(name, from, optional = false) {
         copyPackage(dep, location, dep in optionalDeps);
     }
 }
-for (const name of ['@neteasecloudmusicapienhanced/api', '@yakult-green-tea/qq-music-api']) {
+for (const name of ['@neteasecloudmusicapienhanced/api', '@yakult-green-tea/qq-music-api', 'kugoumusicapi']) {
     copyPackage(name, bridge);
 }
 fs.copyFileSync('NOTICE', path.join(out, 'NOTICE'));
@@ -132,6 +132,7 @@ fs.writeFileSync(
         {
             api: '4.41.1',
             qq: '3.1.5',
+            kugou: 'ba3645f2c89e6b9d4fec82ff783c15287e4c5f43',
             endpoints,
             packages: [...visited]
                 .map((p) => ({

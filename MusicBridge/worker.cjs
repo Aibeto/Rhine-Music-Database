@@ -101,6 +101,9 @@ async function dispatch(message) {
     if (message.route?.startsWith('/qq/')) {
         return require('./qq.cjs').dispatch(message);
     }
+    if (message.route?.startsWith('/kugou/')) {
+        return require('./kugou.cjs').dispatch(message);
+    }
     let responseCookies = [];
     const request = async (config) => {
         const moduleName = routes[config.url];
@@ -110,7 +113,7 @@ async function dispatch(message) {
         const query = Object.fromEntries(Object.entries(config.params || {}).map(([k, v]) => [k, String(v)]));
         query.cookie = Object.fromEntries(
             Object.entries(message.cookies || {}).filter(
-                ([key]) => !key.startsWith('__qq') && key !== 'qqmusic_session',
+                ([key]) => !key.startsWith('__') && key !== 'qqmusic_session',
             ),
         );
         let result;

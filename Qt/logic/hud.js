@@ -14,6 +14,7 @@ import {
 import { groupRows } from './groups.js';
 import { pad, time } from './music-items.js';
 import { RollingLabel, SurfaceMotion } from './motion.js';
+import { PROVIDERS } from './providers.js';
 import { QQ_DEVICE_NOTICE } from './login-state.js';
 // 所有坐标沿用 1080 高的原舞台；文字仍绘制授权字体的原始轮廓。
 export class HUD {
@@ -172,7 +173,17 @@ export class HUD {
 
     button(label, x, y, w, h, action, size, weight = 'regular') {
         this.hit(x, y, w, h, action, label);
-        this.text(label, x, y + (h - size) / 2 - 4, size, weight);
+        const inset = this.modalControls ? Math.min(10, w / 8) : 0;
+        if (this.modalControls) {
+            this.fill(x, y, w, h, this.dark ? [0.55, 0.59, 0.46, 0.13] : [0.44, 0.49, 0.36, 0.1]);
+        }
+        this.text(
+            this.modalControls ? this.fit(label, size, w - inset * 2) : label,
+            x + inset,
+            y + (h - size) / 2 - 4,
+            size,
+            weight,
+        );
     }
 
     control(label, x, y, w, action) {
@@ -262,7 +273,8 @@ export class HUD {
 
     navigation(w) {
         this.button('发现音乐 ↗', 59, 211, 180, 35, 'discover', 14);
-        this.button((this.s.providerName || '网易云') + ' ⇄', 259, 211, 180, 35, 'provider', 14);
+        this.fill(259, 211, 205, 35, this.dark ? [0.55, 0.59, 0.46, 0.25] : [0.44, 0.49, 0.36, 0.18]);
+        this.button('平台 / ' + (this.s.providerName || '网易云') + ' ▾', 269, 211, 195, 35, 'provider', 14);
         const x = w - 579;
         this.control('音乐检索  /', x, 118, 184, 'search');
         this.control('＋ 我的音乐', x + 200, 118, 184, 'saved');
@@ -348,7 +360,12 @@ export class HUD {
         const col = w * 0.5234375;
         this.button('←', col, 903, 46, 46, 'column-prev', 28);
         if (!music.directory) {
-            this.text('COLLECTION ' + pad(music.selectedLane + 1) + ' / 05', col + 70, 904, 10);
+            this.text(
+                'COLLECTION ' + pad(music.selectedLane + 1) + ' / ' + pad(music.activeSources?.length || 5),
+                col + 70,
+                904,
+                10,
+            );
             this.roll('music-column', music.libraryName, col + 70, 925, 15, w - col - 360);
         } else {
             const label = 'TRACK COLUMN ' + pad(music.selectedLane + 1) + ' / 05';
@@ -481,7 +498,7 @@ export class HUD {
                 .forEach((line, i) => this.text(line, x, 790 + i * 31, 16));
         }
         this.actionButton(
-            music.provider === 'qq' ? 'QQ 来源页面 ↗' : '官方客户端 ↗',
+            music.provider !== 'netease' ? music.providerName + ' ↗' : '官方客户端 ↗',
             x,
             910,
             buttonWidth,
@@ -576,7 +593,7 @@ export class HUD {
         this.limited(item.title, sx, coverSize + 374, 20, sideWidth, 'bold');
         this.limited(item.artist, sx, coverSize + 410, 14, sideWidth);
         this.text(
-            (music.provider === 'qq' ? 'QQ MID / ' : 'NETEASE ID / ') + item.id,
+            { qq: 'QQ MID / ', kugou: 'KUGOU ID / ', netease: 'NETEASE ID / ' }[music.provider] + item.id,
             sx,
             coverSize + 449,
             11,
@@ -821,6 +838,7 @@ export class HUD {
             this.dark ? [0.15, 0.15, 0.15, 1, 'calibratedWhite'] : [0.929, 0.922, 0.894, 1],
         );
         this.hits = [];
+        this.modalControls = true;
         // 保持原有判断顺序，仅计算当前需要的分支结果。
 
         this.text('RHINE LAB / MUSIC DATABASE / ' + modalCategory(this.modal), x + 53, y + 37, 11);
@@ -831,7 +849,9 @@ export class HUD {
         // 保持原有判断顺序，仅计算当前需要的分支结果。
 
         this.text(modalSubtitle(this.modal, this.s), x + 53, y + 147, 15);
-        if (this.modal === 'confirm') {
+        if (this.modal === 'provider') {
+            this.platformPanel(x, y, width);
+        } else if (this.modal === 'confirm') {
             this.limited(this.confirmTitle || '', x + 53, y + 260, 24, width - 106, 'demibold');
             this.text('此操作将同步至网易云。', x + 53, y + 330, 16);
             this.button('确认删除', x + 53, y + 450, 180, 45, 'confirm:yes', 16);
@@ -869,6 +889,7 @@ export class HUD {
         } else {
             this.libraryPanel(x, y, width);
         }
+        this.modalControls = false;
         this.restore();
     }
     /**
@@ -877,10 +898,31 @@ export class HUD {
      */
     loginPanel(x, y, width) {
         const music = this.s;
-        (music.provider === 'qq' ? ['qr', 'wechat'] : ['qr', 'phone', 'email']).forEach((method, i) =>
+        let methods = ['qr'];
+        if (music.provider === 'qq') {
+            methods = ['qr', 'wechat'];
+        } else if (music.provider === 'netease') {
+            methods = ['qr', 'phone', 'email'];
+        }
+        if (music.provider === 'kugou') {
+            ['standard', 'lite'].forEach((edition, index) => {
+                const label = edition === 'lite' ? '酷狗概念版' : '酷狗标准版';
+                this.button(
+                    (music.kugouEdition === edition ? '✓ ' : '') + label,
+                    x + 53 + index * 190,
+                    y + 207,
+                    180,
+                    35,
+                    'music:kugou-edition:' + edition,
+                    13,
+                );
+            });
+            methods = [];
+        }
+        methods.forEach((method, i) =>
             this.button(
                 {
-                    qr: music.provider === 'qq' ? '手机 QQ 扫码' : '扫码登录',
+                    qr: music.provider === 'qq' ? '手机 QQ 扫码' : music.providerName + '扫码',
                     wechat: '微信扫码',
                     phone: '手机登录',
                     email: '邮箱登录',
@@ -933,7 +975,7 @@ export class HUD {
         this.rule(x + 53, y + 248, width - 106);
         let filters;
         if (this.modal === 'saved') {
-            filters = music.columns.slice(1);
+            filters = music.columns.slice(1, music.provider === 'kugou' ? 4 : 5);
         } else if (music.provider === 'qq') {
             filters = ['歌曲'];
         } else {
@@ -1068,7 +1110,7 @@ export class HUD {
             ['charts', '排行榜'],
             ['albums', '新专辑'],
             ['categories', '分类歌单'],
-            ...(music.provider === 'qq' ? [] : [['artists', '收藏歌手']]),
+            ...(music.provider !== 'netease' ? [] : [['artists', '收藏歌手']]),
             ['history', '历史'],
         ];
         tabs.forEach(([key, label], i) => {
@@ -1299,7 +1341,7 @@ export class HUD {
             16,
         );
         this.button(
-            this.s.provider === 'qq' ? 'QQ 来源页面 ↗' : '官方客户端 ↗',
+            this.s.provider !== 'netease' ? this.s.providerName + ' ↗' : '官方客户端 ↗',
             left + 165,
             y + 761,
             175,
@@ -1329,83 +1371,125 @@ export class HUD {
                 'project-player',
                 'https://github.com/yakult-green-tea/qq-music-api',
             ],
+            ['酷狗音乐 API / KuGouMusicApi ↗', 'project-kugou', 'https://github.com/MakcRe/KuGouMusicApi'],
             ['界面原项目 / RhineLabUI ↗', 'project-rhine', 'https://github.com/LBEILC/RhineLabUI'],
         ];
     }
 
+    /**
+     * 平台选择卡片
+     */
+    platformChoices(x, y, width, expanded = false) {
+        const gap = 12;
+        const cardWidth = (width - gap * 2) / 3;
+        PROVIDERS.forEach((provider, index) => {
+            const left = x + index * (cardWidth + gap);
+            const selected = this.s.provider === provider.id;
+            const height = expanded ? 190 : 66;
+            const tint = this.dark
+                ? [0.55, 0.59, 0.46, selected ? 0.3 : 0.12]
+                : [0.44, 0.49, 0.36, selected ? 0.23 : 0.09];
+            this.fill(left, y, cardWidth, height, tint);
+            this.hit(left, y, cardWidth, height, 'provider:' + provider.id, provider.name);
+            if (selected) {
+                this.fill(left, y, 3, height, this.dark ? [0.7, 0.75, 0.53, 1] : [0.44, 0.49, 0.36, 1]);
+            }
+            this.text(provider.label + (selected ? ' / ACTIVE' : ''), left + 16, y + 10, 10);
+            this.text(provider.name, left + 16, y + 29, expanded ? 22 : 17, 'demibold');
+            if (expanded) {
+                this.g
+                    .wrap(provider.detail, cardWidth - 32, 14)
+                    .slice(0, 3)
+                    .forEach((line, row) => {
+                        this.text(line, left + 16, y + 75 + row * 21, 14);
+                    });
+                const authenticated = this.host.hasCredential?.(provider.id);
+                this.text(authenticated ? '本机已保存登录' : '未登录 / 可选择后扫码', left + 16, y + 150, 12);
+            }
+        });
+    }
+
+    platformPanel(x, y, width) {
+        this.text('PROVIDER ACCESS / 音乐平台', x + 53, y + 222, 13, 'demibold');
+        this.platformChoices(x + 53, y + 258, width - 106, true);
+        this.rule(x + 53, y + 490, width - 106, 0.2);
+        this.text('切换平台会停止当前播放，各平台账号与个人音乐独立保存。', x + 53, y + 520, 15);
+        this.text('网易云保留歌单编辑；QQ 与酷狗先提供读取和播放。', x + 53, y + 558, 15);
+        this.button('账号登录 / ' + this.s.providerName, x + 53, y + 660, 330, 48, 'music:login', 16);
+    }
+
     settings(x, y, width) {
         const music = this.s;
+        const left = x + 53;
+        const usable = width - 106;
+        this.text('PROVIDER ACCESS / 音乐平台', left, y + 184, 12, 'demibold');
+        this.platformChoices(left, y + 210, usable);
         this.button(
-            '平台：' + (music.providerName || '网易云') + ' ⇄',
-            x + width - 300,
-            y + 182,
-            247,
-            35,
-            'provider',
-            14,
-        );
-        this.button(
-            music.uid ? '退出登录：' + music.nickname : '登录' + (music.providerName || '网易云') + ' →',
-            x + 53,
-            y + 182,
-            400,
-            35,
+            music.uid ? '退出登录 / ' + music.nickname : '登录 / ' + music.providerName,
+            left,
+            y + 290,
+            340,
+            38,
             music.uid ? 'music:logout' : 'music:login',
-            12,
+            13,
         );
-        // 保持原有判断顺序，仅计算当前需要的分支结果。
-
+        this.limited('各平台账号独立保存', left + 365, y + 301, 12, usable - 365);
+        this.text('TERMINAL PREFERENCES / 终端偏好', left, y + 348, 12, 'demibold');
+        const qualities = {
+            standard: '标准',
+            higher: '较高',
+            exhigh: '极高',
+            lossless: '无损',
+            hires: 'Hi-Res',
+            jymaster: '母带',
+        };
         const rows = [
             ['COLOR THEME / 界面配色', themeLabel(this.themeMode, this.dark), 'theme'],
             ['REDUCED MOTION / 动态效果', this.reduced ? '减少动态效果' : '完整动效', 'motion'],
-            [
-                'AUDIO QUALITY / 音质',
-                {
-                    standard: '标准',
-                    higher: '较高',
-                    exhigh: '极高',
-                    lossless: '无损',
-                    hires: 'Hi-Res',
-                    jymaster: '母带',
-                }[music.player.quality],
-                'quality',
-            ],
-            ...(music.provider === 'qq'
-                ? []
-                : [
+            ['AUDIO QUALITY / 音质', qualities[music.player.quality], 'quality'],
+            ...(music.provider === 'netease'
+                ? [
                       [
                           'ALTERNATE SOURCE / 替代音源',
                           music.player.alternative ? '开启（音质由来源决定）' : '关闭',
                           'alternative',
                       ],
-                  ]),
+                  ]
+                : []),
             [
                 'OFFICIAL PLAYER / 官方窗口',
                 this.host.activates() ? '播放时显示' : '尽量保持后台',
                 'music:activate',
             ],
         ];
-        rows.forEach((row, i) => {
-            const yy = y + 264 + i * 72;
-            this.rule(x + 53, yy - 13, width - 106, 0.2);
-            this.text(row[0], x + 53, yy, 16, 'demibold');
-            this.button(row[1], x + width - 252, yy - 1, 200, 35, row[2], 14);
+        rows.forEach((row, index) => {
+            const yy = y + 377 + index * 50;
+            this.fill(left, yy, usable, 44, this.dark ? [1, 1, 1, 0.025] : [0, 0, 0, 0.025]);
+            this.text(row[0], left + 12, yy + 12, 15, 'demibold');
+            this.button(row[1], left + usable - 235, yy + 4, 225, 36, row[2], 13);
         });
         this.text(
-            '← → 切换来源 / ↑ ↓ 选曲 / ENTER 查看 / ' +
-                (this.host.modifierKey ? this.host.modifierKey() : '⌘') +
-                ' ENTER 播放 / ESC 返回',
-            x + 53,
-            y + 670,
-            14,
+            '↑ ↓ 选曲 / ENTER 查看 / ' + (this.host.modifierKey?.() || '⌘') + ' ENTER 播放 / ESC 返回',
+            left,
+            y + 654,
+            12,
         );
-        this.text('PROJECT / 项目与开源参考', x + 53, y + 707, 11);
-        this.links.forEach((link, i) =>
-            this.button(link[0], x + 53, y + 734 + i * 26, 580, 26, 'music:' + link[1], 16),
+        this.rule(left, y + 687, usable, 0.2);
+        this.text('PROJECT / 项目与开源参考', left, y + 702, 10, 'demibold');
+        const linkWidth = (usable - 280 - 12) / 2;
+        this.links.forEach((link, index) =>
+            this.button(
+                link[0],
+                left + (index % 2) * (linkWidth + 8),
+                y + 725 + Math.floor(index / 2) * 28,
+                linkWidth,
+                25,
+                'music:' + link[1],
+                11,
+            ),
         );
-        this.button('切换全屏 / F11', x + width - 330, y + 653, 277, 45, 'window:fullscreen', 16);
-        this.button('REINITIALIZE SYSTEM ↻', x + width - 330, y + 709, 277, 45, 'replay', 16);
-        this.limited(music.status, x + 53, y + 846, 11, width - 106);
+        this.button('切换全屏 / F11', left + usable - 260, y + 725, 260, 36, 'window:fullscreen', 13);
+        this.button('REINITIALIZE SYSTEM ↻', left + usable - 260, y + 769, 260, 36, 'replay', 13);
     }
 
     openModal(kind) {
@@ -1421,6 +1505,9 @@ export class HUD {
         this.artistTab = 'songs';
         if (kind === 'saved') {
             this.musicCollection = Math.max(1, this.s.selectedLane);
+            if (this.s.provider === 'kugou' && this.musicCollection === 4) {
+                this.musicCollection = 2;
+            }
             if (!this.s.lists[this.musicCollection].length) {
                 this.s.loadMoreSource(this.musicCollection);
             }
@@ -1472,22 +1559,20 @@ export class HUD {
             return;
         }
         if (action === 'provider') {
+            this.openModal('provider');
+            return;
+        }
+        if (action.startsWith('provider:')) {
+            const provider = action.slice('provider:'.length);
+            if (this.s.provider === provider) {
+                return;
+            }
             ++this.searchGeneration;
             this.activeGroup = null;
             this.query = '';
             this.listOffset = 0;
             this.trackOffset = 0;
-            const provider = this.s.provider === 'qq' ? 'netease' : 'qq';
-            this.s.switchProvider(provider).then(() => {
-                if (this.s.provider !== provider) {
-                    return;
-                }
-                if (this.modal === 'discover') {
-                    this.s.discover.load();
-                } else if (this.modal === 'saved') {
-                    this.s.loadMoreSource(this.musicCollection);
-                }
-            });
+            this.s.switchProvider(provider);
             return;
         }
         if (action === 'confirm:yes') {
@@ -1608,7 +1693,10 @@ export class HUD {
             return;
         }
         if (action === 'column-prev' || action === 'column-next') {
-            music.showSource((music.selectedLane + (action === 'column-next' ? 1 : 4)) % 5);
+            const sources = music.activeSources || [0, 1, 2, 3, 4];
+            const index = sources.indexOf(music.selectedLane);
+            const direction = action === 'column-next' ? 1 : -1;
+            music.showSource(sources[(index + direction + sources.length) % sources.length]);
             return;
         }
         if (action.startsWith('music:')) {
@@ -1809,7 +1897,8 @@ export class HUD {
                 case 'project-home':
                 case 'project-author':
                 case 'project-player':
-                case 'project-rhine': {
+                case 'project-rhine':
+                case 'project-kugou': {
                     const link = this.links.find((l) => l[1] === parts[1]);
                     if (link) {
                         this.host.open(link[2]);
@@ -1820,6 +1909,13 @@ export class HUD {
                     this.openModal('login');
                     music.loginMethod = 'qr';
                     music.startLogin();
+                    break;
+                case 'kugou-edition':
+                    music.switchProvider('kugou', parts[2]).then(() => {
+                        if (this.modal === 'login') {
+                            music.startLogin();
+                        }
+                    });
                     break;
                 case 'login-method':
                     music.cancelLogin();
@@ -1969,6 +2065,9 @@ export class HUD {
     }
 
     key(key, command) {
+        if (!this.frame) {
+            return;
+        }
         if (key === 'Enter' && command) {
             this.s.play();
             return;
@@ -2030,6 +2129,9 @@ export class HUD {
     }
 
     wheel(x, y, delta, steps = undefined) {
+        if (!this.frame) {
+            return;
+        }
         if (!Number.isFinite(delta) || delta === 0) {
             return;
         }

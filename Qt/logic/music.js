@@ -1,5 +1,7 @@
 // 资料库状态编排：选择、分页、账号和播放联动；请求及条目解析位于独立模块。
 import { QQAPI } from './qq.js';
+import { KugouAPI } from './kugou.js';
+import { PROVIDERS, providerName } from './providers.js';
 import { Player } from './player.js';
 import { Discover } from './discover.js';
 import { API } from './music-api.js';
@@ -7,6 +9,16 @@ import { safeLoginDetails, loginFailureMessage } from './login-state.js';
 import { item, parse } from './music-items.js';
 export { API } from './music-api.js';
 export { item, parse, pad, time } from './music-items.js';
+function createAPI(host, provider) {
+    const base = new API(host);
+    if (provider === 'qq') {
+        return new QQAPI(base);
+    }
+    if (provider === 'kugou') {
+        return new KugouAPI(base);
+    }
+    return base;
+}
 const unique = (existing, values) => {
     const keys = new Set(existing.map((x) => x.key));
     return existing.concat(
@@ -39,9 +51,10 @@ export class MusicStore {
      */
     constructor(host, runtime, content) {
         this.host = host;
-        this.provider = host.preference?.('provider') === 'qq' ? 'qq' : 'netease';
-        const base = new API(host);
-        this.api = this.provider === 'qq' ? new QQAPI(base) : base;
+        this.selectedKugouEdition = host.preference?.('kugou-edition') === 'lite' ? 'lite' : 'standard';
+        const preferred = host.preference?.('provider');
+        this.provider = PROVIDERS.some((entry) => entry.id === preferred) ? preferred : 'netease';
+        this.api = createAPI(host, this.provider);
         host.setProvider?.(this.provider);
         this.player = new Player(host, this.api, () => this.changed());
         this.runtime = runtime;
@@ -66,6 +79,10 @@ export class MusicStore {
         this.identityNames = {
             netease: host.preference?.('welcome-name-netease') || '',
             qq: host.preference?.('welcome-name-qq') || '',
+            kugou:
+                host.preference?.(
+                    'welcome-name-kugou-' + (host.preference?.('kugou-edition') || 'standard'),
+                ) || '',
         };
         this.selectedPhysical = -1;
         this.selectedLane = 0;
@@ -180,7 +197,7 @@ export class MusicStore {
     }
 
     get identityName() {
-        return this.identityNames.netease || this.identityNames.qq;
+        return this.identityNames.netease || this.identityNames.qq || this.identityNames.kugou;
     }
 
     rememberIdentityName(provider, name) {
@@ -189,9 +206,10 @@ export class MusicStore {
             return;
         }
         this.identityNames[provider] = nickname;
-        this.host.setPreference?.('welcome-name-' + provider, nickname);
+        const accountKey = provider === 'kugou' ? this.accountKey : provider;
+        this.host.setPreference?.('welcome-name-' + accountKey, nickname);
         if (provider === this.provider && this.uid) {
-            this.host.setPreference?.('account-id-' + provider, this.uid);
+            this.host.setPreference?.('account-id-' + accountKey, this.uid);
         }
     }
 
@@ -206,8 +224,7 @@ export class MusicStore {
         }
         const token = this.accountGeneration;
         const valid = () => token === this.accountGeneration;
-        const base = new API(this.host);
-        const api = provider === 'qq' ? new QQAPI(base) : base;
+        const api = createAPI(this.host, provider);
         try {
             const [, name] = await api.account(valid);
             if (!valid()) {
@@ -223,7 +240,7 @@ export class MusicStore {
     // 只恢复具有本机凭据的账号显示，服务器验证仍由 restoreAccount 完成。
     restoreCachedAccount() {
         const hasCredential = this.host.authenticated?.() || false;
-        this.uid = hasCredential ? this.host.preference?.('account-id-' + this.provider) || '' : '';
+        this.uid = hasCredential ? this.host.preference?.('account-id-' + this.accountKey) || '' : '';
         this.nickname = hasCredential ? this.identityNames[this.provider] || '正在恢复登录…' : '未登录';
     }
 
@@ -270,8 +287,19 @@ export class MusicStore {
         }
     }
 
+    get kugouEdition() {
+        return this.selectedKugouEdition;
+    }
+
+    get accountKey() {
+        return this.provider === 'kugou' ? 'kugou-' + this.kugouEdition : this.provider;
+    }
+
     get providerName() {
-        return this.provider === 'qq' ? 'QQ 音乐' : '网易云';
+        if (this.provider === 'kugou' && this.kugouEdition === 'lite') {
+            return '酷狗概念版';
+        }
+        return providerName(this.provider);
     }
 
     get editable() {
@@ -281,8 +309,13 @@ export class MusicStore {
      * 切换音乐来源并作废旧来源尚未完成的请求。
      * 先停止登录与播放，再清理状态并建立新接口，避免迟到回调恢复旧内容。
      */
-    async switchProvider(provider) {
-        if (!['netease', 'qq'].includes(provider) || provider === this.provider) {
+    async switchProvider(provider, edition = '') {
+        const editionChanged =
+            provider === 'kugou' && ['standard', 'lite'].includes(edition) && edition !== this.kugouEdition;
+        if (
+            !PROVIDERS.some((entry) => entry.id === provider) ||
+            (provider === this.provider && !editionChanged)
+        ) {
             return;
         }
         this.cancelLogin();
@@ -296,9 +329,15 @@ export class MusicStore {
         this.player.stop();
         this.runtime.musicClear?.();
         this.provider = provider;
+        if (editionChanged) {
+            this.selectedKugouEdition = edition;
+            this.host.setKugouEdition?.(edition);
+            this.host.setPreference?.('kugou-edition', edition);
+            this.identityNames.kugou = this.host.preference?.('welcome-name-' + this.accountKey) || '';
+        }
         this.host.setProvider?.(provider);
         this.host.setPreference?.('provider', provider);
-        this.api = provider === 'qq' ? new QQAPI(new API(this.host)) : new API(this.host);
+        this.api = createAPI(this.host, provider);
         this.player.api = this.api;
         this.restoreCachedAccount();
         this.loginStatus = '';
@@ -413,11 +452,16 @@ export class MusicStore {
         if (this.selectedPhysical === selected) {
             return;
         }
-        this.selectedPhysical = selected;
         const lane = this.physicalSlots.findIndex((a) => a.includes(selected));
         if (lane < 0) {
             return;
         }
+        if (this.provider === 'kugou' && lane === 4) {
+            // 资料库保持原有五列外壳，禁用的收藏专辑列不接受选择或请求。
+            this.call('select', this.physicalSlots[this.selectedLane][this.rowMemory[this.selectedLane]]);
+            return;
+        }
+        this.selectedPhysical = selected;
         const row = this.physicalSlots[lane].indexOf(selected);
         this.selectedLane = lane;
         this.rowMemory[lane] = row;
@@ -663,6 +707,9 @@ export class MusicStore {
             return;
         }
         try {
+            if (this.provider === 'kugou') {
+                return;
+            }
             const responseBody = await this.api.request(
                 this.provider === 'qq' ? '/getSmartbox' : '/search/suggest',
                 this.provider === 'qq'
@@ -693,7 +740,16 @@ export class MusicStore {
         }
     }
 
+    get activeSources() {
+        return this.provider === 'kugou' ? [0, 1, 2, 3] : [0, 1, 2, 3, 4];
+    }
+
     showSource(lane) {
+        if (this.provider === 'kugou' && lane === 4) {
+            this.status = '酷狗 API 未提供收藏专辑，此栏目已禁用';
+            this.changed();
+            return;
+        }
         this.privateSelection = lane > 0;
         if (this.directory) {
             this.leaveDirectory(false);
@@ -770,6 +826,12 @@ export class MusicStore {
     }
 
     async loadMoreSource(lane) {
+        if (this.provider === 'kugou' && lane === 4) {
+            this.hasMore[lane] = false;
+            this.status = '酷狗 API 未提供收藏专辑，此栏目已禁用';
+            this.changed();
+            return;
+        }
         if (lane < 0 || lane >= 5 || this.personalLoading || !this.hasMore[lane]) {
             return;
         }
@@ -786,7 +848,7 @@ export class MusicStore {
         const user = this.uid;
         this.changed();
         try {
-            if (lane === 1 && this.provider === 'qq') {
+            if (lane === 1 && this.provider !== 'netease') {
                 const page = await this.api.likedSongs(
                     this.likedCursor,
                     () => token === this.accountGeneration,
@@ -966,7 +1028,7 @@ export class MusicStore {
         if (value?.kind !== 'song') {
             return;
         }
-        if ((value.provider || this.provider) === 'qq') {
+        if ((value.provider || this.provider) !== 'netease') {
             this.host.open(this.sourceURL(value));
             return;
         }
@@ -983,6 +1045,9 @@ export class MusicStore {
         if ((value.provider || this.provider) === 'netease') {
             return 'https://music.163.com/#/' + value.kind + '?id=' + value.id;
         }
+        if ((value.provider || this.provider) === 'kugou') {
+            return 'https://www.kugou.com/';
+        }
         const paths = {
             song: 'songDetail',
             album: 'albumDetail',
@@ -994,7 +1059,7 @@ export class MusicStore {
 
     async mutate(route, values, success) {
         if (!this.editable) {
-            this.status = 'QQ 音乐当前支持读取与播放';
+            this.status = this.providerName + '当前支持读取与播放';
             this.changed();
             return false;
         }
@@ -1297,7 +1362,7 @@ export class MusicStore {
             if (isExpired) {
                 this.uid = '';
                 this.nickname = '登录已失效';
-                this.host.setPreference?.('account-id-' + this.provider, '');
+                this.host.setPreference?.('account-id-' + this.accountKey, '');
                 this.status = '登录已失效，请重新登录';
             } else {
                 // 临时网络失败不删除账号和凭据，切换回来仍可继续验证。
@@ -1359,11 +1424,13 @@ export class MusicStore {
                 throw new Error('二维码生成失败');
             }
             this.qrKey = key;
-            if (this.provider === 'qq') {
+            if (this.provider !== 'netease') {
                 const image = await this.api.request(
                     '/login/qr/create',
                     {
                         key,
+                        qrimg: true,
+                        timestamp: Date.now(),
                     },
                     [200],
                     () => token === this.loginGeneration,
@@ -1373,11 +1440,11 @@ export class MusicStore {
                 }
                 const data = image.data?.qrimg;
                 if (typeof data !== 'string' || !/^data:image\/(png|jpeg|gif|webp);base64,/.test(data)) {
-                    throw new Error('QQ 二维码格式无效');
+                    throw new Error(this.providerName + '二维码格式无效');
                 }
                 this.qr = this.host.qrImage(data);
                 if (!this.qr) {
-                    throw new Error('QQ 二维码读取失败');
+                    throw new Error(this.providerName + '二维码读取失败');
                 }
             } else {
                 this.qr = this.host.qr(key);
@@ -1392,7 +1459,7 @@ export class MusicStore {
                         return '手机 QQ';
                     }
                 } else {
-                    return '网易云';
+                    return this.providerName;
                 }
             };
             this.loginPhase = 'waiting';
@@ -1525,7 +1592,7 @@ export class MusicStore {
         this.cancelLogin();
         ++this.accountGeneration;
         this.host.logout();
-        this.host.setPreference?.('account-id-' + this.provider, '');
+        this.host.setPreference?.('account-id-' + this.accountKey, '');
         this.uid = '';
         this.nickname = '未登录';
         this.likedIDs = null;
@@ -1817,6 +1884,11 @@ export class MusicStore {
 
     returnToDirectory() {
         if (this.directory) {
+            // 空目录没有可选曲目，直接恢复父目录，保证返回按钮和 ESC 始终可用。
+            if (!this.directory.songs.length) {
+                this.leaveDirectory();
+                return;
+            }
             this.selectDirectory(this.directory.index);
         }
         this.changed();
