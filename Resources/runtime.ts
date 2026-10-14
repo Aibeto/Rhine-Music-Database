@@ -1,5 +1,5 @@
 import { preparePicking, setPicking } from './picking';
-import { NativeElement } from './platform';
+import { NativeElement, compactNativeGeometry, NATIVE_HIDDEN_SURFACES } from './platform';
 import * as THREE from '../node_modules/three/build/three.module.js';
 import { ModelViewer } from '../Scene/model-viewer';
 import { ArchiveScene } from '../Scene/scene';
@@ -97,6 +97,7 @@ function setMode(value: string) {
     }
 }
 async function init() {
+    compactNativeGeometry();
     await scene.load();
     preparePicking(scene.scene);
     scene.resize();
@@ -105,10 +106,32 @@ async function init() {
     setMode('boot');
 }
 let frameBuffers: Float32Array[] = [];
+const IDENTITY_MATRIX = new THREE.Matrix4();
+const PACKET_STRIDE = 23;
+const DEFINITION_FIELDS = [
+    'musicKey',
+    'musicSelected',
+    'shadowOnly',
+    'mesh',
+    'asset',
+    'id',
+    'instanced',
+    'label',
+    'floor',
+    'transparent',
+    'depthWrite',
+    'order',
+    'side',
+    'name',
+    'castShadow',
+] as const;
+const drawDefinitions = new Map<number, Record<(typeof DEFINITION_FIELDS)[number], unknown>>();
+let packetData = new Float64Array(0);
+let packetLength = 0;
 /**
  * 生成当前场景的可序列化帧，保持矩阵、实例索引和拾取数据一致。
  */
-function frame(time: number, binary = false, diagnostics = true) {
+function frame(time: number, binary = false, diagnostics = true, packed = false, advance = true) {
     const buffers: Float32Array[] = [];
     const bufferIDs = new Map<any, number>();
     function bufferID(array: any) {
@@ -140,10 +163,11 @@ function frame(time: number, binary = false, diagnostics = true) {
     if (mode === 'boot' && t >= 35) {
         setMode('detail');
     }
-    if (sceneFreeze === null && (!cinema || t >= 21.9)) {
+    if (advance && sceneFreeze === null && (!cinema || t >= 21.9)) {
         scene.update(time, cinema);
     }
-    for (const a of (globalThis as any).nativeAnimations ?? []) {
+    const nativeAnimations = (globalThis as any).nativeAnimations ?? [];
+    for (const a of advance ? nativeAnimations : []) {
         if (
             !a.cancelled &&
             !a.done &&
@@ -154,13 +178,23 @@ function frame(time: number, binary = false, diagnostics = true) {
             a.finish();
         }
     }
+    // 完成和取消的动画不得持续持有查看器元素、回调与 Promise。
+    (globalThis as any).nativeAnimations = nativeAnimations.filter((a: any) => !a.cancelled && !a.done);
     viewer.setTheme(scene.themeAmount);
-    viewer.update(time);
+    if (advance) {
+        viewer.update(time);
+    }
     const renderScene = viewer.isOpen ? (viewer as any).scene : scene.scene;
     const camera = viewer.isOpen ? (viewer as any).camera : scene.camera;
-    renderScene.updateMatrixWorld(true);
+    // 资料库 update 已同步世界矩阵；只有查看器需要在这里同步，避免每帧重复遍历全部归位副本。
+    if (viewer.isOpen) {
+        renderScene.updateMatrixWorld(true);
+    }
     camera.updateMatrixWorld(true);
     const draws: any[] = [];
+    const definitions: any[] = [];
+    const activeIDs = new Set<number>();
+    packetLength = 0;
     renderScene.traverseVisible((o: any) => {
         if (!o.isMesh) {
             return;
@@ -171,7 +205,16 @@ function frame(time: number, binary = false, diagnostics = true) {
         }
         const g = o.geometry;
         const m = o.material;
-        const sourceMatrices = o.isInstancedMesh ? o.instanceMatrix.array : o.matrixWorld.elements;
+        const surfaceName = o.userData.surface ?? m.name;
+        if (NATIVE_HIDDEN_SURFACES.has(surfaceName)) {
+            return;
+        }
+        let sourceMatrices = o.isInstancedMesh ? o.instanceMatrix.array : o.matrixWorld.elements;
+        // 同一卡片的无局部变换部件共享父矩阵，一次跨引擎传输即可覆盖全部表面。
+        // 查看器爆炸、独立部件变换与实例矩阵仍读取各自原始数据。
+        if (binary && !o.isInstancedMesh && o.parent === owner && o.matrix.equals(IDENTITY_MATRIX)) {
+            sourceMatrices = owner.matrixWorld.elements;
+        }
         const sourceThemes =
             o.isInstancedMesh && g.attributes.archiveTheme ? g.attributes.archiveTheme.array : [];
         let matrices;
@@ -182,44 +225,133 @@ function frame(time: number, binary = false, diagnostics = true) {
         } else {
             matrices = sourceMatrices;
         }
-        draws.push({
-            musicKey: owner.userData.musicKey ?? null,
-            musicSelected: owner === (scene as any).model || viewer.isOpen,
-            shadowOnly: !!o.userData.shadowOnly,
-            mesh: g.userData.nativeMesh ?? -1,
-            asset: g.userData.asset ?? 'cassette',
-            id: o.id,
-            instanced: !!o.isInstancedMesh,
-            themes: binary ? [] : Array.from(sourceThemes.slice(0, o.count)),
-            matrixBuffer: binary ? bufferID(sourceMatrices) : -1,
-            themeBuffer: binary ? bufferID(sourceThemes) : -1,
-            matrices,
-            count: o.isInstancedMesh ? o.count : 1,
-            label: g.userData.nativeMesh === undefined && o.name !== 'archive-floor',
-            floor: o.name === 'archive-floor',
-            color: m.color.toArray(),
-            roughness: m.roughness ?? 1,
-            metalness: m.metalness ?? 0,
-            transmission: m.transmission ?? 0,
-            thickness: m.thickness ?? 0,
-            ior: m.ior ?? 1.5,
-            attenuation: m.attenuationColor?.toArray() ?? [1, 1, 1],
-            attenuationDistance: Number.isFinite(m.attenuationDistance) ? m.attenuationDistance : 1e9,
-            opacity: m.opacity,
-            clearcoat: m.clearcoat ?? 0,
-            clearcoatRoughness: m.clearcoatRoughness ?? 0,
-            transparent: m.transparent,
-            depthWrite: m.depthWrite,
-            order: o.renderOrder,
-            side: m.side,
-            quality: o.userData.appearance?.value ?? (m.map ? 1 : 0),
-            clarity: o.userData.glassClarity?.value ?? 0,
-            subdued: o.userData.subduedIndex?.value ?? (scene as any).subduedIndex?.value ?? 0,
-            theme: o.userData.themeAmount?.value ?? scene.themeAmount,
-            name: o.userData.surface ?? m.name,
-            castShadow: o.castShadow,
-        });
+        let definition = drawDefinitions.get(o.id);
+        const musicKey = owner.userData.musicKey ?? null;
+        const musicSelected = owner === (scene as any).model || viewer.isOpen;
+        const shadowOnly = !!o.userData.shadowOnly;
+        const meshIndex = g.userData.nativeMesh ?? -1;
+        const asset = g.userData.asset ?? 'cassette';
+        const instanced = !!o.isInstancedMesh;
+        const label = g.userData.nativeMesh === undefined && o.name !== 'archive-floor';
+        const floor = o.name === 'archive-floor';
+        const definitionChanged =
+            !definition ||
+            definition.musicKey !== musicKey ||
+            definition.musicSelected !== musicSelected ||
+            definition.shadowOnly !== shadowOnly ||
+            definition.mesh !== meshIndex ||
+            definition.asset !== asset ||
+            definition.instanced !== instanced ||
+            definition.label !== label ||
+            definition.floor !== floor ||
+            definition.transparent !== m.transparent ||
+            definition.depthWrite !== m.depthWrite ||
+            definition.order !== o.renderOrder ||
+            definition.side !== m.side ||
+            definition.name !== surfaceName ||
+            definition.castShadow !== o.castShadow;
+        if (!packed || definitionChanged) {
+            definition = {
+                musicKey,
+                musicSelected,
+                shadowOnly,
+                mesh: meshIndex,
+                asset,
+                id: o.id,
+                instanced,
+                label,
+                floor,
+                transparent: m.transparent,
+                depthWrite: m.depthWrite,
+                order: o.renderOrder,
+                side: m.side,
+                name: surfaceName,
+                castShadow: o.castShadow,
+            };
+            if (packed) {
+                drawDefinitions.set(o.id, definition);
+                definitions.push(definition);
+            }
+        }
+        const quality = o.userData.appearance?.value ?? (m.map ? 1 : 0);
+        const clarity = o.userData.glassClarity?.value ?? 0;
+        const subdued = o.userData.subduedIndex?.value ?? (scene as any).subduedIndex?.value ?? 0;
+        const theme = o.userData.themeAmount?.value ?? scene.themeAmount;
+        const count = o.isInstancedMesh ? o.count : 1;
+        const matrixBuffer = binary ? bufferID(sourceMatrices) : -1;
+        const themeBuffer = binary ? bufferID(sourceThemes) : -1;
+        const attenuationDistance = Number.isFinite(m.attenuationDistance) ? m.attenuationDistance : 1e9;
+        if (packed) {
+            activeIDs.add(o.id);
+            if (packetLength + PACKET_STRIDE > packetData.length) {
+                const expanded = new Float64Array(Math.max(PACKET_STRIDE * 64, packetData.length * 2));
+                expanded.set(packetData);
+                packetData = expanded;
+            }
+            // 静态定义只在变化时传 JSON；动态材质和缓冲索引使用双精度字节包，保持原数值。
+            packetData.set(
+                [
+                    o.id,
+                    count,
+                    matrixBuffer,
+                    themeBuffer,
+                    m.color.r,
+                    m.color.g,
+                    m.color.b,
+                    m.roughness ?? 1,
+                    m.metalness ?? 0,
+                    m.transmission ?? 0,
+                    m.thickness ?? 0,
+                    m.ior ?? 1.5,
+                    m.attenuationColor?.r ?? 1,
+                    m.attenuationColor?.g ?? 1,
+                    m.attenuationColor?.b ?? 1,
+                    attenuationDistance,
+                    m.opacity,
+                    m.clearcoat ?? 0,
+                    m.clearcoatRoughness ?? 0,
+                    quality,
+                    clarity,
+                    subdued,
+                    theme,
+                ],
+                packetLength,
+            );
+            packetLength += PACKET_STRIDE;
+        } else {
+            draws.push({
+                ...definition,
+                themes: binary ? [] : Array.from(sourceThemes.slice(0, o.count)),
+                matrixBuffer,
+                themeBuffer,
+                matrices,
+                count,
+                color: m.color.toArray(),
+                roughness: m.roughness ?? 1,
+                metalness: m.metalness ?? 0,
+                transmission: m.transmission ?? 0,
+                thickness: m.thickness ?? 0,
+                ior: m.ior ?? 1.5,
+                attenuation: m.attenuationColor?.toArray() ?? [1, 1, 1],
+                attenuationDistance,
+                opacity: m.opacity,
+                clearcoat: m.clearcoat ?? 0,
+                clearcoatRoughness: m.clearcoatRoughness ?? 0,
+                quality,
+                clarity,
+                subdued,
+                theme,
+            });
+        }
     });
+    if (packed) {
+        // 先保存键列表，再删除失效定义，避免迭代器在删除过程中跳过复用对象。
+        for (const id of Array.from(drawDefinitions.keys())) {
+            if (!activeIDs.has(id)) {
+                drawDefinitions.delete(id);
+            }
+        }
+    }
     for (const o of (scene as any).instances) {
         o.instanceMatrix.clearUpdateRanges();
         o.geometry.attributes.archiveTheme?.clearUpdateRanges();
@@ -239,7 +371,10 @@ function frame(time: number, binary = false, diagnostics = true) {
         mode,
         selected,
         time: t,
-        draws,
+        draws: packed ? undefined : draws,
+        drawDefinitions: packed ? definitions : undefined,
+        packetVersion: packed ? 1 : undefined,
+        packetCount: packed ? packetLength / PACKET_STRIDE : undefined,
         view: camera.matrixWorldInverse.elements,
         projection: camera.projectionMatrix.elements,
         eye: camera.position.toArray(),
@@ -277,6 +412,8 @@ function ease(v: number) {
     picking: setPicking,
     pick: (x: number, y: number) => (scene as any).pickCell(x, y),
     frameFast: (time: number, diagnostics = true) => frame(time, true, diagnostics),
+    framePacked: (time: number, advance = true) => frame(time, true, false, true, advance),
+    packetBytes: () => packetData.buffer.slice(0, packetLength * 8),
     bufferBytes: (index: number, count: number) => {
         const v = frameBuffers[index];
         return v
@@ -285,6 +422,15 @@ function ease(v: number) {
     },
     energyIdle: (value: boolean) => {
         scene.energyIdle = value;
+    },
+    trimMemory: () => {
+        scene.trimMemory(!viewer.isOpen);
+        if (!viewer.isOpen) {
+            delete (globalThis as any).nativeGeometry.assembly;
+        }
+        (globalThis as any).nativeAnimations = ((globalThis as any).nativeAnimations ?? []).filter(
+            (animation: any) => !animation.cancelled && !animation.done,
+        );
     },
     buffer: (index: number) => frameBuffers[index],
     setMode,

@@ -38,6 +38,7 @@ struct Instance {
 static_assert(sizeof(Globals) == 544);
 static_assert(sizeof(Surface) == 112);
 static_assert(sizeof(Instance) == 80);
+static constexpr qint64 MUSIC_TEXTURE_BUDGET_BYTES = 24 * 1024 * 1024;
 static QMatrix4x4 matrix(QJsonArray a, int offset = 0) {
     QMatrix4x4 m;
     for (int i = 0; i < 16; ++i) {
@@ -124,11 +125,15 @@ class Renderer {
     QHash<QString, qint64> coverRevisions;
     SceneRuntime::DrawBuffers nativeBuffers;
     quint64 generation = 0;
+    quint64 bindingCreations = 0;
+    quint64 coverUploads = 0;
     QByteArray shadowRevision;
     bool shadowValid = false;
     QHash<QString, QRhiTexture *> labels, covers;
+    QHash<qint64, QRhiTexture *> coverTextures;
     QRhiTexture *labelTexture = nullptr, *coverTexture = nullptr;
     QStringList textureOrder;
+    QSet<QString> activeTextureKeys;
     QSize size;
     std::unique_ptr<Glyphs> glyphs;
     QJsonObject musicItem;
@@ -291,8 +296,12 @@ class Renderer {
         create(rt);
         return {texture, rt, rp};
     }
-    void invalidateBindings() {
+    void invalidateBindings(QRhiTexture *texture = nullptr) {
         for (auto &state : materials) {
+            // 换曲只影响采样该纹理的材质；窗口尺寸变化才需要整批重新绑定。
+            if (texture && state.label != texture && state.cover != texture) {
+                continue;
+            }
             retire(state.bindings);
             state.bindings = nullptr;
         }
@@ -483,6 +492,17 @@ class Renderer {
             resources.erase(it);
         }
     }
+    void releaseCover(const QString &key) {
+        const auto revision = coverRevisions.take(key);
+        const auto previous = covers.take(key);
+        // 同专辑曲目及无封面的曲目共享纹理，最后一个引用退出后才退休 GPU 对象。
+        if (!previous || covers.values().contains(previous)) {
+            return;
+        }
+        invalidateBindings(previous);
+        coverTextures.remove(revision);
+        retire(previous);
+    }
     void updateMusic(const QJsonObject &value, QImage image) {
         const auto key = value["key"].toString("empty");
         const auto labelRevision = value["title"].toString() + "|" + value["artist"].toString() + "|" +
@@ -491,54 +511,79 @@ class Renderer {
         musicItem = value;
         textureOrder.removeAll(key);
         textureOrder << key;
-        bool changed = false;
         if (!labels.contains(key) || labelRevisions.value(key) != labelRevision) {
-            invalidateBindings();
+            if (const auto previous = labels.value(key)) {
+                invalidateBindings(previous);
+            }
             // 覆盖同一 key 时退休的是该 key 的旧对象，而非上一首当前曲目的对象。
             retire(labels.take(key));
             const auto label = glyphs->label(value);
             labels[key] = texture(label.size(), QRhiTexture::RGBA8);
             updates->uploadTexture(labels[key], label);
             labelRevisions[key] = labelRevision;
-            changed = true;
         }
         if (!covers.contains(key) || (!image.isNull() && coverRevisions.value(key) != coverRevision)) {
-            if (!changed) {
-                invalidateBindings();
+            releaseCover(key);
+            if (!coverTextures.contains(coverRevision)) {
+                QImage pixels(512, 512, QImage::Format_RGBA8888_Premultiplied);
+                pixels.fill(QColor::fromRgbF(.36, .45, .45));
+                QPainter painter(&pixels);
+                painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+                if (!image.isNull()) {
+                    const auto dimensions = image.size().scaled(512, 512, Qt::KeepAspectRatioByExpanding);
+                    painter.drawImage(QRectF((512 - dimensions.width()) / 2.,
+                                             (512 - dimensions.height()) / 2., dimensions.width(),
+                                             dimensions.height()),
+                                      image);
+                } else {
+                    painter.setPen(QPen(QColor::fromRgbF(.7, .72, .64), 2));
+                    painter.drawEllipse(QRectF(52, 52, 408, 408));
+                    glyphs->text(painter, "RHINE LAB", 156, 370, 28, "demibold", 1, QColor(215, 220, 204));
+                }
+                painter.end();
+                const auto cover = texture(pixels.size(), QRhiTexture::RGBA8);
+                updates->uploadTexture(cover, pixels);
+                coverTextures[coverRevision] = cover;
+                ++coverUploads;
             }
-            retire(covers.take(key));
-            QImage pixels(512, 512, QImage::Format_RGBA8888_Premultiplied);
-            pixels.fill(QColor::fromRgbF(.36, .45, .45));
-            QPainter painter(&pixels);
-            painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
-            if (!image.isNull()) {
-                const auto dimensions = image.size().scaled(512, 512, Qt::KeepAspectRatioByExpanding);
-                painter.drawImage(QRectF((512 - dimensions.width()) / 2., (512 - dimensions.height()) / 2.,
-                                         dimensions.width(), dimensions.height()),
-                                  image);
-            } else {
-                painter.setPen(QPen(QColor::fromRgbF(.7, .72, .64), 2));
-                painter.drawEllipse(QRectF(52, 52, 408, 408));
-                glyphs->text(painter, "RHINE LAB", 156, 370, 28, "demibold", 1, QColor(215, 220, 204));
-            }
-            painter.end();
-            covers[key] = texture(pixels.size(), QRhiTexture::RGBA8);
-            updates->uploadTexture(covers[key], pixels);
+            covers[key] = coverTextures.value(coverRevision);
             coverRevisions[key] = coverRevision;
         }
         labelTexture = labels.value(key);
         coverTexture = covers.value(key);
-        while (textureOrder.size() > 32) {
-            invalidateBindings();
-            const auto old = textureOrder.takeFirst();
+        // 按实际 RGBA8 像素占用限制缓存；仍在动画中的纹理只在归位后参与淘汰。
+        while (textureOrder.size() > 32 || musicTextureBytes() > MUSIC_TEXTURE_BUDGET_BYTES) {
+            const auto candidate =
+                std::find_if(textureOrder.begin(), textureOrder.end(),
+                             [&](const auto &key) { return !activeTextureKeys.contains(key); });
+            if (candidate == textureOrder.end()) {
+                break;
+            }
+            const auto old = *candidate;
+            textureOrder.erase(candidate);
+            if (const auto label = labels.value(old)) {
+                invalidateBindings(label);
+            }
             retire(labels.take(old));
-            retire(covers.take(old));
+            releaseCover(old);
             labelRevisions.remove(old);
-            coverRevisions.remove(old);
         }
+    }
+    qint64 musicTextureBytes() const {
+        qint64 bytes = 0;
+        for (const auto texture : labels) {
+            const auto dimensions = texture->pixelSize();
+            bytes += qint64(dimensions.width()) * dimensions.height() * 4;
+        }
+        for (const auto texture : coverTextures) {
+            const auto dimensions = texture->pixelSize();
+            bytes += qint64(dimensions.width()) * dimensions.height() * 4;
+        }
+        return bytes;
     }
     QRhiShaderResourceBindings *bindings(std::vector<QRhiShaderResourceBinding> list,
                                          bool temporary = false) {
+        ++bindingCreations;
         auto b = own(rhi->newShaderResourceBindings(), false, temporary);
         b->setBindings(list.begin(), list.end());
         return create(b);
@@ -746,9 +791,14 @@ class Renderer {
                 QRhiBuffer::UniformBuffer);
             const auto key =
                 d["musicSelected"].toBool() ? musicItem["key"].toString() : d["musicKey"].toString();
-            const auto label =
-                mesh == -5 ? decorationTexture : labels.value(key, labelTexture ? labelTexture : white);
-            const auto cover = covers.value(key, placeholderCover);
+            QRhiTexture *label = white;
+            if (mesh == -5) {
+                label = decorationTexture;
+            } else if (d["label"].toBool()) {
+                label = labels.value(key, labelTexture ? labelTexture : white);
+            }
+            // 着色器只有盘面读取封面，只有标签读取文字；其他表面绑定稳定的占位纹理。
+            const auto cover = mesh == -2 ? covers.value(key, placeholderCover) : placeholderCover;
             // 缓存命中仍可能换曲，同一个 draw 的绑定必须跟随实际纹理指针。
             if (state.label != label || state.cover != cover) {
                 retire(state.bindings);
@@ -842,13 +892,24 @@ class Renderer {
         cb->endPass();
     }
     void render(QRhiCommandBuffer *cb, QJsonObject frame, QSize dimensions, QJsonObject item, QImage cover,
-                QRhiRenderTarget *finalTarget = nullptr) {
+                QRhiRenderTarget *finalTarget = nullptr, const Engine::MusicTextures &musicTextures = {}) {
         transient.clear();
         ++generation;
         if (!updates) {
             updates = rhi->nextResourceUpdateBatch();
         }
         resize(dimensions);
+        activeTextureKeys.clear();
+        activeTextureKeys.insert(item["key"].toString("empty"));
+        for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
+            activeTextureKeys.insert(it.key());
+        }
+        // 恢复图形设备时先还原仍可见的旧唱片，最后绑定当前曲目。
+        for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
+            if (it.key() != item["key"].toString("empty") && !labels.contains(it.key())) {
+                updateMusic(it->item, it->cover);
+            }
+        }
         updateMusic(item, cover);
         auto g = globals(frame);
         updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
@@ -956,6 +1017,7 @@ class ItemRenderer : public QQuickRhiItemRenderer {
     std::unique_ptr<Renderer> renderer;
     QJsonObject frame, item;
     SceneRuntime::DrawBuffers buffers;
+    Engine::MusicTextures musicTextures;
     QImage cover;
     QString root;
 
@@ -967,6 +1029,7 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         if (engine) {
             frame = engine->frame();
             buffers = engine->drawBuffers();
+            musicTextures = engine->musicTextures();
             item = engine->current();
             cover = engine->cover();
             root = engine->root();
@@ -987,10 +1050,14 @@ class ItemRenderer : public QQuickRhiItemRenderer {
             renderer = std::make_unique<Renderer>(root, rhi());
         }
         renderer->nativeBuffers = buffers;
-        renderer->render(cb, frame, renderTarget()->pixelSize(), item, cover, renderTarget());
+        const auto previousBindings = renderer->bindingCreations;
+        const auto previousUploads = renderer->coverUploads;
+        renderer->render(cb, frame, renderTarget()->pixelSize(), item, cover, renderTarget(), musicTextures);
         if (backend) {
             backend->recordRender(renderer->resources.size() + renderer->sized.size() +
-                                  renderer->transient.size());
+                                      renderer->transient.size(),
+                                  renderer->bindingCreations - previousBindings,
+                                  renderer->musicTextureBytes(), renderer->coverUploads - previousUploads);
         }
     }
 };

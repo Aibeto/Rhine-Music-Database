@@ -9,7 +9,7 @@
 /**
  * 把原场景运行时接入 QJSEngine，保留缓冲区、资源和输入接口。
  */
-SceneRuntime::SceneRuntime(QString root, QJSEngine *qml) : m_qml(qml) {
+SceneRuntime::SceneRuntime(QString root, QJSEngine *qml) : m_root(root), m_qml(qml) {
     auto read = [&](QString name) {
         QFile f(root + "/" + name);
         if (!f.open(QIODevice::ReadOnly)) {
@@ -24,8 +24,9 @@ SceneRuntime::SceneRuntime(QString root, QJSEngine *qml) : m_qml(qml) {
     auto geometry = context.newObject();
     auto parse = context.globalObject().property("JSON").property("parse");
     geometry.setProperty("cassette", parse.call({read("archive-cassette-geometry.json")}));
-    geometry.setProperty("assembly", parse.call({read("archive-assembly-geometry.json")}));
     context.globalObject().setProperty("nativeGeometry", geometry);
+    QJSEngine::setObjectOwnership(this, QJSEngine::CppOwnership);
+    context.globalObject().setProperty("NativeAssets", context.newQObject(this));
     evaluate("Object.fromEntries=function(entries){var result={};for(var pair of "
              "entries)result[pair[0]]=pair[1];return "
              "result;};Array.prototype.flat=function(depth){depth=depth===undefined?1:depth;return "
@@ -36,6 +37,27 @@ SceneRuntime::SceneRuntime(QString root, QJSEngine *qml) : m_qml(qml) {
     evaluate("RhineNative.init().catch(function(e){throw e;});");
 }
 SceneRuntime::~SceneRuntime() = default;
+/**
+ * 首次打开查看器时才解析其模型，避免普通音乐浏览长期持有第二份大模型。
+ * 固定资产白名单不允许脚本读取任意路径；返回值属于场景 JS 引擎。
+ */
+QJSValue SceneRuntime::loadGeometry(QString asset) {
+    if (asset != "cassette" && asset != "assembly") {
+        context.throwError(QStringLiteral("Unknown scene geometry"));
+        return QJSValue();
+    }
+    QFile file(m_root + "/archive-" + asset + "-geometry.json");
+    if (!file.open(QIODevice::ReadOnly)) {
+        context.throwError(QStringLiteral("Missing scene geometry"));
+        return QJSValue();
+    }
+    return context.globalObject().property("JSON").property("parse").call(
+        {QString::fromUtf8(file.readAll())});
+}
+void SceneRuntime::trimMemory() {
+    call("trimMemory");
+    context.collectGarbage();
+}
 QJSValue SceneRuntime::evaluate(QString code) {
     auto result = context.evaluate(code);
     if (result.isError()) {
@@ -45,8 +67,8 @@ QJSValue SceneRuntime::evaluate(QString code) {
     return result;
 }
 QJSValue SceneRuntime::call(QString name, QVariantList values) {
-    if (name != "frameFast" && name != "bufferBytes" && name != "buffer" && name != "selection" &&
-        name != "pick" && name != "energyIdle") {
+    if (name != "frameFast" && name != "framePacked" && name != "packetBytes" && name != "bufferBytes" &&
+        name != "buffer" && name != "selection" && name != "pick" && name != "energyIdle") {
         m_changed = true;
     }
     QJSValueList arguments;
@@ -70,12 +92,85 @@ bool SceneRuntime::ready() const {
     return runtime.property("ready").toBool();
 }
 QJSValue SceneRuntime::frameFast(double time) {
-    auto value = call("frameFast", {time, m_diagnostics});
+    QElapsedTimer timer;
+    if (m_profileFrames) {
+        timer.start();
+    }
+    auto value =
+        m_diagnostics ? call("frameFast", {time, true}) : call("framePacked", {time, !m_captureOnly});
+    const auto scriptNs = m_profileFrames ? timer.nsecsElapsed() : 0;
     m_changed = false;
     if (value.isNull() || value.isUndefined()) {
         return QJSValue(QJSValue::NullValue);
     }
     frame = QJsonDocument::fromJson(json(value).toUtf8()).object();
+    if (!m_diagnostics) {
+        static constexpr int packetStride = 23;
+        const auto bytes = context.fromScriptValue<QByteArray>(call("packetBytes"));
+        const auto count = frame["packetCount"].toInt();
+        if (frame["packetVersion"].toInt() != 1 || count < 0 ||
+            bytes.size() != qsizetype(count) * packetStride * 8) {
+            failure = QStringLiteral("Invalid native scene packet");
+            qWarning().noquote() << failure;
+            return QJSValue(QJSValue::NullValue);
+        }
+        for (const auto &entry : frame["drawDefinitions"].toArray()) {
+            const auto definition = entry.toObject();
+            m_drawDefinitions[definition["id"].toInt()] = definition;
+        }
+        QJsonArray decoded;
+        QSet<int> activeIDs;
+        for (int i = 0; i < count; ++i) {
+            double values[packetStride];
+            memcpy(values, bytes.constData() + qsizetype(i) * sizeof(values), sizeof(values));
+            const auto id = int(values[0]);
+            if (!m_drawDefinitions.contains(id)) {
+                failure =
+                    QStringLiteral("Missing native draw definition: id=%1 row=%2 first=%3 definitions=%4")
+                        .arg(id)
+                        .arg(i)
+                        .arg(values[0])
+                        .arg(m_drawDefinitions.size());
+                qWarning().noquote() << failure;
+                return QJSValue(QJSValue::NullValue);
+            }
+            auto draw = m_drawDefinitions.value(id);
+            activeIDs.insert(id);
+            draw["count"] = int(values[1]);
+            draw["matrixBuffer"] = int(values[2]);
+            draw["themeBuffer"] = int(values[3]);
+            draw["color"] = QJsonArray{values[4], values[5], values[6]};
+            draw["roughness"] = values[7];
+            draw["metalness"] = values[8];
+            draw["transmission"] = values[9];
+            draw["thickness"] = values[10];
+            draw["ior"] = values[11];
+            draw["attenuation"] = QJsonArray{values[12], values[13], values[14]};
+            draw["attenuationDistance"] = values[15];
+            draw["opacity"] = values[16];
+            draw["clearcoat"] = values[17];
+            draw["clearcoatRoughness"] = values[18];
+            draw["quality"] = values[19];
+            draw["clarity"] = values[20];
+            draw["subdued"] = values[21];
+            draw["theme"] = values[22];
+            draw["matrices"] = QJsonArray{};
+            draw["themes"] = QJsonArray{};
+            decoded.append(draw);
+        }
+        for (auto it = m_drawDefinitions.begin(); it != m_drawDefinitions.end();) {
+            if (!activeIDs.contains(it.key())) {
+                it = m_drawDefinitions.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        frame["draws"] = decoded;
+        for (const auto &key : {"drawDefinitions", "packetVersion", "packetCount"}) {
+            frame.remove(key);
+        }
+    }
+    const auto jsonNs = m_profileFrames ? timer.nsecsElapsed() : 0;
     auto draws = frame["draws"].toArray();
     QHash<quint64, QByteArray> buffers;
     drawBuffers.clear();
@@ -113,7 +208,13 @@ QJSValue SceneRuntime::frameFast(double time) {
     frame["draws"] = draws;
     auto summary = frame;
     summary.remove("draws");
-    return m_qml->toScriptValue(summary.toVariantMap());
+    const auto buffersNs = m_profileFrames ? timer.nsecsElapsed() : 0;
+    auto result = m_qml->toScriptValue(summary.toVariantMap());
+    if (m_profileFrames) {
+        timings = {scriptNs / 1000000., (jsonNs - scriptNs) / 1000000., (buffersNs - jsonNs) / 1000000.,
+                   (timer.nsecsElapsed() - buffersNs) / 1000000.};
+    }
+    return result;
 }
 
 void SceneRuntime::setMode(QString value) {

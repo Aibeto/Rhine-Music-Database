@@ -51,12 +51,29 @@ class Engine : public QObject {
     SceneRuntime::DrawBuffers drawBuffers() const {
         return scene.drawBuffers;
     }
+    struct MusicTexture {
+        QJsonObject item;
+        QImage cover;
+    };
+    using MusicTextures = QHash<QString, MusicTexture>;
+    MusicTextures musicTextures() const {
+        return m_musicTextures;
+    }
+    void trimMemory();
+    void recordResourceRelease() {
+        m_gpuResources.store(0, std::memory_order_relaxed);
+        m_musicTextureBytes.store(0, std::memory_order_relaxed);
+    }
     Q_INVOKABLE void setVisible(bool value);
     void wake(bool input = true);
     void start();
-    void recordRender(quint64 resources) {
+    void recordRender(quint64 resources, quint64 bindings = 0, quint64 textureBytes = 0,
+                      quint64 coverUploads = 0) {
         m_renderFrames.fetch_add(1, std::memory_order_relaxed);
         m_gpuResources.store(resources, std::memory_order_relaxed);
+        m_bindingCreations.fetch_add(bindings, std::memory_order_relaxed);
+        m_musicTextureBytes.store(textureBytes, std::memory_order_relaxed);
+        m_coverUploads.fetch_add(coverUploads, std::memory_order_relaxed);
     }
     bool ready() const;
     int selfTest();
@@ -79,6 +96,10 @@ class Engine : public QObject {
 
   private:
     std::atomic<quint64> m_renderFrames{0}, m_gpuResources{0};
+    std::atomic<quint64> m_bindingCreations{0};
+    std::atomic<quint64> m_musicTextureBytes{0};
+    std::atomic<quint64> m_coverUploads{0};
+    MusicTextures m_musicTextures;
     Glyphs m_glyphs;
     QTimer timer, mediaTimer;
     bool m_started = false;

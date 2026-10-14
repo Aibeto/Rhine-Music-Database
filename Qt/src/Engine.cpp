@@ -164,6 +164,9 @@ QVariantMap Engine::performance() const {
             {"hudUpdates", qulonglong(m_hudUpdates)},
             {"renderFrames", qulonglong(m_renderFrames.load(std::memory_order_relaxed))},
             {"gpuResources", qulonglong(m_gpuResources.load(std::memory_order_relaxed))},
+            {"bindingCreations", qulonglong(m_bindingCreations.load(std::memory_order_relaxed))},
+            {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed))},
+            {"coverUploads", qulonglong(m_coverUploads.load(std::memory_order_relaxed))},
             {"timerActive", timer.isActive()}};
 }
 void Engine::wake(bool input) {
@@ -201,9 +204,30 @@ void Engine::setVisible(bool value) {
         timer.stop();
         m_sleeping = true;
     } else {
+        host.restoreMemoryBudget();
         wake(false);
+        emit sceneUpdated();
+        emit hudUpdated();
     }
     emit stateChanged();
+}
+/**
+ * 隐藏窗口持续一段时间后释放可重建缓存，不改变音乐、账号或尚未完成的动画。
+ */
+void Engine::trimMemory() {
+    if (m_visible) {
+        return;
+    }
+    QStringList retainedImages{m_cover};
+    for (const auto &value : m_commands) {
+        const auto command = value.toArray();
+        if (command[0].toString() == "image") {
+            retainedImages << command[1].toString();
+        }
+    }
+    host.trimMemory(retainedImages);
+    scene.trimMemory();
+    js.collectGarbage();
 }
 void Engine::pollMedia() {
     call("poll", {clock.elapsed() / 1000., true});
@@ -356,6 +380,23 @@ void Engine::step(double time) {
     m_coverRevision = coverRevision;
     m_current = current;
     m_cover = object["cover"].toString();
+    // 图形设备在后台可销毁；仅保存当前与可见归位卡片的图片，供恢复时重建纹理。
+    const auto musicKey = current["key"].toString("empty");
+    m_musicTextures[musicKey] = {current, host.image(m_cover)};
+    QSet<QString> retainedKeys{musicKey};
+    for (const auto &value : m_frame["draws"].toArray()) {
+        const auto key = value.toObject()["musicKey"].toString();
+        if (!key.isEmpty()) {
+            retainedKeys.insert(key);
+        }
+    }
+    for (auto it = m_musicTextures.begin(); it != m_musicTextures.end();) {
+        if (!retainedKeys.contains(it.key())) {
+            it = m_musicTextures.erase(it);
+        } else {
+            ++it;
+        }
+    }
     auto commands = object["commands"].toArray();
     if (commands != m_commands) {
         m_commands = commands;
@@ -561,6 +602,65 @@ int Engine::selfTest() {
     ok &= scene.review("archive");
     scene.frameFast(50);
     ok &= close(scene.frame["view"].toArray(), expected["view"].toArray());
+    // 生产字节包必须还原完整材质与浮点缓冲；诊断路径仍作为独立的 JSON 基准。
+    auto checkPacket = [&](double time) {
+        scene.diagnostics(true);
+        scene.frameFast(time);
+        auto legacy = scene.frame["draws"].toArray();
+        const auto legacyBuffers = scene.drawBuffers;
+        scene.diagnostics(false);
+        scene.captureOnly(true);
+        scene.frameFast(time);
+        scene.captureOnly(false);
+        const auto packed = scene.frame["draws"].toArray();
+        bool matched = scene.failure.isEmpty() && packed.size() == legacy.size();
+        for (int i = 0; matched && i < packed.size(); ++i) {
+            auto draw = legacy[i].toObject();
+            draw["matrices"] = QJsonArray{};
+            draw["themes"] = QJsonArray{};
+            const auto actual = packed[i].toObject();
+            if (!equivalent(draw, actual)) {
+                qCritical() << "Packet material mismatch" << time << actual["id"];
+                for (auto it = draw.begin(); it != draw.end(); ++it) {
+                    if (!equivalent(it.value(), actual[it.key()])) {
+                        qCritical() << it.key() << it.value() << actual[it.key()];
+                    }
+                }
+                matched = false;
+            }
+            const auto id = actual["id"].toInt();
+            if (legacyBuffers.value(id).matrices != scene.drawBuffers.value(id).matrices ||
+                legacyBuffers.value(id).themes != scene.drawBuffers.value(id).themes) {
+                qCritical() << "Packet buffer mismatch" << time << id;
+                matched = false;
+            }
+        }
+        if (!matched) {
+            qCritical() << "Native scene packet differs from the JSON reference";
+        }
+        ok &= matched;
+    };
+    checkPacket(50);
+    checkPacket(50);
+    // 连续选曲、归位和再次选曲覆盖对象池复用，以及两侧静态定义缓存同步删除。
+    scene.setMode("archive");
+    double packetTime = 50;
+    for (int i = 0; i < 120; ++i) {
+        scene.navigate("row", 1);
+        scene.frameFast(packetTime += 1. / 60);
+    }
+    for (int i = 0; i < 180; ++i) {
+        scene.frameFast(packetTime += 1. / 60);
+    }
+    for (int i = 0; i < 40; ++i) {
+        scene.navigate("row", -1);
+        scene.frameFast(packetTime += 1. / 60);
+    }
+    ok &= scene.failure.isEmpty();
+    checkPacket(packetTime);
+    scene.diagnostics(true);
+    scene.review("archive");
+    scene.frameFast(50);
     if (qEnvironmentVariableIntValue("RHINE_GPU_TEST") == 1) {
         qInfo() << "[qt_offline] Starting GPU render; software renderer:"
                 << qEnvironmentVariableIntValue("RHINE_SOFTWARE_GPU");

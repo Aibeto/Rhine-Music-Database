@@ -560,6 +560,22 @@ QImage Host::image(const QString &key) const {
     auto p = images.object(key);
     return p ? *p : QImage();
 }
+void Host::trimMemory(const QStringList &retainedImages) {
+    QHash<QString, QImage> retained;
+    for (const auto &key : retainedImages) {
+        const auto pixels = image(key);
+        if (!pixels.isNull()) {
+            retained.insert(key, pixels);
+        }
+    }
+    // 请求结果仍可从磁盘按需读取；保留当前 HUD 图片，避免恢复后二维码或封面空白。
+    cache.clear();
+    images.clear();
+    images.setMaxCost(4 * 1024);
+    for (auto it = retained.begin(); it != retained.end(); ++it) {
+        images.insert(it.key(), new QImage(it.value()), qMax(1, int(it->sizeInBytes() / 1024)));
+    }
+}
 void Host::fixtureImage(const QString &key, const QImage &image) {
     // 仅离线窗口验收可注入本地封面，不读取账号或访问封面服务器。
     if (offline && !image.isNull()) {

@@ -335,6 +335,20 @@ export class ArchiveScene {
         clarity: number;
     }[] = [];
     private outgoingPool: THREE.Group[] = [];
+    trimMemory(releaseAssembly = false) {
+        // 只释放已完成归位的备用对象，保留隐藏前仍在动画中的卡片。
+        for (const group of this.outgoingPool) {
+            this.appearance.dispose(group);
+        }
+        this.outgoingPool = [];
+        if (releaseAssembly) {
+            // 查看器关闭后可重建其模板；仍打开的查看器由调用者保证不进入此分支。
+            this.assemblyTemplate?.then(disposeThreeTree).catch(() => {
+                // 加载失败时没有模板资源需要释放，后续打开仍会重新加载。
+            });
+            this.assemblyTemplate = undefined;
+        }
+    }
     private releaseOutgoing(group: THREE.Group) {
         // 已完成归位的对象才进入池；仍可见的归位卡片绝不提前删除。
         if (this.outgoingPool.length < 16) {
@@ -553,6 +567,11 @@ export class ArchiveScene {
             }
             const selectedMesh = new THREE.Mesh(geom, mat);
             selectedMesh.userData.surface = name;
+            // 几何已烘焙到局部空间；每帧只推进父卡片，部件的局部变换保持固定。
+            selectedMesh.updateMatrix();
+            selectedMesh.matrixAutoUpdate = false;
+            selectedMesh.userData.nativeHidden = mesh.userData.nativeHidden;
+            selectedMesh.visible = mesh.visible;
             selectedMesh.castShadow = name === 'Optical_Diffuser';
             selectedMesh.receiveShadow = true;
             this.model.add(selectedMesh);
@@ -643,6 +662,8 @@ export class ArchiveScene {
             }),
         );
         label.position.set(-1.36, 3.04, 0.255);
+        label.updateMatrix();
+        label.matrixAutoUpdate = false;
         this.model.add(label);
         this.appearance.prepare(this.model);
         this.appearance.apply(this.model, 0);
@@ -676,6 +697,8 @@ export class ArchiveScene {
                 object.material,
             );
             mesh.userData.surface = name;
+            mesh.userData.nativeHidden = object.userData.nativeHidden;
+            mesh.visible = object.visible;
             mesh.userData.assemblyPart = object.userData.assemblyPart;
             model.add(mesh);
             meshes.push(mesh);
@@ -2211,6 +2234,11 @@ export class ArchiveScene {
         // 包括迟到的纹理和材质。
         const state = this.renderState;
         this.scene.updateMatrixWorld();
+        // Qt 自行判断画面和阴影失效；原生适配器不渲染 WebGL，不能重复生成整场景快照。
+        const nativeRenderer = this.renderer as THREE.WebGLRenderer & { isNativeStateOnly?: boolean };
+        if (nativeRenderer.isNativeStateOnly) {
+            return;
+        }
         // 实例缓冲区变化已足以证明画面变化；忙碌帧避免生成材质和
         // 矩阵快照，收束后再捕获。
         if (matricesChanged || cinematic) {

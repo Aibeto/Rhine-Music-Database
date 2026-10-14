@@ -16,10 +16,27 @@ class SceneRuntime : public QObject {
     };
     using DrawBuffers = QHash<int, DrawData>;
     DrawBuffers drawBuffers;
+    struct FrameTimings {
+        double scriptMs = 0;
+        double jsonMs = 0;
+        double buffersMs = 0;
+        double summaryMs = 0;
+    };
+    FrameTimings timings;
+    void profileFrames(bool value) {
+        m_profileFrames = value;
+    }
+    // 传输回归只重编码同一个已模拟帧，不能用同时间再次推进原有弹簧。
+    void captureOnly(bool value) {
+        m_captureOnly = value;
+    }
     bool changed() const {
         return m_changed;
     }
     void diagnostics(bool value) {
+        if (m_diagnostics != value) {
+            m_changed = true;
+        }
         m_diagnostics = value;
     }
     void energyIdle(bool value) {
@@ -28,6 +45,7 @@ class SceneRuntime : public QObject {
     Q_INVOKABLE bool init() {
         return ready();
     }
+    Q_INVOKABLE QJSValue loadGeometry(QString asset);
     Q_INVOKABLE QJSValue frameFast(double time);
     Q_INVOKABLE QJSValue buffer(int) {
         return m_qml->newArray();
@@ -50,13 +68,18 @@ class SceneRuntime : public QObject {
     Q_INVOKABLE void viewerKey(QString key);
     Q_INVOKABLE bool review(QString mode);
     Q_INVOKABLE void freeze(QJSValue time);
+    void trimMemory();
     QJsonObject frame;
     QString failure;
 
   private:
     bool m_diagnostics = false;
+    bool m_profileFrames = false;
+    bool m_captureOnly = false;
     bool m_changed = true;
     QJSEngine context;
+    QString m_root;
+    QHash<int, QJsonObject> m_drawDefinitions;
     QJSValue runtime;
     QJSEngine *m_qml;
     QJSValue evaluate(QString code);

@@ -623,6 +623,55 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     }
     check(warmedResources > 0 && backend.performance().value("gpuResources").toULongLong() == warmedResources,
           "repeated cover cache hits keep GPU resource count stable");
+    // 后续缓存与隐藏/恢复回归使用实际生产字节包，避免只覆盖诊断 JSON 路径。
+    backend.scene.diagnostics(false);
+    const auto beforeBindings = backend.performance().value("bindingCreations").toULongLong();
+    const auto beforeUploads = backend.performance().value("coverUploads").toULongLong();
+    cachedSelection(99);
+    const auto newBindings = backend.performance().value("bindingCreations").toULongLong() - beforeBindings;
+    check(newBindings > 0 && newBindings <= 8, "new song only recreates bindings that sample its textures");
+    check(backend.performance().value("coverUploads").toULongLong() == beforeUploads,
+          "songs sharing an album cover reuse the same uploaded texture");
+    // 多首新曲填满纹理缓存后，隐藏窗口须销毁 GPU 对象；恢复须还原同一幅冻结画面。
+    for (int i = 100; i < 135; ++i) {
+        cachedSelection(i);
+    }
+    check(backend.performance().value("gpuMusicTextureBytes").toULongLong() <= 24 * 1024 * 1024,
+          "settled song texture cache respects the byte budget");
+    const auto beforeRelease = window->grabWindow();
+    const auto frameBeforeRelease = backend.frame();
+    const auto selectedBeforeRelease = backend.current();
+    window->hide();
+    wait.restart();
+    while (backend.performance().value("gpuResources").toULongLong() != 0 && wait.elapsed() < 8000) {
+        settle();
+    }
+    check(backend.performance().value("gpuResources").toULongLong() == 0,
+          "sustained background releases the graphics scene");
+    check(!backend.performance().value("timerActive").toBool(), "resource cleanup keeps visual timer asleep");
+    window->show();
+    wait.restart();
+    while (backend.performance().value("gpuResources").toULongLong() == 0 && wait.elapsed() < 8000) {
+        settle();
+    }
+    settle();
+    check(backend.current() == selectedBeforeRelease, "graphics rebuild preserves current song");
+    check(backend.performance().value("gpuResources").toULongLong() > 0,
+          "restored window rebuilds GPU resources");
+    const auto afterRelease = window->grabWindow();
+    if (!output.isEmpty()) {
+        beforeRelease.save(output + "/background-before.png");
+        afterRelease.save(output + "/background-after.png");
+        for (const auto &entry : {qMakePair(QString("background-before.json"), frameBeforeRelease),
+                                  qMakePair(QString("background-after.json"), backend.frame())}) {
+            QFile file(output + "/" + entry.first);
+            if (file.open(QIODevice::WriteOnly)) {
+                file.write(QJsonDocument(entry.second).toJson());
+            }
+        }
+    }
+    check(!beforeRelease.isNull() && beforeRelease == afterRelease,
+          "background release and rebuild preserve the frozen window pixels");
     if (!output.isEmpty()) {
         QFile metrics(output + "/performance.json");
         if (metrics.open(QIODevice::WriteOnly)) {

@@ -122,6 +122,32 @@ int main(int argc, char **argv) {
     window->show();
 #endif
     window->installEventFilter(&backend);
+    // 短暂切换窗口继续复用 GPU；隐藏或最小化超过两秒才释放图形设备和可重建缓存。
+    auto backgroundRelease = new QTimer(window);
+    backgroundRelease->setSingleShot(true);
+    backgroundRelease->setInterval(2000);
+    QObject::connect(backgroundRelease, &QTimer::timeout, window, [&backend, window] {
+        if (window->isVisible() && window->visibility() != QWindow::Minimized) {
+            return;
+        }
+        backend.trimMemory();
+        window->setPersistentSceneGraph(false);
+        window->setPersistentGraphics(false);
+        window->releaseResources();
+    });
+    QObject::connect(window, &QWindow::visibilityChanged, window,
+                     [window, backgroundRelease](QWindow::Visibility visibility) {
+                         if (visibility == QWindow::Hidden || visibility == QWindow::Minimized) {
+                             backgroundRelease->start();
+                         } else {
+                             backgroundRelease->stop();
+                             window->setPersistentSceneGraph(true);
+                             window->setPersistentGraphics(true);
+                         }
+                     });
+    QObject::connect(
+        window, &QQuickWindow::sceneGraphInvalidated, &backend,
+        [&backend] { backend.recordResourceRelease(); }, Qt::DirectConnection);
     if (args.contains("--ui-self-test")) {
         return runUiChecks(backend, qobject_cast<QQuickWindow *>(engine.rootObjects().first()),
                            args.value(args.indexOf("--ui-self-test") + 1));

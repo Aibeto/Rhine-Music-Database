@@ -1,5 +1,34 @@
 import * as T from '../node_modules/three/build/three.module.js';
 export * from '../node_modules/three/build/three.module.js';
+// 原生音乐外壳不使用这些表面，但保留几何用于完整的射线拾取。
+export const NATIVE_HIDDEN_SURFACES = new Set([
+    'Internal_Ceramic',
+    'Optical_Edges',
+    'Subsurface_Optics',
+    'Optical_Film_Edge',
+    'Amber_Optical_Inlay',
+    'Optical_Film',
+    'Champagne_Index',
+    'Printed_Label',
+]);
+
+/**
+ * 将原生模型的只读坐标压成 TypedArray，释放 JSON 数字数组。
+ * 重建场景和延迟打开查看器时仍可重复读取同一份模型数据。
+ */
+export function compactNativeGeometry() {
+    for (const parts of Object.values((globalThis as any).nativeGeometry) as any[][]) {
+        for (const part of parts) {
+            if (part.positions instanceof Float32Array) {
+                continue;
+            }
+            part.positions = new Float32Array(part.positions);
+            part.normals = new Float32Array(part.normals);
+            const needsWideIndices = part.indices.some((index: number) => index >= 65535);
+            part.indices = needsWideIndices ? new Uint32Array(part.indices) : new Uint16Array(part.indices);
+        }
+    }
+}
 export class NativeElement {
     width = 1920;
     height = 1080;
@@ -220,6 +249,7 @@ export class NativeElement {
 }
 
 export class WebGLRenderer {
+    readonly isNativeStateOnly = true;
     domElement = new NativeElement();
     toneMappingExposure = 1.05;
     shadowMap: any = {};
@@ -326,12 +356,18 @@ export {
 export class GLTFLoader {
     async loadAsync(url: string) {
         const key = url.includes('assembly') ? 'assembly' : 'cassette';
+        const geometry = (globalThis as any).nativeGeometry;
+        if (!geometry[key]) {
+            geometry[key] = (globalThis as any).NativeAssets.loadGeometry(key);
+            compactNativeGeometry();
+        }
         const group = new T.Group();
-        for (const [i, part] of (globalThis as any).nativeGeometry[key].entries()) {
+        for (const [i, part] of geometry[key].entries()) {
             const geo = new T.BufferGeometry();
-            geo.setAttribute('position', new T.Float32BufferAttribute(part.positions, 3));
-            geo.setAttribute('normal', new T.Float32BufferAttribute(part.normals, 3));
-            geo.setIndex(part.indices);
+            // 加载器只读源模型；业务层变换前仍 clone 几何，避免改写共享坐标。
+            geo.setAttribute('position', new T.BufferAttribute(part.positions, 3));
+            geo.setAttribute('normal', new T.BufferAttribute(part.normals, 3));
+            geo.setIndex(new T.BufferAttribute(part.indices, 1));
             geo.computeBoundingBox();
             geo.computeBoundingSphere();
             geo.userData.nativeMesh = i;
@@ -364,6 +400,8 @@ export class GLTFLoader {
             m.transparent = part.material.alphaMode === 'BLEND';
             m.side = part.material.doubleSided ? T.DoubleSide : T.FrontSide;
             const mesh = new T.Mesh(geo, m);
+            mesh.userData.nativeHidden = NATIVE_HIDDEN_SURFACES.has(part.name.replace(/\.\d+$/, ''));
+            mesh.visible = !mesh.userData.nativeHidden;
             mesh.userData.assemblyPart = part.assemblyPart;
             group.add(mesh);
         }

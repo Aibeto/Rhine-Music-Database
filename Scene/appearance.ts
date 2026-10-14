@@ -30,6 +30,10 @@ export class CardAppearance {
     prepare(group: THREE.Group) {
         for (const child of group.children) {
             const mesh = child as THREE.Mesh;
+            // 原生隐藏部件只承担拾取，不为每张归位卡片复制材质和着色器闭包。
+            if (mesh.userData.nativeHidden) {
+                continue;
+            }
             const name = mesh.userData.surface as string;
             const palette = this.palettes.get(name);
             if (!palette) {
@@ -111,7 +115,11 @@ export class CardAppearance {
         const clarity = THREE.MathUtils.clamp(value, 0, 1);
         // 查看器将网格移入零件分组后，遍历仍需找到原有部件。
         group.traverse((child) => {
-            if (!(child instanceof THREE.Mesh) || !child.userData.glassClarity) {
+            if (
+                !(child instanceof THREE.Mesh) ||
+                child.userData.nativeHidden ||
+                !child.userData.glassClarity
+            ) {
                 return;
             }
             child.userData.glassClarity.value = clarity;
@@ -131,6 +139,9 @@ export class CardAppearance {
 
     setTheme(group: THREE.Group, value: number, subduedIndex: boolean | number = false) {
         group.traverse((child) => {
+            if (child.userData.nativeHidden) {
+                return;
+            }
             if (child.userData.themeAmount) {
                 child.userData.themeAmount.value = value;
             }
@@ -143,6 +154,9 @@ export class CardAppearance {
     apply(group: THREE.Group, value: number) {
         for (const child of group.children) {
             const mesh = child as THREE.Mesh;
+            if (mesh.userData.nativeHidden) {
+                continue;
+            }
             const palette = this.palettes.get(mesh.userData.surface);
             if (!palette) {
                 // 印刷画布属于当前档案，返回中的副本也使用同一份画布。
@@ -183,6 +197,10 @@ export class CardAppearance {
     dispose(group: THREE.Group) {
         for (const child of group.children) {
             const mesh = child as THREE.Mesh;
+            // 拾取代理共享源材质；副本退出时不能销毁其他卡片仍引用的源对象。
+            if (mesh.userData.nativeHidden) {
+                continue;
+            }
             const mat = mesh.material as THREE.MeshBasicMaterial;
             if (!mesh.userData.surface) {
                 mat.map?.dispose();

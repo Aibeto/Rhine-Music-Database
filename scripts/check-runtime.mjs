@@ -2,23 +2,41 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 import assert from 'node:assert/strict';
 const root = 'output/resources/';
+let geometryLoads = 0;
 const ctx = vm.createContext({
     console,
     nativeGeometry: {
         cassette: JSON.parse(fs.readFileSync(root + 'archive-cassette-geometry.json')),
-        assembly: JSON.parse(fs.readFileSync(root + 'archive-assembly-geometry.json')),
+    },
+    NativeAssets: {
+        loadGeometry(asset) {
+            geometryLoads++;
+            assert.equal(asset, 'assembly');
+            return JSON.parse(fs.readFileSync(root + 'archive-assembly-geometry.json'));
+        },
     },
 });
 vm.runInContext(fs.readFileSync(root + 'runtime.js', 'utf8'), ctx);
 await ctx.RhineNative.init();
+assert.equal(geometryLoads, 0, 'ordinary music browsing must not load the assembly model');
+for (const parts of Object.values(ctx.nativeGeometry)) {
+    for (const part of parts) {
+        assert.equal(Object.prototype.toString.call(part.positions), '[object Float32Array]');
+        assert.equal(Object.prototype.toString.call(part.normals), '[object Float32Array]');
+        assert(ArrayBuffer.isView(part.indices), 'source indices must release JSON number arrays');
+    }
+}
 ctx.RhineNative.setMode('archive');
 for (let i = 1; i < 121; i++) {
     ctx.RhineNative.frame(i / 60);
 }
 const f = ctx.RhineNative.frame(2.1);
-assert(f.draws.length > 16);
+assert(f.draws.length >= 12);
+assert(f.draws.some((draw) => draw.name === 'Frosted_Polymer' && draw.instanced));
+assert(f.draws.some((draw) => draw.name === 'Optical_Diffuser' && !draw.instanced));
 assert.equal(f.selected, 0);
 assert(f.stats.extraction > 0.39);
+assert.equal(f.stats.renderedFrames, 0, 'native simulation must not submit or snapshot WebGL frames');
 console.log('Native state:', f.stats.cameraPosition, f.stats.modelPosition, f.draws.length);
 ctx.RhineNative.setMode('detail');
 for (let i = 127; i < 550; i++) {
@@ -57,6 +75,7 @@ for (let i = 1081; i < 1140; i++) {
     ctx.RhineNative.frame(i / 60);
 }
 const viewer = ctx.RhineNative.frame(19);
+assert.equal(geometryLoads, 1, 'assembly is loaded only when opening the viewer');
 assert(viewer.viewer);
 assert(viewer.draws.some((d) => d.asset === 'assembly'));
 assert.equal(viewer.near, 0.3);
@@ -75,6 +94,25 @@ for (let i = 1261; i < 1380; i++) {
 await new Promise((resolve) => setTimeout(resolve, 0));
 assert.equal(ctx.RhineNative.frame(24).viewer, false);
 console.log('Assembly, explode, pointer rotation and close passed');
+ctx.RhineNative.trimMemory();
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(ctx.nativeGeometry.assembly, undefined, 'closed assembly source is released in the background');
+ctx.RhineNative.openViewer();
+await new Promise((resolve) => setTimeout(resolve, 0));
+for (let i = 1; i <= 60; i++) {
+    ctx.RhineNative.frame(24 + i / 60);
+}
+assert.equal(geometryLoads, 2, 'released viewer geometry can be loaded again');
+const reopened = ctx.RhineNative.frame(25);
+assert(reopened.viewer && reopened.draws.some((draw) => draw.asset === 'assembly'));
+ctx.RhineNative.trimMemory();
+assert(ctx.nativeGeometry.assembly, 'memory cleanup must preserve an open viewer');
+ctx.RhineNative.viewerAction('close');
+for (let i = 1; i <= 60; i++) {
+    ctx.RhineNative.frame(25 + i / 60);
+}
+await new Promise((resolve) => setTimeout(resolve, 0));
+assert.equal(ctx.RhineNative.frame(26).viewer, false);
 await ctx.RhineNative.review('archive');
 const frozen = ctx.RhineNative.frame(30);
 const later = ctx.RhineNative.frame(40);
@@ -183,3 +221,62 @@ assert(Number.isInteger(ctx.RhineNative.selection()));
 ctx.RhineNative.navigate('row', 25);
 assert.equal(ctx.RhineNative.selection(), beforeMerged);
 console.log('Large merged positive and negative wheel navigation preserves physical selection');
+
+// 生产桥接只省略原生渲染器本来不使用的表面，保留剩余绘制属性和矩阵。
+await ctx.RhineNative.review('detail');
+const detailed = ctx.RhineNative.frameFast(70, true);
+const production = ctx.RhineNative.frameFast(70, false);
+const hiddenSurfaces = new Set([
+    'Internal_Ceramic',
+    'Optical_Edges',
+    'Subsurface_Optics',
+    'Optical_Film_Edge',
+    'Amber_Optical_Inlay',
+    'Optical_Film',
+    'Champagne_Index',
+    'Printed_Label',
+]);
+assert.equal(production.draws.length, detailed.draws.filter((draw) => !hiddenSurfaces.has(draw.name)).length);
+for (const draw of production.draws) {
+    const original = detailed.draws.find((candidate) => candidate.id === draw.id);
+    for (const key of Object.keys(draw).filter((key) => !['matrixBuffer', 'themeBuffer'].includes(key))) {
+        assert.deepEqual(draw[key], original[key], `Production draw differs at ${draw.id}:${key}`);
+    }
+}
+assert.deepEqual(production.view, detailed.view);
+
+// 完成、取消和仍在进行的动画各自保留原 Promise 语义，并及时从全局表中移除。
+const element = ctx.document.createElement('div');
+const completed = element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 0 });
+const cancelled = element.animate([{ opacity: 0 }], { duration: 0 });
+cancelled.finished.catch(() => {});
+cancelled.cancel();
+const active = element.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 10000 });
+ctx.RhineNative.frameFast(70.1, false);
+await completed.finished;
+assert.equal(element.style.opacity, 1);
+assert(!ctx.nativeAnimations.includes(completed));
+assert(!ctx.nativeAnimations.includes(cancelled));
+assert(ctx.nativeAnimations.includes(active));
+active.finished.catch(() => {});
+active.cancel();
+ctx.RhineNative.trimMemory();
+assert.equal(ctx.nativeAnimations.length, 0);
+
+ctx.RhineNative.setMode('detail');
+for (let i = 1; i <= 180; i++) {
+    ctx.RhineNative.frame(71 + i / 60);
+}
+ctx.RhineNative.musicIdentity('retained-old');
+ctx.RhineNative.navigate('row', 1);
+ctx.RhineNative.musicIdentity('retained-current');
+const beforeTrim = ctx.RhineNative.frame(74.1);
+assert(beforeTrim.draws.some((draw) => draw.musicKey === 'retained-old'));
+ctx.RhineNative.trimMemory();
+const afterTrim = ctx.RhineNative.frame(74.1);
+assert.equal(afterTrim.selected, beforeTrim.selected);
+assert.equal(afterTrim.stats.returningFiles, beforeTrim.stats.returningFiles);
+assert(afterTrim.draws.some((draw) => draw.musicKey === 'retained-old'));
+console.log(
+    'Compact model data, production draw parity, animation cleanup and hidden-state retention passed',
+);

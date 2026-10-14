@@ -66,6 +66,10 @@ class Host : public QObject {
     static int lifetime(const QString &route);
     static QString cacheKey(QString scope, QString route, QJsonObject params);
     void shutdown();
+    void trimMemory(const QStringList &retainedImages);
+    void restoreMemoryBudget() {
+        images.setMaxCost(32 * 1024);
+    }
 
   signals:
     void mediaAction(QString action);
