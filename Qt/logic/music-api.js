@@ -1,5 +1,6 @@
 // 网易云请求与响应校验；登录协议和 Cookie 持久化仍由 Host 与锁定上游处理。
 import { parse } from './music-items.js';
+import { safeLoginDetails } from './login-state.js';
 const parsed = (raw, kind) => (raw || []).map((rawItem) => parse(rawItem, kind)).filter(Boolean);
 export class API {
     constructor(host) {
@@ -38,15 +39,16 @@ export class API {
                     return;
                 }
                 if (body.code !== undefined && !allow.includes(body.code)) {
-                    reject(
-                        new Error(
-                            (this.provider === 'qq' ? 'QQ 音乐' : '网易云') +
-                                '返回 ' +
-                                body.code +
-                                '：' +
-                                (body.message ?? body.msg ?? '请稍后重试'),
-                        ),
+                    const failure = new Error(
+                        (this.provider === 'qq' ? 'QQ 音乐' : '网易云') +
+                            '返回 ' +
+                            body.code +
+                            '：' +
+                            (body.message ?? body.msg ?? '请稍后重试'),
                     );
+                    failure.code = body.code;
+                    Object.assign(failure, safeLoginDetails(body));
+                    reject(failure);
                     return;
                 }
                 this.host.acceptCookies(JSON.stringify(response.cookies || []), response._epoch);
@@ -246,7 +248,9 @@ export class API {
             valid,
         );
         if (!responseBody.profile || typeof responseBody.profile.userId !== 'number') {
-            throw new Error('请登录网易云');
+            const failure = new Error('请登录网易云');
+            failure.authExpired = true;
+            throw failure;
         }
         return [String(responseBody.profile.userId), responseBody.profile.nickname || '网易云用户'];
     }

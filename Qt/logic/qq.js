@@ -380,7 +380,9 @@ export class QQAPI {
         const info = p.info || p;
         const id = identifier(p.str_musicid ?? p.musicid ?? p.uin ?? info.uin);
         if (!id) {
-            throw new Error('请登录 QQ 音乐');
+            const failure = new Error('请登录 QQ 音乐');
+            failure.authExpired = true;
+            throw failure;
         }
         return [id, String(info.nick ?? info.nickname ?? p.nickname ?? p.nick ?? 'QQ 音乐用户')];
     }

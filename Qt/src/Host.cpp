@@ -236,6 +236,8 @@ void Host::send(QString key) {
 #endif
         env.insert("TMPDIR", temporary->path());
         env.insert("LANG", "en_US.UTF-8");
+        // 设备身份独立于缓存与账号凭据，重启及切换来源后继续复用上游设备配置。
+        env.insert("RHINE_QQ_DEVICE_STATE_PATH", AppStorage::dataDirectory() + "/qq-device.json");
         child.setProcessEnvironment(env);
         child.setWorkingDirectory(root + "/MusicBridge");
         child.setStandardErrorFile(QProcess::nullDevice());
@@ -339,10 +341,18 @@ void Host::acceptCookies(QString json, int responseEpoch) {
     if (responseEpoch != epoch || stopped) {
         return;
     }
+    bool changed = false;
     for (auto line : QJsonDocument::fromJson(json.toUtf8()).array()) {
         for (auto cookie : QNetworkCookie::parseCookies(line.toString().toUtf8())) {
-            cookies[QString::fromUtf8(cookie.name())] = QString::fromUtf8(cookie.value());
+            const auto name = QString::fromUtf8(cookie.name());
+            const auto value = QString::fromUtf8(cookie.value());
+            changed |= cookies[name].toString() != value;
+            cookies[name] = value;
         }
+    }
+    // 保存有效账号请求更新的 Cookie，避免重启恢复的是刷新前的凭据。
+    if (changed && (hasCredential("qq") || hasCredential("netease"))) {
+        saveCredential();
     }
 }
 void Host::delay(int ms, QJSValue callback) {

@@ -6,6 +6,9 @@ const { spawn } = require('node:child_process');
 const bridge = path.resolve(process.argv[2]);
 const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'rhine-package-check-'));
 const hook = path.resolve(__dirname, '../Qt/tests/fixtures/bridge-http.cjs');
+const deviceContext = require(
+    path.join(bridge, 'node_modules/@yakult-green-tea/qq-music-api/dist/src/services/auth/deviceContext.js'),
+);
 async function main() {
     let child;
     try {
@@ -20,6 +23,7 @@ async function main() {
                     TEMP: temp,
                     LANG: 'en_US.UTF-8',
                     RHINE_TEST_BRIDGE: bridge,
+                    RHINE_QQ_DEVICE_STATE_PATH: path.join(temp, 'qq-device.json'),
                 },
                 stdio: ['pipe', 'pipe', 'pipe'],
             },
@@ -113,10 +117,28 @@ async function main() {
             unblock: false,
         });
         assert.equal(denied.body.code, 403);
-        const qq = await request('qq', '/qq/getSearchByKey', {
-            key: 'fixture',
-        });
+        const savedDevice = deviceContext.createAndroidDevice();
+        const qq = await request(
+            'qq',
+            '/qq/getSearchByKey',
+            { key: 'fixture' },
+            {
+                qqmusic_session: 'fixture-session',
+                __qqSessions: [
+                    null,
+                    {
+                        token: 'fixture-session',
+                        credential: { musicid: '42', musickey: 'fixture-key', loginType: 6 },
+                        device: savedDevice,
+                        expiresAt: Date.now() + 3600000,
+                    },
+                ],
+            },
+        );
         assert.equal(qq.body.response.data.song.list[0].mid, 'fixtureMID');
+        const deviceRecord = JSON.parse(fs.readFileSync(path.join(temp, 'qq-device.json')));
+        assert.deepEqual(deviceRecord.device, savedDevice);
+        assert.equal(deviceRecord.device.musickey, undefined);
         const charts = await request('charts', '/qq/getTopLists');
         assert.equal(charts.body.response.data.topList[0].id, 4);
         const chart = await request('chart', '/qq/getRanks', {
@@ -126,6 +148,15 @@ async function main() {
             page: 0,
         });
         assert.equal(chart.body.response.req_1.data.songInfoList[0].mid, 'fixtureMID');
+        // 验证原服务失败诊断
+        const failedLogin = await request('failed-login', '/qq/login/qr/key', { channel: 'qq' });
+        assert.equal(failedLogin.body.code, 502);
+        assert.equal(failedLogin.body.failureStage, 'device-bootstrap');
+        assert(failedLogin.body.retryAfterMs > 0);
+        const backedOff = await request('backed-off-login', '/qq/login/qr/key', { channel: 'qq' });
+        assert.equal(backedOff.body.code, 429);
+        assert.equal(backedOff.body.failureReason, 'local-backoff');
+        assert.equal(backedOff.body.lastFailure.failureStage, 'device-bootstrap');
         for (const route of ['/cloud', '/mv/url', '/personal_fm', '/qq/getLyric', '/qq/getComments']) {
             const rejected = await request(route, route);
             assert.equal(rejected.body.code, 503);

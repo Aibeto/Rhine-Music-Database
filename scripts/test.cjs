@@ -32,6 +32,8 @@ for (const script of [
     'Qt/tests/discover-state.mjs',
     'Qt/tests/account-actions.mjs',
     'Qt/tests/qq-state.mjs',
+    'Qt/tests/login-state.mjs',
+    'Qt/tests/device-state.cjs',
     'Qt/tests/performance.mjs',
 ]) {
     run(process.execPath, [script]);

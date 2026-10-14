@@ -495,6 +495,10 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     evaluate("App.hud.openModal('login');App.music.loginMethod='wechat';");
     refresh();
     check(!accountField->isVisible() && !passwordField->isVisible(), "QQ QR hides password form");
+    check(evaluate("App.hud.commands.filter(function(c){return c[0]==='text';})"
+                   ".map(function(c){return c[1];}).join('').indexOf('QQ 音乐账号只允许本人 7 天内')>=0")
+              .toBool(),
+          "QQ QR includes device limit guidance");
     if (!output.isEmpty()) {
         window->grabWindow().save(output + "/qq-login.png");
     }

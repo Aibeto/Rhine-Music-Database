@@ -15,6 +15,9 @@ axios.defaults.adapter = async (settings) => {
         throw new Error('Unexpected upstream');
     }
     const qq = destination.includes('qq.com');
+    if (qq && process.env.QQ_AUTH_STATE_PATH !== process.env.RHINE_QQ_DEVICE_STATE_PATH) {
+        throw new Error('QQ bridge discarded persistent device path');
+    }
     let data = qq
         ? {
               code: 0,

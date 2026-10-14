@@ -31,6 +31,24 @@ const allowed = new Set([
 let ready;
 let server;
 let sessions = [];
+// 只透传固定枚举及数字码，未知字段与原始异常始终留在私有服务内部。
+function safeQrDiagnostics(body, includePrevious = true) {
+    const result = {};
+    for (const name of ['failureStage', 'failureReason']) {
+        if (typeof body?.[name] === 'string' && /^[a-z-]{1,64}$/.test(body[name])) {
+            result[name] = body[name];
+        }
+    }
+    for (const name of ['upstreamHttpStatus', 'upstreamCode', 'upstreamGlobalCode', 'upstreamSubCode']) {
+        if (typeof body?.[name] === 'number' && Number.isFinite(body[name])) {
+            result[name] = body[name];
+        }
+    }
+    if (includePrevious && body?.lastFailure) {
+        result.lastFailure = safeQrDiagnostics(body.lastFailure, false);
+    }
+    return result;
+}
 async function charts(route, params) {
     // 沿用原包的 HTTP 传输与榜单操作，仅传递 GetAll 返回的真实周期。
     // 原 getRanks 控制器把日榜周期强制转成周数，会使日榜返回空列表。
@@ -114,8 +132,20 @@ async function start(cookies) {
     // 上游测试入口只跳过自动监听；在桥内创建仅回环可访问、带随机认证的服务。
     const previous = process.env.NODE_ENV;
     process.env.NODE_ENV = 'test';
-    process.env.QQ_AUTH_STATE_PATH = 'memory';
+    process.env.QQ_AUTH_STATE_PATH = process.env.RHINE_QQ_DEVICE_STATE_PATH || 'memory';
     process.env.QQ_ENABLE_UPDATE_CHECK = 'false';
+    // 首次启用持久设备配置时优先复用已保存账号的设备，避免升级额外注册设备。
+    const apiRoot = path.dirname(require.resolve('@yakult-green-tea/qq-music-api'));
+    const deviceContext = require(path.join(apiRoot, 'services/auth/deviceContext.js'));
+    const repository = deviceContext.createDefaultDeviceContextRepository();
+    if (!repository.load()) {
+        const previousSession = (Array.isArray(cookies.__qqSessions) ? cookies.__qqSessions : []).find(
+            (session) => session?.token === cookies.qqmusic_session && session?.expiresAt > Date.now(),
+        );
+        if (previousSession && deviceContext.isAndroidDevice(previousSession.device)) {
+            repository.save(previousSession.device);
+        }
+    }
     const qq = require('@yakult-green-tea/qq-music-api');
     if (previous === undefined) {
         delete process.env.NODE_ENV;
@@ -191,7 +221,8 @@ async function dispatch(message) {
                 code: response.status,
                 message:
                     response.status === 401 ? 'QQ 登录已失效，请重新登录' : 'QQ 音乐暂不可用，请稍后重试',
-                retryAfterMs: body.retryAfterMs,
+                retryAfterMs: body.retryAfterMs ?? Number(response.headers.get('Retry-After') || 0) * 1000,
+                ...safeQrDiagnostics(body),
             },
             cookies: [],
             qqSessions: sessions,

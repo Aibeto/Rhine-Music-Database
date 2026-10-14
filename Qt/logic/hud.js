@@ -14,6 +14,7 @@ import {
 import { groupRows } from './groups.js';
 import { pad, time } from './music-items.js';
 import { RollingLabel, SurfaceMotion } from './motion.js';
+import { QQ_DEVICE_NOTICE } from './login-state.js';
 // 所有坐标沿用 1080 高的原舞台；文字仍绘制授权字体的原始轮廓。
 export class HUD {
     constructor(host, glyphs, music, runtime) {
@@ -894,7 +895,19 @@ export class HUD {
         );
         if (['qr', 'wechat'].includes(music.loginMethod)) {
             this.image(music.qr, x + width / 2 - 120, y + 260, 240, 240);
-            this.button('重新生成二维码', x + 53, y + 626, 260, 40, 'music:qr', 15);
+            if (music.provider === 'qq') {
+                const lines = this.g.wrap(QQ_DEVICE_NOTICE, width - 106, 13);
+                lines.forEach((line, index) => this.text(line, x + 53, y + 520 + index * 18, 13));
+            }
+            if (music.canRegenerateLogin !== false) {
+                this.button('重新生成二维码', x + 53, y + 626, 260, 40, 'music:qr', 15);
+            } else {
+                const label =
+                    music.loginRetrySeconds > 0
+                        ? '请等待 ' + music.loginRetrySeconds + ' 秒后重新生成'
+                        : '正在处理扫码登录…';
+                this.text(label, x + 53, y + 636, 15);
+            }
         } else {
             this.text(
                 music.loginMethod === 'phone' ? '手机号码（中国大陆）' : '邮箱地址',

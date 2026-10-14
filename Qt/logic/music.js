@@ -3,6 +3,7 @@ import { QQAPI } from './qq.js';
 import { Player } from './player.js';
 import { Discover } from './discover.js';
 import { API } from './music-api.js';
+import { safeLoginDetails, loginFailureMessage } from './login-state.js';
 import { item, parse } from './music-items.js';
 export { API } from './music-api.js';
 export { item, parse, pad, time } from './music-items.js';
@@ -76,6 +77,10 @@ export class MusicStore {
         this.loginStatus = '';
         this.accountLoading = false;
         this.loginGeneration = 0;
+        this.loginPhase = 'idle';
+        this.loginCooldowns = {};
+        this.loginCancellations = {};
+        this.restoreCachedAccount();
         // 不同操作分别推进代数，防止搜索、账号或目录的迟到响应互相覆盖。
         this.wantsSongDetails = false;
         this.directory = null;
@@ -185,6 +190,9 @@ export class MusicStore {
         }
         this.identityNames[provider] = nickname;
         this.host.setPreference?.('welcome-name-' + provider, nickname);
+        if (provider === this.provider && this.uid) {
+            this.host.setPreference?.('account-id-' + provider, this.uid);
+        }
     }
 
     /**
@@ -209,6 +217,56 @@ export class MusicStore {
             this.changed();
         } catch (error) {
             // 旧凭据过期或网络不可用时保留已有记录，缺少记录时仍显示方块。
+        }
+    }
+
+    // 只恢复具有本机凭据的账号显示，服务器验证仍由 restoreAccount 完成。
+    restoreCachedAccount() {
+        const hasCredential = this.host.authenticated?.() || false;
+        this.uid = hasCredential ? this.host.preference?.('account-id-' + this.provider) || '' : '';
+        this.nickname = hasCredential ? this.identityNames[this.provider] || '正在恢复登录…' : '未登录';
+    }
+
+    get loginRetrySeconds() {
+        const deadline = this.loginCooldowns[this.provider]?.deadline || 0;
+        return Math.max(0, Math.ceil((deadline - Date.now()) / 1000));
+    }
+
+    get canRegenerateLogin() {
+        return this.loginRetrySeconds === 0 && !['preparing', 'confirming'].includes(this.loginPhase);
+    }
+
+    /**
+     * 保存当前来源的安全失败摘要，并遵守服务给出的冷却期限。
+     * 倒计时只更新失败提示，不允许旧计时器覆盖新登录或另一来源的状态。
+     */
+    reportLoginFailure(details) {
+        this.loginDiagnostics = safeLoginDetails(details);
+        const message = loginFailureMessage(details);
+        const retryAfterMs = Math.max(0, Number(this.loginDiagnostics.retryAfterMs) || 0);
+        const provider = this.provider;
+        this.loginPhase = 'failed';
+        this.loginStatus = message;
+        if (retryAfterMs > 0) {
+            const cooldown = { deadline: Date.now() + retryAfterMs, message };
+            this.loginCooldowns[provider] = cooldown;
+            this.updateLoginCooldown(provider, cooldown);
+        }
+        this.changed();
+    }
+
+    async updateLoginCooldown(provider, cooldown) {
+        while (this.loginCooldowns[provider] === cooldown) {
+            const seconds = Math.max(0, Math.ceil((cooldown.deadline - Date.now()) / 1000));
+            if (provider === this.provider && this.loginPhase === 'failed') {
+                this.loginStatus =
+                    cooldown.message + (seconds ? '（请等待 ' + seconds + ' 秒）' : '，可重新生成');
+                this.changed();
+            }
+            if (!seconds) {
+                return;
+            }
+            await this.api.delay(1000);
         }
     }
 
@@ -242,8 +300,9 @@ export class MusicStore {
         this.host.setPreference?.('provider', provider);
         this.api = provider === 'qq' ? new QQAPI(new API(this.host)) : new API(this.host);
         this.player.api = this.api;
-        this.uid = '';
-        this.nickname = '未登录';
+        this.restoreCachedAccount();
+        this.loginStatus = '';
+        this.loginDiagnostics = {};
         this.current = null;
         this.directory = null;
         this.groupView = null;
@@ -1228,7 +1287,23 @@ export class MusicStore {
             this.rememberIdentityName(this.provider, name);
             this.changed();
         } catch (error) {
-            // 账号刷新失败时保留当前显示状态，后续操作仍可报告错误。
+            if (token !== this.accountGeneration) {
+                return;
+            }
+            const isExpired =
+                error.code === 401 ||
+                error.authExpired ||
+                (this.provider === 'netease' && error.code === 301);
+            if (isExpired) {
+                this.uid = '';
+                this.nickname = '登录已失效';
+                this.host.setPreference?.('account-id-' + this.provider, '');
+                this.status = '登录已失效，请重新登录';
+            } else {
+                // 临时网络失败不删除账号和凭据，切换回来仍可继续验证。
+                this.status = '账号验证暂不可用，已保留本机登录记录';
+            }
+            this.changed();
         }
     }
     /**
@@ -1236,13 +1311,33 @@ export class MusicStore {
      * 每轮核对登录代数，已关闭或被替换的流程不能接受旧 Cookie。
      */
     async startLogin() {
-        this.cancelLogin();
+        if (!this.canRegenerateLogin) {
+            if (this.loginRetrySeconds > 0) {
+                this.loginPhase = 'failed';
+                this.loginStatus =
+                    this.loginCooldowns[this.provider].message +
+                    '（请等待 ' +
+                    this.loginRetrySeconds +
+                    ' 秒）';
+                this.changed();
+            }
+            return;
+        }
+        const cancellation = this.cancelLogin();
         const token = ++this.loginGeneration;
+        this.loginPhase = 'preparing';
+        this.loginDiagnostics = {};
         this.loginStatus = '准备二维码…';
         this.qr = '';
         this.accountLoading = true;
         this.changed();
         try {
+            if ((await cancellation) === false) {
+                throw new Error('旧二维码取消失败，请稍后重试');
+            }
+            if (token !== this.loginGeneration) {
+                return;
+            }
             const responseBody = await this.api.request(
                 '/login/qr/key',
                 {
@@ -1300,6 +1395,7 @@ export class MusicStore {
                     return '网易云';
                 }
             };
+            this.loginPhase = 'waiting';
             this.loginStatus = '请用' + selectLoginScanner() + '扫描并确认登录';
             this.changed();
             for (let i = 0; i < 300; i++) {
@@ -1321,15 +1417,23 @@ export class MusicStore {
                 }
                 const code = r.code ?? 800;
                 if (code === 800) {
-                    this.loginStatus = '二维码已过期，请重新生成';
-                    this.changed();
+                    this.qr = '';
+                    if (this.provider === 'qq') {
+                        this.reportLoginFailure(r);
+                    } else {
+                        this.loginPhase = 'failed';
+                        this.loginStatus = '二维码已过期，请重新生成';
+                        this.changed();
+                    }
                     return;
                 }
                 if (code === 802) {
+                    this.loginPhase = 'confirming';
                     this.loginStatus = '已扫描，请在手机上确认';
                     this.changed();
                 }
                 if (code === 803) {
+                    this.loginPhase = 'confirming';
                     const [id, name] = await this.api.account(() => token === this.loginGeneration);
                     if (token !== this.loginGeneration) {
                         return;
@@ -1343,6 +1447,9 @@ export class MusicStore {
                     this.nickname = name;
                     this.rememberIdentityName(this.provider, name);
                     this.qr = '';
+                    this.qrKey = '';
+                    this.loginPhase = 'complete';
+                    delete this.loginCooldowns[this.provider];
                     this.loginStatus = '已登录：' + name;
                     this.status = '已登录，可读取我的音乐';
                     this.loadMoreSource(2);
@@ -1350,14 +1457,20 @@ export class MusicStore {
                     return;
                 }
             }
+            this.loginPhase = 'failed';
             this.loginStatus = '二维码超时，请重新生成';
             this.changed();
         } catch (error) {
             if (token !== this.loginGeneration) {
                 return;
             }
-            this.loginStatus = error.message;
-            this.changed();
+            this.loginPhase = 'failed';
+            if (this.provider === 'qq' && error.code) {
+                this.reportLoginFailure(error);
+            } else {
+                this.loginStatus = error.message;
+                this.changed();
+            }
         } finally {
             if (token === this.loginGeneration) {
                 this.accountLoading = false;
@@ -1367,17 +1480,31 @@ export class MusicStore {
     }
 
     cancelLogin() {
-        if (this.provider === 'qq' && this.qrKey) {
-            this.api
-                .request('/login/qr/cancel', {
-                    key: this.qrKey,
-                })
-                .catch(() => {});
-        }
+        const previousKey = this.qrKey;
+        const previousAPI = this.api;
         ++this.loginGeneration;
         this.qrKey = '';
         this.qr = '';
+        this.loginPhase = 'idle';
         this.accountLoading = false;
+        if (this.provider === 'qq' && previousKey) {
+            const provider = this.provider;
+            const cancellation = previousAPI.request('/login/qr/cancel', { key: previousKey }).then(
+                () => true,
+                () => {
+                    // 关闭时先在本地隔离旧回调；重新生成时由调用方报告取消失败。
+                    return false;
+                },
+            );
+            this.loginCancellations[provider] = cancellation;
+            cancellation.then(() => {
+                if (this.loginCancellations[provider] === cancellation) {
+                    delete this.loginCancellations[provider];
+                }
+            });
+            return cancellation;
+        }
+        return this.loginCancellations[this.provider] || Promise.resolve(true);
     }
     /**
      * 退出当前账号并撤销其登录、资料和播放请求。
@@ -1398,6 +1525,7 @@ export class MusicStore {
         this.cancelLogin();
         ++this.accountGeneration;
         this.host.logout();
+        this.host.setPreference?.('account-id-' + this.provider, '');
         this.uid = '';
         this.nickname = '未登录';
         this.likedIDs = null;
