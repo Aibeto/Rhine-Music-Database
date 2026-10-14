@@ -1868,6 +1868,10 @@ export class HUD {
             }
             return;
         }
+        if (action === 'back') {
+            // 先关闭歌词
+            this.lyricsMode = false;
+        }
         if (action === 'back' && music.directory) {
             if (this.frame.mode === 'detail') {
                 music.returnToDirectory();
@@ -2209,7 +2213,6 @@ export class HUD {
                 this.r.setMode('archive');
                 break;
             case 'back':
-                this.lyricsMode = false;
                 this.r.setMode('archive');
                 break;
             case 'search':
