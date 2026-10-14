@@ -996,7 +996,7 @@ export class MusicStore {
             this.changed();
             return;
         }
-        return this.player.play(this.current, this.directoryQueue());
+        return this.player.play(this.current);
     }
 
     directoryQueue() {

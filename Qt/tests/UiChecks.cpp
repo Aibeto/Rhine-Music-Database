@@ -500,6 +500,10 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     }
     evaluate("App.hud.openModal('settings');");
     refresh();
+    check(evaluate("App.hud.hits.filter(function(h){return h.action==='provider';}).length===1 && "
+                   "!App.hud.hits.some(function(h){return h.action.indexOf('provider:')===0;})")
+              .toBool(),
+          "settings shows one platform switch entry");
     if (!output.isEmpty()) {
         window->grabWindow().save(output + "/settings.png");
     }
@@ -525,7 +529,9 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     if (!output.isEmpty()) {
         window->grabWindow().save(output + "/qq-login.png");
     }
-    evaluate("App.hud.action('provider');");
+    evaluate("App.hud.openModal('settings');");
+    refresh();
+    check(click("provider"), "settings platform switch opens provider card");
     refresh();
     check(evaluate("App.hud.hits.filter(function(h){return h.action.indexOf('provider:')===0;}).length===3")
               .toBool(),

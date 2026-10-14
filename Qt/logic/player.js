@@ -39,13 +39,22 @@ export class Player {
         }
     }
 
+    /**
+     * 将曲目放到下一首或队尾，已有待播项移动到目标位置。
+     * 当前曲目可以再次排入待播区，调整队列时保留正在播放的索引。
+     */
     enqueue(value, next = false) {
         if (value?.kind !== 'song') {
             return;
         }
-        const existing = this.queue.findIndex((s) => identity(s) === identity(value));
+        const existing = this.queue.findIndex(
+            (song, index) => index !== this.index && identity(song) === identity(value),
+        );
         if (existing >= 0) {
-            return;
+            this.queue.splice(existing, 1);
+            if (existing < this.index) {
+                --this.index;
+            }
         }
         this.queue.splice(next ? Math.max(0, this.index + 1) : this.queue.length, 0, value);
         this.changed();
@@ -54,7 +63,7 @@ export class Player {
      * 替换或选择播放队列中的曲目，异步读取详情和音源。
      * 每次播放推进代数，停止或切歌后的迟到结果不能恢复旧曲目。
      */
-    async play(value, source = null) {
+    async play(value, source = null, queueIndex = null) {
         if (value?.kind !== 'song') {
             return;
         }
@@ -71,7 +80,7 @@ export class Player {
         if (!this.queue.some((s) => identity(s) === identity(value))) {
             this.queue.push(value);
         }
-        this.index = this.queue.findIndex((s) => identity(s) === identity(value));
+        this.index = queueIndex ?? this.queue.findIndex((s) => identity(s) === identity(value));
         const token = ++this.generation;
         this.host.mediaControl?.('stop');
         this.current = value;
@@ -230,7 +239,7 @@ export class Player {
             return;
         }
         if (ended && this.mode === 'one') {
-            this.play(this.current);
+            this.play(this.current, null, this.index);
             return;
         }
         let index = this.index + direction;
@@ -244,7 +253,7 @@ export class Player {
             return;
         }
         index = ((index % this.queue.length) + this.queue.length) % this.queue.length;
-        this.play(this.queue[index]);
+        this.play(this.queue[index], null, index);
     }
 
     remove(index) {

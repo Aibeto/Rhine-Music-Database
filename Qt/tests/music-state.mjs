@@ -157,6 +157,13 @@ let searches = 0;
     );
     assert.equal(queue[0], loaded);
     assert.equal(queue[1].deferred, true);
+    const plays = [];
+    t.store.player.play = (...args) => plays.push(args);
+    t.store.current = loaded;
+    t.store.play();
+    assert.deepEqual(plays[0], [loaded]);
+    t.store.playDirectory();
+    assert.deepEqual(plays[1], [loaded, queue]);
     console.log('Full playlist queues retain all IDs before paged metadata is loaded');
 }
 f.host.respond = (route) =>

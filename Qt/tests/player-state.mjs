@@ -172,3 +172,39 @@ await stale;
 assert.equal(p.current, null);
 assert.equal(metadata[1].valid(), false);
 console.log('Deferred full-playlist metadata loads on demand and cannot revive playback after stop');
+
+// 已有曲目重新排序、当前曲目再次排入待播区，都不能中断当前音源。
+const ordered = new Player(host, {
+    playback: async () => ({ url: 'https://m.music.126.net/local' }),
+});
+const c = song(3);
+const d = song(4);
+await ordered.play(b, [a, b, c, d]);
+const generation = ordered.generation;
+ordered.enqueue(d, true);
+assert.deepEqual(
+    ordered.queue.map((value) => value.id),
+    ['1', '2', '4', '3'],
+);
+ordered.enqueue(a);
+assert.deepEqual(
+    ordered.queue.map((value) => value.id),
+    ['2', '4', '3', '1'],
+);
+assert.equal(ordered.index, 0);
+assert.equal(ordered.current, b);
+assert.equal(ordered.generation, generation);
+ordered.enqueue(b, true);
+assert.deepEqual(
+    ordered.queue.map((value) => value.id),
+    ['2', '2', '4', '3', '1'],
+);
+ordered.next();
+assert.equal(ordered.index, 1);
+ordered.next();
+assert.equal(ordered.current, d);
+assert.equal(ordered.index, 2);
+ordered.enqueue(b);
+assert.equal(ordered.current, d);
+assert.equal(ordered.queue[ordered.index], d);
+console.log('Existing queue items move, current tracks can repeat, and progression preserves queue indices');

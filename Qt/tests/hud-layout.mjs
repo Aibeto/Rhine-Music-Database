@@ -107,6 +107,14 @@ for (const width of [1440, 1728, 1920, 2560]) {
     };
     const hud = new HUD({}, glyphs, store, {});
     hud.w = width;
+    hud.navigation(width);
+    const discovery = hud.hits.find((hit) => hit.action === 'discover');
+    const search = hud.hits.find((hit) => hit.action === 'search');
+    assert.equal(discovery.y, search.y);
+    assert.equal(discovery.height, search.height);
+    assert(discovery.x + discovery.width <= search.x);
+    assert(!hud.hits.some((hit) => hit.action === 'provider'));
+    hud.hits = [];
     hud.frame = {
         mode: 'detail',
     };

@@ -272,10 +272,8 @@ export class HUD {
     }
 
     navigation(w) {
-        this.button('发现音乐 ↗', 59, 211, 180, 35, 'discover', 14);
-        this.fill(259, 211, 205, 35, this.dark ? [0.55, 0.59, 0.46, 0.25] : [0.44, 0.49, 0.36, 0.18]);
-        this.button('平台 / ' + (this.s.providerName || '网易云') + ' ▾', 269, 211, 195, 35, 'provider', 14);
         const x = w - 579;
+        this.control('发现音乐 ↗', x - 210, 118, 184, 'discover');
         this.control('音乐检索  /', x, 118, 184, 'search');
         this.control('＋ 我的音乐', x + 200, 118, 184, 'saved');
         this.control('设置', x + 400, 118, 120, 'settings');
@@ -295,7 +293,7 @@ export class HUD {
         const x = w * 0.50520833;
         const music = this.s;
         if (music.directory) {
-            this.control('← 返回上一级', 59, 281, 280, 'music:parent');
+            this.control('← 返回上一级', 59, 211, 280, 'music:parent');
         }
         this.text('MUSIC DATABASE / ' + music.libraryName, x, 471, 12);
         // 保持原有判断顺序，仅计算当前需要的分支结果。
@@ -316,7 +314,7 @@ export class HUD {
         if (item) {
             const x = w * 0.50520833;
             if (music.directory) {
-                this.control('← 返回上一级', 59, 281, 280, 'music:parent');
+                this.control('← 返回上一级', 59, 211, 280, 'music:parent');
                 this.control('查看音乐详情 ↗', 59, 347, 310, 'music:directory-info');
             }
             this.roll('music-source', 'MUSIC DATABASE / ' + music.libraryName, x, 471, 12, w - x - 59);
@@ -416,7 +414,7 @@ export class HUD {
             696,
             this.dark ? [0.08, 0.095, 0.09, 0.96] : [0.929, 0.922, 0.894, 0.96],
         );
-        this.button('← 返回资料库   ESC', 59, 281, 360, 54, 'back', 20, 'demibold');
+        this.button('← 返回资料库   ESC', 59, 211, 360, 54, 'back', 20, 'demibold');
         this.limited(item.id, 60, 845, 37, 330);
         this.text('MUSIC DATABASE', 60, 893, 10);
         this.text('DRAG TO INSPECT', 60, 917, 10);
@@ -585,7 +583,7 @@ export class HUD {
             this.dark ? [0.08, 0.095, 0.09, 1] : [0.929, 0.922, 0.894, 1],
         );
         this.rule(x - 18, 278, 1, 0.12);
-        this.button('← 返回曲目资料库   ESC', sx, 274, sideWidth, 54, 'music:directory', 20, 'demibold');
+        this.button('← 返回曲目资料库   ESC', sx, 211, sideWidth, 54, 'music:directory', 20, 'demibold');
         // 保持原有判断顺序，仅计算当前需要的分支结果。
 
         this.text(collectionLabel(item), sx, 325, 11);
@@ -1423,7 +1421,9 @@ export class HUD {
         const left = x + 53;
         const usable = width - 106;
         this.text('PROVIDER ACCESS / 音乐平台', left, y + 184, 12, 'demibold');
-        this.platformChoices(left, y + 210, usable);
+        this.fill(left, y + 210, usable, 66, this.dark ? [1, 1, 1, 0.025] : [0, 0, 0, 0.025]);
+        this.text('当前平台 / ' + music.providerName, left + 12, y + 233, 17, 'demibold');
+        this.button('切换平台 ▾', left + usable - 235, y + 225, 225, 36, 'provider', 13);
         this.button(
             music.uid ? '退出登录 / ' + music.nickname : '登录 / ' + music.providerName,
             left,
@@ -1650,7 +1650,7 @@ export class HUD {
                     break;
                 case 'queue':
                     if (p.queue[n]) {
-                        p.play(p.queue[n]);
+                        p.play(p.queue[n], null, n);
                     }
                     break;
                 case 'remove':
