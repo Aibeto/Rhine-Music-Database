@@ -37,6 +37,14 @@ qt_add_executable(
     Qt/src/AppStorage.h
     Qt/src/DiscGeometry.cpp
     Qt/src/DiscGeometry.h
+    Qt/src/FrameProfiler.cpp
+    Qt/src/FrameProfiler.h
+    Qt/src/NativeCards.cpp
+    Qt/src/NativeCards.h
+    Qt/src/ArchiveField.cpp
+    Qt/src/ArchiveField.h
+    Qt/src/NativePicking.cpp
+    Qt/src/NativePicking.h
     Qt/tests/UiChecks.cpp
     Qt/src/Icon.cpp
     Qt/src/SceneRuntime.cpp

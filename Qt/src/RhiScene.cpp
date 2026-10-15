@@ -101,7 +101,6 @@ class Renderer {
     QRhiSampler *linear = nullptr, *nearest = nullptr, *mipSampler = nullptr, *repeat = nullptr,
                 *shadowSampler = nullptr;
     Target color, opaqueColor, normal, ao, blur, combined, bokeh, target;
-    QRhiTexture *packedDepth = nullptr;
     QRhiTextureRenderTarget *loaded = nullptr, *shadowTarget = nullptr;
     QRhiRenderPassDescriptor *shadowPass = nullptr;
     QRhiResourceUpdateBatch *updates = nullptr;
@@ -127,6 +126,7 @@ class Renderer {
     quint64 generation = 0;
     quint64 bindingCreations = 0;
     quint64 coverUploads = 0;
+    quint64 drawCalls = 0;
     QByteArray shadowRevision;
     bool shadowValid = false;
     QHash<QString, QRhiTexture *> labels, covers;
@@ -306,7 +306,7 @@ class Renderer {
             state.bindings = nullptr;
         }
     }
-    void resize(QSize value) {
+    void resize(QSize value, bool needsReadbackTarget) {
         if (size == value) {
             return;
         }
@@ -330,12 +330,23 @@ class Renderer {
         opaqueColor = makeTarget(texture(size, QRhiTexture::RGBA16F, rtFlags, true));
         capture = texture(size, QRhiTexture::RGBA16F,
                           rtFlags | QRhiTexture::MipMapped | QRhiTexture::UsedWithGenerateMips, true);
-        packedDepth = texture(size, QRhiTexture::RGBA16F, rtFlags, true);
-        normal = makeTarget(texture(size, QRhiTexture::RGBA16F, rtFlags, true), normalDepth, packedDepth);
-        for (auto t : {&ao, &blur, &combined, &bokeh}) {
-            *t = makeTarget(texture(size, QRhiTexture::RGBA16F, rtFlags, true));
+        // AO 和景深共用真实 D32F 深度，不再额外打包、写入和解包四通道深度图。
+        normal = makeTarget(texture(size, QRhiTexture::RGBA16F, rtFlags, true), normalDepth);
+        // AO 和模糊只使用红通道，R16F 保留同样的半精度数值，减少四通道显存和带宽。
+        const auto aoFormat = rhi->isTextureFormatSupported(QRhiTexture::R16F, rtFlags)
+                                  ? QRhiTexture::R16F
+                                  : QRhiTexture::RGBA16F;
+        for (auto t : {&ao, &blur}) {
+            *t = makeTarget(texture(size, aoFormat, rtFlags, true));
         }
-        target = makeTarget(texture(size, QRhiTexture::RGBA8, rtFlags, true));
+        combined = makeTarget(texture(size, QRhiTexture::RGBA16F, rtFlags, true));
+        // AO 完成后不再读取法线颜色；景深复用其 HDR 纹理，避免再分配一张全尺寸中间图。
+        // 此目标不挂载深度附件，因此可安全采样 normalDepth，不形成读写反馈。
+        bokeh = makeTarget(normal.texture);
+        target = {};
+        if (needsReadbackTarget) {
+            target = makeTarget(texture(size, QRhiTexture::RGBA8, rtFlags, true));
+        }
         auto desc = color.rt->description();
         loaded =
             own(rhi->newTextureRenderTarget(desc, QRhiTextureRenderTarget::PreserveColorContents |
@@ -742,6 +753,8 @@ class Renderer {
     struct Draw {
         QJsonObject data;
         QRhiBuffer *vertices, *indices, *instances;
+        QRhiTexture *label;
+        QRhiTexture *cover;
         int start;
         int count;
         QRhiShaderResourceBindings *bindings;
@@ -825,7 +838,80 @@ class Renderer {
                                                                cover, linear)},
                     false);
             }
-            result.append({d, vertices, indices, instance(d), start, count, state.bindings});
+            result.append({d, vertices, indices, instance(d), label, cover, start, count, state.bindings});
+        }
+        return result;
+    }
+    QHash<QByteArray, BufferState> batchInstances;
+    /**
+     * 把同几何的阴影物体和完全相同材质的不透明物体合成实例批次。
+     * 透明与透射物体保留原排序；每个实例继续使用原来的矩阵、主题和揭示状态。
+     */
+    QList<Draw> batchDraws(const QList<Draw> &input, bool shadowPass, bool normalPass = false) {
+        QList<Draw> result;
+        QList<QByteArray> bytes;
+        QList<QByteArray> keys;
+        QHash<QByteArray, int> groups;
+        QHash<QByteArray, int> groupSlots;
+        for (const auto &draw : input) {
+            const auto &data = draw.data;
+            if (shadowPass && !(data["castShadow"].toBool() || data["shadowOnly"].toBool())) {
+                continue;
+            }
+            if (!shadowPass && data["shadowOnly"].toBool()) {
+                continue;
+            }
+            const auto material = surface(data);
+            const bool eligible = shadowPass || normalPass ||
+                                  (!data["transparent"].toBool() && n(data, "transmission") <= .000001 &&
+                                   material.flags.x() != 2 && data["depthWrite"].toBool());
+            if (!eligible) {
+                result.append(draw);
+                bytes.append(QByteArray());
+                keys.append(QByteArray());
+                continue;
+            }
+            QByteArray prefix = "opaque/";
+            if (shadowPass) {
+                prefix = "shadow/";
+            } else if (normalPass) {
+                prefix = "normal/";
+            }
+            auto key = prefix + QByteArray::number(quintptr(draw.vertices)) + '/' +
+                       QByteArray::number(quintptr(draw.indices)) + '/' + QByteArray::number(draw.start) +
+                       '/' + QByteArray::number(draw.count) + '/' +
+                       QByteArray::number(normalPass ? 0 : data["side"].toInt());
+            if (!shadowPass && !normalPass) {
+                key += '/' + QByteArray::number(data["order"].toInt()) + '/' +
+                       QByteArray::number(quintptr(draw.label)) + '/' +
+                       QByteArray::number(quintptr(draw.cover)) + ':';
+            }
+            const auto bufferKey = key;
+            if (!shadowPass && !normalPass) {
+                key.append(reinterpret_cast<const char *>(&material), sizeof(material));
+            }
+            auto group = groups.constFind(key);
+            int index;
+            if (group == groups.constEnd()) {
+                index = result.size();
+                groups.insert(key, index);
+                result.append(draw);
+                result.last().data["count"] = 0;
+                bytes.append(QByteArray());
+                // 材质插值每帧变化，但批次缓冲区按几何和槽位复用，不能按材质值反复创建。
+                const int slot = groupSlots[bufferKey]++;
+                keys.append(bufferKey + '/' + QByteArray::number(slot));
+            } else {
+                index = group.value();
+            }
+            bytes[index].append(instances.value(data["id"].toInt()).bytes);
+            result[index].data["count"] = result[index].data["count"].toInt() + data["count"].toInt();
+        }
+        for (int i = 0; i < result.size(); ++i) {
+            if (!keys[i].isEmpty()) {
+                result[i].instances =
+                    dynamicBuffer(batchInstances[keys[i]], bytes[i], QRhiBuffer::VertexBuffer);
+            }
         }
         return result;
     }
@@ -857,6 +943,7 @@ class Renderer {
             } else {
                 cb->draw(draw.count, d["count"].toInt(), draw.start);
             }
+            ++drawCalls;
         }
     }
     void quad(QRhiCommandBuffer *cb, QString kind, QRhiRenderTarget *rt, QRhiRenderPassDescriptor *rp,
@@ -889,6 +976,7 @@ class Renderer {
         cb->setShaderResources(sb);
         cb->setViewport({0, 0, float(size.width()), float(size.height())});
         cb->draw(3);
+        ++drawCalls;
         cb->endPass();
     }
     void render(QRhiCommandBuffer *cb, QJsonObject frame, QSize dimensions, QJsonObject item, QImage cover,
@@ -898,7 +986,7 @@ class Renderer {
         if (!updates) {
             updates = rhi->nextResourceUpdateBatch();
         }
-        resize(dimensions);
+        resize(dimensions, !finalTarget);
         activeTextureKeys.clear();
         activeTextureKeys.insert(item["key"].toString("empty"));
         for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
@@ -931,8 +1019,8 @@ class Renderer {
                 ++it;
             }
         }
-        cb->resourceUpdate(updates);
-        updates = nullptr;
+        const bool useBatches = frame["batchDraws"].toBool(true);
+        auto shadowDraws = useBatches ? batchDraws(data, true) : data;
         QByteArray shadowInputs;
         for (const auto &draw : data) {
             if (draw.data["castShadow"].toBool() || draw.data["shadowOnly"].toBool()) {
@@ -945,8 +1033,11 @@ class Renderer {
             }
         }
         if (!shadowValid || shadowInputs != shadowRevision) {
+            // 合批缓冲区与其他实例更新一起提交，阴影只需按几何而非按卡片发出指令。
+            cb->resourceUpdate(updates);
+            updates = nullptr;
             cb->beginPass(shadowTarget, Qt::black, {1, 0});
-            geometry(cb, data, "shadow", shadowPass);
+            geometry(cb, shadowDraws, "shadow", shadowPass);
             cb->endPass();
             shadowRevision = shadowInputs;
             shadowValid = true;
@@ -973,6 +1064,28 @@ class Renderer {
         sort(glass);
         sort(transparent);
         sort(backs);
+        // 阴影未重绘时更新批次仍未提交；颜色通道需要的实例缓冲区在此准备。
+        if (!updates) {
+            updates = rhi->nextResourceUpdateBatch();
+        }
+        if (useBatches) {
+            opaque = batchDraws(opaque, false);
+        }
+        QList<Draw> normalDraws;
+        if (!frame["viewer"].toBool()) {
+            normalDraws =
+                useBatches && frame["batchNormal"].toBool(true) ? batchDraws(data, false, true) : data;
+        }
+        for (auto it = batchInstances.begin(); it != batchInstances.end();) {
+            if (it->used != generation) {
+                retire(it->buffer);
+                it = batchInstances.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        cb->resourceUpdate(updates);
+        updates = nullptr;
         auto bg = vector(frame["background"]);
         cb->beginPass(color.rt, QColor::fromRgbF(bg.x(), bg.y(), bg.z()), {1, 0});
         geometry(cb, opaque, "surface", color.rp);
@@ -1000,12 +1113,12 @@ class Renderer {
         cb->endPass();
         if (!frame["viewer"].toBool()) {
             cb->beginPass(normal.rt, Qt::white, {1, 0});
-            geometry(cb, data, "normal", normal.rp);
+            geometry(cb, normalDraws, "normal", normal.rp);
             cb->endPass();
             quad(cb, "aoFragment", ao.rt, ao.rp, {normal.texture, normalDepth, noise});
             quad(cb, "blurAO", blur.rt, blur.rp, {ao.texture});
             quad(cb, "combineAO", combined.rt, combined.rp, {color.texture, blur.texture});
-            quad(cb, "bokehFragment", bokeh.rt, bokeh.rp, {combined.texture, packedDepth});
+            quad(cb, "bokehFragment", bokeh.rt, bokeh.rp, {combined.texture, normalDepth});
         }
         auto destination = finalTarget ? finalTarget : target.rt;
         quad(cb, "finalFragment", destination, destination->renderPassDescriptor(),
@@ -1052,12 +1165,13 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         renderer->nativeBuffers = buffers;
         const auto previousBindings = renderer->bindingCreations;
         const auto previousUploads = renderer->coverUploads;
+        const auto previousDrawCalls = renderer->drawCalls;
         renderer->render(cb, frame, renderTarget()->pixelSize(), item, cover, renderTarget(), musicTextures);
         if (backend) {
-            backend->recordRender(renderer->resources.size() + renderer->sized.size() +
-                                      renderer->transient.size(),
-                                  renderer->bindingCreations - previousBindings,
-                                  renderer->musicTextureBytes(), renderer->coverUploads - previousUploads);
+            backend->recordRender(
+                renderer->resources.size() + renderer->sized.size() + renderer->transient.size(),
+                renderer->bindingCreations - previousBindings, renderer->musicTextureBytes(),
+                renderer->coverUploads - previousUploads, renderer->drawCalls - previousDrawCalls);
         }
     }
 };
@@ -1085,7 +1199,8 @@ QQuickRhiItemRenderer *RhiScene::createRenderer() {
  * 使用同一份场景数据生成参考图，供离线渲染比较使用。
  */
 QImage renderReference(const QString &root, const QJsonObject &frame, const QJsonObject &item,
-                       const QImage &cover, QSize size, const SceneRuntime::DrawBuffers &buffers) {
+                       const QImage &cover, QSize size, const SceneRuntime::DrawBuffers &buffers,
+                       quint64 *drawCalls) {
     std::unique_ptr<QRhi> rhi;
 #ifdef Q_OS_MACOS
     QRhiMetalInitParams params;
@@ -1112,6 +1227,9 @@ QImage renderReference(const QString &root, const QJsonObject &frame, const QJso
     Renderer renderer(root, rhi.get());
     renderer.nativeBuffers = buffers;
     renderer.render(cb, frame, size, item, cover);
+    if (drawCalls) {
+        *drawCalls = renderer.drawCalls;
+    }
     QRhiReadbackResult result;
     bool completed = false;
     result.completed = [&] { completed = true; };

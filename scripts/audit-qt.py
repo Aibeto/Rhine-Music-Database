@@ -8,7 +8,8 @@ import subprocess
 import sys
 
 app = pathlib.Path(sys.argv[1]).resolve()
-mac = sys.platform == "darwin"
+# 根据产物类型选择静态审计规则，允许在构建主机检查另一平台的部署目录。
+mac = app.suffix.lower() == ".app"
 resources = app / ("Contents/Resources" if mac else "resources")
 executable = app / ("Contents/MacOS/RhineMusicDatabase" if mac else "RHINE MUSIC DATABASE.exe")
 assert executable.is_file()

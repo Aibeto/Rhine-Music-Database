@@ -1,72 +1,9 @@
 import * as THREE from 'three';
-const surfaces: Record<string, string> = {
-    Frosted_Polymer: '#626b70',
-    Ivory_Edges: '#687277',
-    Optical_Diffuser: '#192226',
-    Titanium_Fasteners: '#b1b9bb',
-    Index_Inlay: '#c6a36b',
-    Printed_Label: '#303a3e',
-    Subsurface_Optics: '#939e9f',
-    Optical_Edges: '#bbc3bc',
-    Carbon_Ink: '#b6bdb8',
-};
-/** 扩展既有光学着色器，每实例一个浮点值，避免新增网格或通道。 */
-export function themeMaterial(
-    material: THREE.Material,
-    name: string,
-    instanced = false,
-    subduedIndex = {
-        value: 0,
-    },
-) {
-    const amount = {
-        value: 0,
-    };
-    const before = material.onBeforeCompile;
-    const cache = material.customProgramCacheKey.bind(material)();
-    const color = new THREE.Color(surfaces[name] ?? (name.includes('Orange') ? '#bb8850' : '#969f9f'));
-    material.onBeforeCompile = (shader, renderer) => {
-        before.call(material, shader, renderer);
-        shader.uniforms.rhineTheme = amount;
-        shader.uniforms.rhineDarkSurface = {
-            value: color,
-        };
-        shader.uniforms.rhineSubduedIndex = subduedIndex;
-        if (instanced) {
-            shader.vertexShader =
-                'attribute float archiveTheme; varying float vRhineTheme;\n' + shader.vertexShader;
-            shader.vertexShader = shader.vertexShader.replace(
-                '#include <begin_vertex>',
-                '#include <begin_vertex>\nvRhineTheme = archiveTheme;',
-            );
-            shader.fragmentShader = 'varying float vRhineTheme;\n' + shader.fragmentShader;
-        }
-        shader.fragmentShader =
-            'uniform float rhineTheme; uniform vec3 rhineDarkSurface; uniform float rhineSubduedIndex;\n' +
-            shader.fragmentShader;
-        const mix = instanced ? 'vRhineTheme' : 'rhineTheme';
-        const printed = name === 'Printed_Canvas';
-        const anchor = printed ? '#include <opaque_fragment>' : '#include <roughnessmap_fragment>';
-        let dark: string;
-        if (printed) {
-            dark =
-                'mix(vec3(0.023, 0.032, 0.037), vec3(0.78, 0.78, 0.71), 1.0 - smoothstep(0.12, 0.65, dot(diffuseColor.rgb, vec3(.2126,.7152,.0722))))';
-        } else if (name === 'Frosted_Polymer' && !instanced) {
-            dark =
-                'mix(rhineDarkSurface, vec3(0.92, 0.96, 0.97), glassRevealAtHeight(archiveClarity, vArchiveHeight))';
-        } else if (name === 'Index_Inlay') {
-            dark = 'mix(rhineDarkSurface, vec3(0.030, 0.042, 0.048), rhineSubduedIndex)';
-        } else {
-            dark = 'rhineDarkSurface';
-        }
-        const output = printed ? 'outgoingLight' : 'diffuseColor.rgb';
-        shader.fragmentShader = shader.fragmentShader.replace(
-            anchor,
-            `${output} = mix(${output}, ${dark}, ${mix});\n${anchor}`,
-        );
-    };
-    material.customProgramCacheKey = () => `${cache}-rhine-theme-${name}-${instanced}`;
-    return amount;
+import type { NativeSceneOutput } from '../Resources/platform';
+
+/** 创建 Qt 原生着色器读取的主题状态，不再安装 WebGL 编译回调。 */
+export function themeMaterial() {
+    return { value: 0 };
 }
 type Baseline = {
     background: THREE.Color;
@@ -86,7 +23,7 @@ const scenes = new WeakMap<THREE.Scene, Baseline>();
 const background = new THREE.Color('#11181b');
 const floorColor = new THREE.Color('#192125');
 const mistColor = new THREE.Color('#263136');
-export function themeEnvironment(scene: THREE.Scene, renderer: THREE.WebGLRenderer, amount: number) {
+export function themeEnvironment(scene: THREE.Scene, renderer: NativeSceneOutput, amount: number) {
     let baseline = scenes.get(scene);
     if (!baseline) {
         const lights: Baseline['lights'] = [];

@@ -1,6 +1,7 @@
 #include "AppIdentity.h"
 #include "AppStorage.h"
 #include "Engine.h"
+#include "FrameProfiler.h"
 #include "Hud.h"
 #include "RhiScene.h"
 #include <QDir>
@@ -122,6 +123,14 @@ int main(int argc, char **argv) {
     window->show();
 #endif
     window->installEventFilter(&backend);
+    if (args.contains("--frame-profile")) {
+        const auto path = args.value(args.indexOf("--frame-profile") + 1);
+        if (path.isEmpty() || path.startsWith("--")) {
+            qWarning() << "--frame-profile requires an output CSV path";
+            return 1;
+        }
+        new FrameProfiler(&backend, window, path);
+    }
     // 短暂切换窗口继续复用 GPU；隐藏或最小化超过两秒才释放图形设备和可重建缓存。
     auto backgroundRelease = new QTimer(window);
     backgroundRelease->setSingleShot(true);

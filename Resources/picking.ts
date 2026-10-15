@@ -1,4 +1,4 @@
-import * as T from '../node_modules/three/build/three.module.js';
+import * as T from '../node_modules/three/build/three.core.js';
 // 碰撞加速结构不改变渲染网格及其命中三角形。
 type Node = {
     box: T.Box3;
@@ -76,6 +76,14 @@ const b = new T.Vector3();
 const c = new T.Vector3();
 const hit = new T.Vector3();
 const boxHit = new T.Vector3();
+function usesNativePicking(geometry: T.BufferGeometry) {
+    const assets = (globalThis as any).NativeAssets;
+    return (
+        geometry.userData.asset === 'cassette' &&
+        geometry.userData.nativeMesh >= 0 &&
+        typeof assets?.raycastMesh === 'function'
+    );
+}
 T.Mesh.prototype.raycast = function (raycaster, intersects) {
     const g = this.geometry;
     const m = this.material as T.Material;
@@ -91,6 +99,24 @@ T.Mesh.prototype.raycast = function (raycaster, intersects) {
     }
     inverse.copy(this.matrixWorld).invert();
     ray.copy(raycaster.ray).applyMatrix4(inverse);
+    if (usesNativePicking(g)) {
+        // 只有已烘焙、不可变的原生卡片模型使用 C++ BVH；标签及查看器保留原路径。
+        const result = (globalThis as any).NativeAssets.raycastMesh(
+            g.userData.nativeMesh,
+            ray.origin.toArray(),
+            ray.direction.toArray(),
+            m.side,
+        );
+        if (typeof result.x !== 'number') {
+            return;
+        }
+        const point = new T.Vector3(result.x, result.y, result.z).applyMatrix4(this.matrixWorld);
+        const distance = raycaster.ray.origin.distanceTo(point);
+        if (distance >= raycaster.near && distance <= raycaster.far) {
+            intersects.push({ distance, point, object: this });
+        }
+        return;
+    }
     const root = tree(g);
     if (!ray.intersectsBox(root.box)) {
         return;
@@ -148,7 +174,11 @@ T.Mesh.prototype.raycast = function (raycaster, intersects) {
 export function preparePicking(scene: T.Object3D) {
     scene.traverse((o: any) => {
         if (o.isMesh && o.geometry.attributes.position) {
-            tree(o.geometry);
+            if (usesNativePicking(o.geometry)) {
+                (globalThis as any).NativeAssets.preparePicking();
+            } else {
+                tree(o.geometry);
+            }
         }
     });
 }

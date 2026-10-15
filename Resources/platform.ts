@@ -1,5 +1,5 @@
-import * as T from '../node_modules/three/build/three.module.js';
-export * from '../node_modules/three/build/three.module.js';
+import * as T from '../node_modules/three/build/three.core.js';
+export * from '../node_modules/three/build/three.core.js';
 // 原生音乐外壳不使用这些表面，但保留几何用于完整的射线拾取。
 export const NATIVE_HIDDEN_SURFACES = new Set([
     'Internal_Ceramic',
@@ -11,6 +11,31 @@ export const NATIVE_HIDDEN_SURFACES = new Set([
     'Champagne_Index',
     'Printed_Label',
 ]);
+
+/**
+ * 原生路径批量写入 Float32 实例数据，差分和上传范围由 C++ 缓冲区管理器负责。
+ * 不在 QJSEngine 中重复逐标量 Math.fround、比较和记录 WebGL 上传范围。
+ */
+export class InstanceUpdates {
+    private changed = false;
+    constructor(readonly attribute: T.InstancedBufferAttribute) {}
+
+    set(offset: number, values: ArrayLike<number>) {
+        this.attribute.array.set(values, offset);
+        this.changed = true;
+    }
+
+    scalar(offset: number, value: number) {
+        this.attribute.array[offset] = value;
+        this.changed = true;
+    }
+
+    commit() {
+        const changed = this.changed;
+        this.changed = false;
+        return changed;
+    }
+}
 
 /**
  * 将原生模型的只读坐标压成 TypedArray，释放 JSON 数字数组。
@@ -248,8 +273,63 @@ export class NativeElement {
     }
 }
 
-export class WebGLRenderer {
-    readonly isNativeStateOnly = true;
+export class NativeSceneOutput {
+    private cardSource?: T.Group;
+    private cardProbes: T.Mesh[] = [];
+    private cardBounds = new T.Sphere();
+    private cardPickSphere = new T.Sphere();
+    /**
+     * 原生归位卡片只保存根变换和动画状态，共享一套几何及拾取探针。
+     * 不为每次切换克隆整棵部件树、材质、纹理或着色器闭包。
+     */
+    createCardCopy(source: T.Group) {
+        if (this.cardSource !== source) {
+            this.cardSource = source;
+            this.cardProbes = [];
+            const box = new T.Box3();
+            for (const child of source.children) {
+                const mesh = child as T.Mesh;
+                if (!mesh.isMesh) {
+                    continue;
+                }
+                const probe = new T.Mesh(mesh.geometry, mesh.material);
+                probe.matrix.copy(mesh.matrix);
+                probe.matrixAutoUpdate = false;
+                probe.layers.mask = mesh.layers.mask;
+                this.cardProbes.push(probe);
+                if (!mesh.geometry.boundingBox) {
+                    mesh.geometry.computeBoundingBox();
+                }
+                box.union(mesh.geometry.boundingBox!.clone().applyMatrix4(mesh.matrix));
+            }
+            box.getBoundingSphere(this.cardBounds);
+        }
+        const group = new T.Group();
+        group.userData.nativeDrawBounds = this.cardBounds;
+        group.userData.nativeRootOnly = true;
+        (group as any).raycast = (raycaster: T.Raycaster, hits: T.Intersection[]) => {
+            // 完整对象树只在本地参考绘制时创建；此时使用其原有递归拾取。
+            if (group.children.length) {
+                return;
+            }
+            this.cardPickSphere.copy(this.cardBounds).applyMatrix4(group.matrixWorld);
+            if (!raycaster.ray.intersectsSphere(this.cardPickSphere)) {
+                return;
+            }
+            for (const probe of this.cardProbes) {
+                if (!probe.layers.test(raycaster.layers)) {
+                    continue;
+                }
+                probe.matrixWorld.multiplyMatrices(group.matrixWorld, probe.matrix);
+                const start = hits.length;
+                probe.raycast(raycaster, hits);
+                for (let i = start; i < hits.length; i++) {
+                    hits[i].object = group;
+                }
+            }
+        };
+        return group;
+    }
     domElement = new NativeElement();
     toneMappingExposure = 1.05;
     shadowMap: any = {};
@@ -257,18 +337,6 @@ export class WebGLRenderer {
     capabilities = {
         maxTextureSize: 8192,
         getMaxAnisotropy: () => 16,
-    };
-    info = {
-        autoReset: false,
-        render: {
-            calls: 0,
-            triangles: 0,
-        },
-        memory: {
-            geometries: 0,
-            textures: 0,
-        },
-        reset() {},
     };
     ratio = 1;
     setPixelRatio(v: number) {
@@ -287,72 +355,30 @@ export class WebGLRenderer {
     getSize(v: any) {
         return v.set(this.domElement.clientWidth, this.domElement.clientHeight);
     }
-
-    render() {}
-    dispose() {}
-    forceContextLoss() {}
 }
 
-export class EffectComposer {
-    passes: any[] = [];
-    constructor(...args: any[]) {}
-    addPass(p: any) {
-        this.passes.push(p);
-    }
-
-    insertPass(p: any, i: number) {
-        this.passes.splice(i, 0, p);
-    }
-
-    removePass(p: any) {
-        this.passes = this.passes.filter((x) => x !== p);
-    }
-
-    setSize() {}
-    setPixelRatio() {}
-    render() {}
-    dispose() {}
-}
-
-export class NativePass {
+/** 保存原生 SSAO 的相机参数；渲染目标和生命周期由 QRhi 管理。 */
+export class NativeOcclusion {
     enabled = true;
     kernelRadius = 0.38;
     minDistance = 0.001;
     maxDistance = 0.09;
-    uniforms: any = {
-        focus: {
-            value: 25,
-        },
-        aperture: {
-            value: 0.0018,
-        },
-        maxblur: {
-            value: 0.011,
-        },
-    };
-    camera: any;
-    projection: any;
-    constructor(...args: any[]) {
-        this.camera = args[1];
+    projection?: T.Matrix4;
+    constructor(private camera: T.PerspectiveCamera) {}
+    setSize(..._dimensions: number[]) {
+        this.projection = this.camera.projectionMatrix.clone();
     }
-
-    setSize() {
-        if (this.camera?.projectionMatrix) {
-            this.projection = this.camera.projectionMatrix.clone();
-        }
-    }
-
-    setSharing() {}
-    dispose() {}
 }
-export {
-    NativePass as RenderPass,
-    NativePass as OutputPass,
-    NativePass as SMAAPass,
-    NativePass as BokehPass,
-    NativePass as SharedDepthAO,
-    NativePass as SharedDepthBokeh,
-};
+
+/** 保存原生景深参数，不创建 JavaScript 合成通道或 GPU 资源。 */
+export class NativeFocus {
+    enabled = true;
+    uniforms = {
+        focus: { value: 25 },
+        aperture: { value: 0.0018 },
+        maxblur: { value: 0.011 },
+    };
+}
 export class GLTFLoader {
     async loadAsync(url: string) {
         const key = url.includes('assembly') ? 'assembly' : 'cassette';
@@ -411,7 +437,7 @@ export class GLTFLoader {
     }
 }
 
-export function createArchiveLighting(renderer: any, scene: any) {
+export function createArchiveLighting(_output: NativeSceneOutput, scene: T.Scene, _look?: string) {
     scene.environmentIntensity = 0.48;
     scene.add(new T.HemisphereLight('#fffaf5', '#b4a18c', 0.65));
     let key = new T.DirectionalLight('#fff7ed', 1.4);
@@ -422,20 +448,8 @@ export function createArchiveLighting(renderer: any, scene: any) {
     return key;
 }
 
-export function resizeQuality(renderer: any, composer: any, host: any, quality: any) {
-    renderer.setSize(host.clientWidth, host.clientHeight);
+export function resizeNativeOutput(output: NativeSceneOutput, host: NativeElement | HTMLElement) {
+    output.setSize(host.clientWidth, host.clientHeight);
     host.dataset.renderQuality = '{}';
-    return {
-        width: host.clientWidth,
-        height: host.clientHeight,
-        ratio: 1,
-    };
-}
-
-export function applyTextureQuality() {}
-export function createViewerPipeline() {
-    return {
-        composer: new EffectComposer(),
-        smaa: new NativePass(),
-    };
+    return { width: host.clientWidth, height: host.clientHeight, ratio: 1 };
 }

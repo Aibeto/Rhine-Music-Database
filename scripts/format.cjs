@@ -31,6 +31,10 @@ const paths = execFileSync('git', ['ls-files', '--cached', '--others', '--exclud
     .split('\0')
     .filter(Boolean);
 const files = [...new Set(paths)].filter((file) => {
+    // 已删除的受控文件仍会出现在 Git 索引中，只检查工作区实际存在的源码。
+    if (!fs.existsSync(file)) {
+        return false;
+    }
     if (/^(vendor|output|node_modules|MusicBridge\/upstream)\//.test(file)) {
         return false;
     }

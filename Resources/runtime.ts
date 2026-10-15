@@ -1,6 +1,9 @@
 import { preparePicking, setPicking } from './picking';
 import { NativeElement, compactNativeGeometry, NATIVE_HIDDEN_SURFACES } from './platform';
-import * as THREE from '../node_modules/three/build/three.module.js';
+import { NativeDrawVisibility } from './draw-visibility';
+import { NativeCardPackets } from './native-cards';
+import { createNativeField, testNativeField } from './native-field';
+import * as THREE from '../node_modules/three/build/three.core.js';
 import { ModelViewer } from '../Scene/model-viewer';
 import { ArchiveScene } from '../Scene/scene';
 import { bootMotion } from '../Scene/boot-motion';
@@ -49,10 +52,20 @@ let sceneFreeze: number | null = null;
     abort() {}
 };
 let scene = new ArchiveScene(host as any);
+let nativeFieldEnabled = true;
+function configureNativeField() {
+    const assets = (globalThis as any).NativeAssets;
+    scene.nativeField =
+        nativeFieldEnabled && typeof assets?.fieldGrid === 'function'
+            ? createNativeField((parameters) => assets.fieldGrid(parameters))
+            : undefined;
+}
+configureNativeField();
 const viewer = new ModelViewer(
     host as any,
     () => {},
     () => {},
+    () => (globalThis as any).NativeAssets?.invalidate?.(),
 );
 const memories = archiveColumns.map((_, i) => columnFiles(i)[0]);
 let ready = false;
@@ -128,6 +141,9 @@ const DEFINITION_FIELDS = [
 const drawDefinitions = new Map<number, Record<(typeof DEFINITION_FIELDS)[number], unknown>>();
 let packetData = new Float64Array(0);
 let packetLength = 0;
+const drawVisibility = new NativeDrawVisibility();
+const cardPackets = new NativeCardPackets();
+let drawCulling = true;
 /**
  * 生成当前场景的可序列化帧，保持矩阵、实例索引和拾取数据一致。
  */
@@ -195,9 +211,20 @@ function frame(time: number, binary = false, diagnostics = true, packed = false,
     const definitions: any[] = [];
     const activeIDs = new Set<number>();
     packetLength = 0;
-    renderScene.traverseVisible((o: any) => {
-        if (!o.isMesh) {
+    drawVisibility.update(camera);
+    const actorMode = packed && !viewer.isOpen;
+    const actorTemplate = actorMode
+        ? cardPackets.begin((scene as any).model, (scene as any).appearance.palettes)
+        : undefined;
+    let culledCards = 0;
+    let shadowCards = 0;
+    let shadowSubmission = false;
+    const emitDraw = (o: any) => {
+        if (!o.isMesh || (shadowSubmission && !o.castShadow)) {
             return;
+        }
+        if (shadowSubmission) {
+            o.updateWorldMatrix(false, false);
         }
         let owner = o;
         while (owner.parent && owner.parent !== renderScene) {
@@ -225,10 +252,11 @@ function frame(time: number, binary = false, diagnostics = true, packed = false,
         } else {
             matrices = sourceMatrices;
         }
-        let definition = drawDefinitions.get(o.id);
+        const drawID = owner.userData.nativeCard ? -(owner.id * 256 + owner.children.indexOf(o) + 1) : o.id;
+        let definition = drawDefinitions.get(drawID);
         const musicKey = owner.userData.musicKey ?? null;
         const musicSelected = owner === (scene as any).model || viewer.isOpen;
-        const shadowOnly = !!o.userData.shadowOnly;
+        const shadowOnly = shadowSubmission || !!o.userData.shadowOnly;
         const meshIndex = g.userData.nativeMesh ?? -1;
         const asset = g.userData.asset ?? 'cassette';
         const instanced = !!o.isInstancedMesh;
@@ -257,7 +285,7 @@ function frame(time: number, binary = false, diagnostics = true, packed = false,
                 shadowOnly,
                 mesh: meshIndex,
                 asset,
-                id: o.id,
+                id: drawID,
                 instanced,
                 label,
                 floor,
@@ -269,7 +297,7 @@ function frame(time: number, binary = false, diagnostics = true, packed = false,
                 castShadow: o.castShadow,
             };
             if (packed) {
-                drawDefinitions.set(o.id, definition);
+                drawDefinitions.set(drawID, definition);
                 definitions.push(definition);
             }
         }
@@ -282,7 +310,7 @@ function frame(time: number, binary = false, diagnostics = true, packed = false,
         const themeBuffer = binary ? bufferID(sourceThemes) : -1;
         const attenuationDistance = Number.isFinite(m.attenuationDistance) ? m.attenuationDistance : 1e9;
         if (packed) {
-            activeIDs.add(o.id);
+            activeIDs.add(drawID);
             if (packetLength + PACKET_STRIDE > packetData.length) {
                 const expanded = new Float64Array(Math.max(PACKET_STRIDE * 64, packetData.length * 2));
                 expanded.set(packetData);
@@ -291,7 +319,7 @@ function frame(time: number, binary = false, diagnostics = true, packed = false,
             // 静态定义只在变化时传 JSON；动态材质和缓冲索引使用双精度字节包，保持原数值。
             packetData.set(
                 [
-                    o.id,
+                    drawID,
                     count,
                     matrixBuffer,
                     themeBuffer,
@@ -343,7 +371,47 @@ function frame(time: number, binary = false, diagnostics = true, packed = false,
                 theme,
             });
         }
-    });
+    };
+    // 先检查整张卡片，再展开部件，避免快速切换时为屏幕外副本生成整套材质和帧包。
+    for (const root of renderScene.children) {
+        const visibility =
+            drawCulling && !viewer.isOpen && root.userData.nativeReturning
+                ? drawVisibility.classify(root)
+                : 1;
+        if (visibility === 0) {
+            culledCards++;
+            continue;
+        }
+        shadowSubmission = visibility === 2;
+        if (shadowSubmission) {
+            shadowCards++;
+        }
+        if (actorMode && root.userData.nativeCard) {
+            let state = root.userData.nativeAppearance;
+            if (!root.userData.nativeReturning) {
+                // 当前卡片保留可交互的部件；归位副本使用共享拾取探针。
+                scene.syncNativeMatrices(root);
+                const shell = root.children.find(
+                    (child: any) => child.userData.surface === 'Frosted_Polymer',
+                )!;
+                state = {
+                    quality: shell.userData.appearance.value,
+                    clarity: shell.userData.glassClarity.value,
+                    theme: shell.userData.themeAmount.value,
+                    subdued: shell.userData.subduedIndex.value,
+                };
+            }
+            cardPackets.append(root, state, !root.userData.nativeReturning, visibility);
+            continue;
+        }
+        if (!viewer.isOpen && root.userData.nativeCard) {
+            if (root.userData.nativeReturning) {
+                scene.syncNativeAppearance(root as THREE.Group);
+            }
+            scene.syncNativeMatrices(root);
+        }
+        root.traverseVisible(emitDraw);
+    }
     if (packed) {
         // 先保存键列表，再删除失效定义，避免迭代器在删除过程中跳过复用对象。
         for (const id of Array.from(drawDefinitions.keys())) {
@@ -358,23 +426,38 @@ function frame(time: number, binary = false, diagnostics = true, packed = false,
     }
     frameBuffers = buffers;
     return {
-        pendingAnimations: ((globalThis as any).nativeAnimations ?? []).some(
-            (a: any) => !a.cancelled && !a.done,
-        ),
-        pointerCursor: scene.renderer.domElement.style.cursor ?? 'default',
+        pendingAnimations:
+            viewer.isLoading ||
+            ((globalThis as any).nativeAnimations ?? []).some((a: any) => !a.cancelled && !a.done),
+        pointerCursor: scene.output.domElement.style.cursor ?? 'default',
         aoProjection: ((scene as any).ao.projection ?? camera.projectionMatrix).elements,
         reference: sceneFreeze !== null,
         near: camera.near,
         far: camera.far,
         viewer: viewer.isOpen,
+        viewerReady: viewer.ready,
         viewerState: viewer.root.dataset,
         mode,
         selected,
+        culledCards,
+        shadowCards,
+        returningCards: (scene as any).outgoing.length,
+        returningPartNodes: (scene as any).outgoing.reduce(
+            (count: number, copy: any) => count + copy.group.children.length,
+            0,
+        ),
+        globalSubdued: (scene as any).subduedIndex.value,
+        // 剔除只省略绘制，归位中的歌曲身份仍需保留，供反向导航和图形设备重建使用。
+        returningMusicKeys: (scene as any).outgoing
+            .map((copy: any) => copy.group.userData.musicKey)
+            .filter((key: unknown) => typeof key === 'string'),
         time: t,
         draws: packed ? undefined : draws,
         drawDefinitions: packed ? definitions : undefined,
         packetVersion: packed ? 1 : undefined,
         packetCount: packed ? packetLength / PACKET_STRIDE : undefined,
+        actorTemplate,
+        actors: actorMode ? cardPackets.cards : undefined,
         view: camera.matrixWorldInverse.elements,
         projection: camera.projectionMatrix.elements,
         eye: camera.position.toArray(),
@@ -411,9 +494,43 @@ function ease(v: number) {
     },
     picking: setPicking,
     pick: (x: number, y: number) => (scene as any).pickCell(x, y),
-    frameFast: (time: number, diagnostics = true) => frame(time, true, diagnostics),
+    frameFast: (time: number, diagnostics = true, advance = true) =>
+        frame(time, true, diagnostics, false, advance),
     framePacked: (time: number, advance = true) => frame(time, true, false, true, advance),
+    // 本地回归使用完整提交作为图像参考，正常运行始终启用保守剔除。
+    drawCulling: (value: boolean) => {
+        drawCulling = value;
+    },
     packetBytes: () => packetData.buffer.slice(0, packetLength * 8),
+    actorBytes: () => cardPackets.bytes(),
+    nativeFieldEnabled: (value: boolean) => {
+        nativeFieldEnabled = value;
+        configureNativeField();
+    },
+    fieldSelfTest: () =>
+        testNativeField((parameters) => (globalThis as any).NativeAssets.fieldGrid(parameters)),
+    pickingSelfTest: () => {
+        const archive = scene as any;
+        const snapshots: { x: number; y: number; cell: any }[] = [];
+        setPicking(true);
+        for (let y = 120; y <= 840; y += 160) {
+            for (let x = 120; x <= 1800; x += 160) {
+                snapshots.push({ x, y, cell: archive.pickCell(x, y) });
+            }
+        }
+        setPicking(false);
+        try {
+            for (const snapshot of snapshots) {
+                const expected = archive.pickCell(snapshot.x, snapshot.y);
+                if (JSON.stringify(expected ?? null) !== JSON.stringify(snapshot.cell ?? null)) {
+                    return false;
+                }
+            }
+            return true;
+        } finally {
+            setPicking(true);
+        }
+    },
     bufferBytes: (index: number, count: number) => {
         const v = frameBuffers[index];
         return v
@@ -440,6 +557,7 @@ function ease(v: number) {
         ready = false;
         scene.dispose();
         scene = new ArchiveScene(host as any);
+        configureNativeField();
         scene.onSelect = (i, cell) =>
             select(
                 i,
@@ -522,7 +640,7 @@ function ease(v: number) {
         freeze = t;
     },
     pointer(type: string, x: number, y: number, delta = 0) {
-        const target = viewer.isOpen ? (viewer as any).renderer.domElement : scene.renderer.domElement;
+        const target = viewer.isOpen ? (viewer as any).output.domElement : scene.output.domElement;
         const event = {
             clientX: x,
             clientY: y,

@@ -1,4 +1,7 @@
 #include "SceneRuntime.h"
+#include "NativeCards.h"
+#include "ArchiveField.h"
+#include "NativePicking.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QFile>
@@ -10,6 +13,8 @@
  * 把原场景运行时接入 QJSEngine，保留缓冲区、资源和输入接口。
  */
 SceneRuntime::SceneRuntime(QString root, QJSEngine *qml) : m_root(root), m_qml(qml) {
+    m_nativeCards = std::make_unique<NativeCards>();
+    m_nativePicking = std::make_unique<NativePicking>(root);
     auto read = [&](QString name) {
         QFile f(root + "/" + name);
         if (!f.open(QIODevice::ReadOnly)) {
@@ -37,6 +42,15 @@ SceneRuntime::SceneRuntime(QString root, QJSEngine *qml) : m_root(root), m_qml(q
     evaluate("RhineNative.init().catch(function(e){throw e;});");
 }
 SceneRuntime::~SceneRuntime() = default;
+QByteArray SceneRuntime::fieldGrid(QVariantMap parameters) {
+    return sampleArchiveField(parameters);
+}
+void SceneRuntime::preparePicking() {
+    m_nativePicking->prepare();
+}
+QVariantMap SceneRuntime::raycastMesh(int mesh, QVariantList origin, QVariantList direction, int side) {
+    return m_nativePicking->raycast(mesh, origin, direction, side);
+}
 /**
  * 首次打开查看器时才解析其模型，避免普通音乐浏览长期持有第二份大模型。
  * 固定资产白名单不允许脚本读取任意路径；返回值属于场景 JS 引擎。
@@ -67,8 +81,9 @@ QJSValue SceneRuntime::evaluate(QString code) {
     return result;
 }
 QJSValue SceneRuntime::call(QString name, QVariantList values) {
-    if (name != "frameFast" && name != "framePacked" && name != "packetBytes" && name != "bufferBytes" &&
-        name != "buffer" && name != "selection" && name != "pick" && name != "energyIdle") {
+    if (name != "frameFast" && name != "framePacked" && name != "packetBytes" && name != "actorBytes" &&
+        name != "bufferBytes" && name != "buffer" && name != "selection" && name != "pick" &&
+        name != "energyIdle") {
         m_changed = true;
     }
     QJSValueList arguments;
@@ -96,8 +111,8 @@ QJSValue SceneRuntime::frameFast(double time) {
     if (m_profileFrames) {
         timer.start();
     }
-    auto value =
-        m_diagnostics ? call("frameFast", {time, true}) : call("framePacked", {time, !m_captureOnly});
+    auto value = m_diagnostics ? call("frameFast", {time, true, !m_captureOnly})
+                               : call("framePacked", {time, !m_captureOnly});
     const auto scriptNs = m_profileFrames ? timer.nsecsElapsed() : 0;
     m_changed = false;
     if (value.isNull() || value.isUndefined()) {
@@ -170,10 +185,18 @@ QJSValue SceneRuntime::frameFast(double time) {
             frame.remove(key);
         }
     }
+    drawBuffers.clear();
+    if (frame.contains("actors")) {
+        failure = m_nativeCards->expand(frame, context.fromScriptValue<QByteArray>(call("actorBytes")),
+                                        drawBuffers);
+        if (!failure.isEmpty()) {
+            qWarning().noquote() << failure;
+            return QJSValue(QJSValue::NullValue);
+        }
+    }
     const auto jsonNs = m_profileFrames ? timer.nsecsElapsed() : 0;
     auto draws = frame["draws"].toArray();
     QHash<quint64, QByteArray> buffers;
-    drawBuffers.clear();
     auto data = [&](int index, int count) {
         if (index < 0 || count <= 0) {
             return QByteArray();
@@ -196,8 +219,11 @@ QJSValue SceneRuntime::frameFast(double time) {
     };
     for (int i = 0; i < draws.size(); ++i) {
         auto d = draws[i].toObject();
-        DrawData bytes{data(d["matrixBuffer"].toInt(-1), d["count"].toInt() * 16),
-                       data(d["themeBuffer"].toInt(-1), d["count"].toInt())};
+        DrawData bytes = drawBuffers.value(d["id"].toInt());
+        if (bytes.matrices.isEmpty()) {
+            bytes = {data(d["matrixBuffer"].toInt(-1), d["count"].toInt() * 16),
+                     data(d["themeBuffer"].toInt(-1), d["count"].toInt())};
+        }
         drawBuffers.insert(d["id"].toInt(), bytes);
         if (m_diagnostics) {
             d["matrices"] = numbers(bytes.matrices);

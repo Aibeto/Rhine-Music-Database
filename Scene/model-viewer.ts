@@ -2,11 +2,10 @@ import * as THREE from 'three';
 import { disposeThreeTree } from './three-resources';
 import { themeEnvironment } from './theme-material';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { createArchiveLighting } from './archive-lighting';
+import { NativeSceneOutput, createArchiveLighting, resizeNativeOutput } from '../Resources/platform';
 import { damp } from './motion';
 import { ViewerCameraMotion } from './viewer-camera';
 import { normalizeQuality, type RenderQuality } from './render-quality';
-import { applyTextureQuality, createViewerPipeline, resizeQuality } from './quality-renderer';
 import { fullMotion, type MotionPreferences } from './motion-preferences';
 import { inputDevice, onInputDevice } from './gamepad';
 const PARTS = [
@@ -59,8 +58,7 @@ export class ModelViewer {
     }
     readonly root: HTMLElement;
     private canvasHost: HTMLElement;
-    private renderer: THREE.WebGLRenderer;
-    private pipeline: ReturnType<typeof createViewerPipeline>;
+    private output: NativeSceneOutput;
     private quality = normalizeQuality(undefined);
     private superPerformance = false;
     /**
@@ -74,12 +72,6 @@ export class ModelViewer {
         }
         this.controls.dispose();
         disposeThreeTree(this.scene);
-        for (const pass of this.pipeline.composer.passes) {
-            pass.dispose();
-        }
-        this.pipeline.composer.dispose();
-        this.renderer.dispose();
-        this.renderer.forceContextLoss();
         this.root.remove();
     }
 
@@ -128,10 +120,17 @@ export class ModelViewer {
     private onClose: () => void;
     private provider?: () => Promise<ModelSource>;
     isOpen = false;
+    get isLoading() {
+        return this.isOpen && this.loading;
+    }
+    get ready() {
+        return this.isOpen && !this.loading && Boolean(this.source);
+    }
     constructor(
         parent: HTMLElement,
         onClose: () => void,
         private onSound: (sound: 'explode' | 'assemble' | 'tick') => void = () => {},
+        private onLoaded: () => void = () => {},
     ) {
         this.onClose = onClose;
         this.root = document.createElement('section');
@@ -160,29 +159,22 @@ export class ModelViewer {
         parent.appendChild(this.root);
         this.disposeDeviceListener = onInputDevice(() => this.updateHelp());
         this.canvasHost = this.root.querySelector('.viewer-canvas')!;
-        this.renderer = new THREE.WebGLRenderer({
-            antialias: true,
-            powerPreference: 'high-performance',
-        });
-        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.05;
-        this.renderer.domElement.tabIndex = 0;
-        this.renderer.domElement.setAttribute(
+        this.output = new NativeSceneOutput();
+        this.output.toneMappingExposure = 1.05;
+        this.output.domElement.tabIndex = 0;
+        this.output.domElement.setAttribute(
             'aria-label',
             '档案三维模型：拖动旋转，方向键平移，滚轮或加减键缩放，Home 复位',
         );
-        this.canvasHost.appendChild(this.renderer.domElement);
+        this.canvasHost.appendChild(this.output.domElement);
         this.scene.background = new THREE.Color('#eae5e1');
         this.scene.fog = new THREE.Fog('#eae5e1', 13.5, 26.5);
-        // 渲染目标纹理属于各自的 WebGL 上下文；在此重建主场景的
-        // 光照环境，使当前渲染器获得实际照明。
-        createArchiveLighting(this.renderer, this.scene);
+        // 查看器使用相同的原生光照参数，保留主场景的材质外观。
+        createArchiveLighting(this.output, this.scene);
         this.camera.position.copy(this.initialCamera);
         this.controlCamera.copy(this.camera);
-        this.controls = new OrbitControls(this.controlCamera, this.renderer.domElement);
+        this.controls = new OrbitControls(this.controlCamera, this.output.domElement);
         this.controls.enableDamping = false;
-        this.pipeline = createViewerPipeline(this.renderer, this.scene, this.camera);
-        this.pipeline.smaa.enabled = false;
         this.controls.rotateSpeed = 0.65;
         this.controls.zoomSpeed = 0.7;
         this.controls.panSpeed = 0.7;
@@ -300,7 +292,7 @@ export class ModelViewer {
         this.root.dataset.exploded = 'false';
         this.resetView(false);
         this.resize();
-        this.renderer.domElement.focus({
+        this.output.domElement.focus({
             preventScroll: true,
         });
         this.enter();
@@ -339,7 +331,6 @@ export class ModelViewer {
             }
             source.model.position.set(0, -1.85, 0);
             this.scene.add(source.model);
-            applyTextureQuality(source.model, this.renderer, this.quality);
             this.loading = false;
             loading.hidden = true;
             this.controls.enabled = true;
@@ -348,6 +339,8 @@ export class ModelViewer {
             this.setStatus('已组装');
             // 先渲染再显示画布，避免新模型突然闪现。
             this.update(this.lastTime);
+            // 异步加载完成可能晚于最后一个输入帧，必须唤醒原生帧调度。
+            this.onLoaded();
             if (this.motion.viewerModelTransition) {
                 this.modelTransition = this.canvasHost.animate(
                     [
@@ -374,6 +367,7 @@ export class ModelViewer {
             loading.querySelector('span')!.textContent = '模型载入失败，请重试';
             loading.querySelector<HTMLElement>('button')!.hidden = false;
             console.error('Model viewer failed to load', error);
+            this.onLoaded();
         }
     }
     private enter() {
@@ -678,8 +672,6 @@ export class ModelViewer {
         }
         this.appliedQuality = key;
         this.quality = normalizeQuality(quality);
-        this.pipeline.smaa.enabled = this.quality.antialias === 'smaa';
-        applyTextureQuality(this.scene, this.renderer, this.quality);
         this.resize();
     }
 
@@ -689,13 +681,7 @@ export class ModelViewer {
         }
         const width = this.canvasHost.clientWidth;
         const height = this.canvasHost.clientHeight;
-        resizeQuality(
-            this.renderer,
-            this.pipeline.composer,
-            this.canvasHost,
-            this.quality,
-            this.superPerformance,
-        );
+        resizeNativeOutput(this.output, this.canvasHost);
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
         this.controlCamera.aspect = this.camera.aspect;
@@ -719,7 +705,7 @@ export class ModelViewer {
         if (!this.isOpen) {
             return;
         }
-        themeEnvironment(this.scene, this.renderer, this.themeAmount);
+        themeEnvironment(this.scene, this.output, this.themeAmount);
         this.source?.model.traverse((child) => {
             if (child.userData.themeAmount) {
                 child.userData.themeAmount.value = this.themeAmount;
@@ -779,11 +765,6 @@ export class ModelViewer {
         const objectDistance = this.camera.position.length();
         fog.near = Math.max(0, objectDistance - 1);
         fog.far = objectDistance + 12;
-        if (this.quality.antialias === 'smaa') {
-            this.pipeline.composer.render();
-        } else {
-            this.renderer.render(this.scene, this.camera);
-        }
         this.root.dataset.stats = JSON.stringify({
             ready: Boolean(this.source),
             clarity: this.clarity.value,

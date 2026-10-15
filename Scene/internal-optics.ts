@@ -61,12 +61,3 @@ export function configureInternalOptics(name: string, mat: THREE.MeshPhysicalMat
     mat.side = THREE.FrontSide;
     mat.userData.opticalOrder = surface.order;
 }
-
-export function internalOpticsFragment(source: string) {
-    // 掠射边缘积累更多密度，正面仍保持轻微磨砂。
-    return source.replace(
-        '#include <opaque_fragment>',
-        `diffuseColor.a = min(0.86, opacity + 0.42 * pow(1.0 - abs(dot(normal, normalize(vViewPosition))), 3.0));
-     #include <opaque_fragment>`,
-    );
-}

@@ -3,12 +3,16 @@ import vm from 'node:vm';
 import assert from 'node:assert/strict';
 const root = 'output/resources/';
 let geometryLoads = 0;
+let sceneInvalidations = 0;
 const ctx = vm.createContext({
     console,
     nativeGeometry: {
         cassette: JSON.parse(fs.readFileSync(root + 'archive-cassette-geometry.json')),
     },
     NativeAssets: {
+        invalidate() {
+            sceneInvalidations++;
+        },
         loadGeometry(asset) {
             geometryLoads++;
             assert.equal(asset, 'assembly');
@@ -70,6 +74,7 @@ console.log(
     'Song identity preserves outgoing cover and uses original return, reposition and extraction motion',
 );
 ctx.RhineNative.openViewer();
+assert.equal(ctx.RhineNative.frame(18.001).viewerReady, false, 'viewer must report pending model load');
 await new Promise((resolve) => setTimeout(resolve, 0));
 for (let i = 1081; i < 1140; i++) {
     ctx.RhineNative.frame(i / 60);
@@ -77,6 +82,8 @@ for (let i = 1081; i < 1140; i++) {
 const viewer = ctx.RhineNative.frame(19);
 assert.equal(geometryLoads, 1, 'assembly is loaded only when opening the viewer');
 assert(viewer.viewer);
+assert(viewer.viewerReady, 'viewer must contain the completed model');
+assert(sceneInvalidations > 0, 'asynchronous model completion must wake the native scheduler');
 assert(viewer.draws.some((d) => d.asset === 'assembly'));
 assert.equal(viewer.near, 0.3);
 ctx.RhineNative.viewerAction('explode');
@@ -280,3 +287,97 @@ assert(afterTrim.draws.some((draw) => draw.musicKey === 'retained-old'));
 console.log(
     'Compact model data, production draw parity, animation cleanup and hidden-state retention passed',
 );
+
+// 高频连续切换必须减少实际部件提交，同时完整保留归位物理状态。
+function captureDraws(frame) {
+    return frame.draws.map((draw) => {
+        const { matrixBuffer, themeBuffer, ...fields } = draw;
+        return {
+            ...fields,
+            matrices: Array.from(
+                new Float32Array(ctx.RhineNative.bufferBytes(matrixBuffer, draw.count * 16)),
+            ),
+            themes: Array.from(new Float32Array(ctx.RhineNative.bufferBytes(themeBuffer, draw.count))),
+        };
+    });
+}
+ctx.RhineNative.setMode('archive');
+let stressTime = 80;
+for (let i = 0; i < 360; i++) {
+    ctx.RhineNative.navigate('row', 1);
+    ctx.RhineNative.frameFast((stressTime += 1 / 60), false);
+}
+const culled = ctx.RhineNative.frameFast(stressTime, true, false);
+const culledDraws = captureDraws(culled);
+assert(culled.culledCards > 0, 'offscreen returning cards must be culled before emitting their parts');
+ctx.RhineNative.drawCulling(false);
+const complete = ctx.RhineNative.frameFast(stressTime, true, false);
+const completeDraws = captureDraws(complete);
+assert(complete.draws.length > culled.draws.length);
+assert.equal(complete.returningCards, culled.returningCards);
+assert.deepEqual(complete.stats.returningAppearance, culled.stats.returningAppearance);
+assert.deepEqual(complete.stats.selectedCell, culled.stats.selectedCell);
+assert.deepEqual(complete.view, culled.view);
+for (const draw of culledDraws) {
+    const original = completeDraws.find((candidate) => candidate.id === draw.id);
+    if (draw.shadowOnly && !original.shadowOnly) {
+        assert(original.castShadow, 'shadow submission must retain an original shadow caster');
+        assert.deepEqual(draw.matrices, original.matrices);
+        assert.equal(draw.mesh, original.mesh);
+        assert.equal(draw.side, original.side);
+    } else {
+        assert.deepEqual(draw, original);
+    }
+}
+ctx.RhineNative.drawCulling(true);
+// 反向切换使之前剔除的副本重新进入视野；材质与矩阵必须立即追上本帧状态。
+for (let i = 0; i < 120; i++) {
+    ctx.RhineNative.navigate('row', -1);
+    ctx.RhineNative.frameFast((stressTime += 1 / 60), false);
+}
+const reentered = ctx.RhineNative.frameFast(stressTime, true, false);
+const reenteredDraws = captureDraws(reentered);
+ctx.RhineNative.drawCulling(false);
+const reenteredReference = ctx.RhineNative.frameFast(stressTime, true, false);
+const reenteredReferenceDraws = captureDraws(reenteredReference);
+for (const draw of reenteredDraws) {
+    const original = reenteredReferenceDraws.find((candidate) => candidate.id === draw.id);
+    if (draw.shadowOnly && !original.shadowOnly) {
+        assert(original.castShadow);
+        assert.deepEqual(draw.matrices, original.matrices);
+    } else {
+        assert.deepEqual(draw, original);
+    }
+}
+ctx.RhineNative.drawCulling(true);
+console.log('Native card culling preserves return physics, visible materials and reverse-navigation reentry');
+
+// 正式原生路径只创建根对象，传输量随卡片数而非部件数增长。
+await ctx.RhineNative.review('archive');
+ctx.RhineNative.setMode('archive');
+const firstActors = ctx.RhineNative.framePacked(100);
+assert(firstActors.actorTemplate.length > 0);
+let actorFrame;
+for (let i = 0; i < 360; i++) {
+    ctx.RhineNative.navigate('row', 1);
+    actorFrame = ctx.RhineNative.framePacked(100 + (i + 1) / 60);
+}
+assert(actorFrame.returningCards > 20);
+assert.equal(actorFrame.returningPartNodes, 0, 'production return copies must not clone mesh/material trees');
+assert(actorFrame.actors.length > 1);
+assert.equal(ctx.RhineNative.actorBytes().byteLength, actorFrame.actors.length * 20 * 8);
+assert.equal(actorFrame.actorTemplate, undefined, 'static card template must not be sent every frame');
+assert(actorFrame.packetCount < firstActors.actorTemplate.length);
+assert(actorFrame.drawDefinitions.every((draw) => draw.id >= 0));
+console.log('Native archive actors share one archetype and transmit one 160-byte state per visible card');
+const actorHits = [];
+for (let y = 120; y <= 840; y += 120) {
+    for (let x = 200; x <= 1720; x += 190) {
+        actorHits.push({ x, y, cell: ctx.RhineNative.pick(x, y) });
+    }
+}
+ctx.RhineNative.frameFast(106, true, false);
+for (const hit of actorHits) {
+    assert.deepEqual(ctx.RhineNative.pick(hit.x, hit.y), hit.cell);
+}
+console.log('Root-only native card picking agrees with complete per-part reference picking');

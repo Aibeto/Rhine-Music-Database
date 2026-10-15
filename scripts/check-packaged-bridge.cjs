@@ -220,7 +220,11 @@ async function main() {
             assert.equal(rejected.body.code, 503);
         }
         child.stdin.end();
-        await new Promise((resolve) => child.once('exit', resolve));
+        const exit = await new Promise((resolve) => {
+            child.once('exit', (code, signal) => resolve({ code, signal }));
+        });
+        assert.equal(exit.code, 0, 'packaged bridge must finish cleanly after stdin closes');
+        assert.equal(exit.signal, null);
         assert.equal(errors, '');
         console.log(
             'Packaged NetEase Enhanced and QQ IPC, real dependency loading, local responses and core route allowlists passed',

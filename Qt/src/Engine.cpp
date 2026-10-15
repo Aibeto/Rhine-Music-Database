@@ -31,6 +31,7 @@ Engine::Engine(QString path, bool offline, QObject *parent)
     evaluate("App.init().catch(function(e){throw e;});");
     scene.diagnostics(offline);
     connect(&host, &Host::invalidated, this, [this] { wake(false); });
+    connect(&scene, &SceneRuntime::invalidated, this, [this] { wake(false); });
     connect(&host, &Host::mediaChanged, this, &Engine::pollMedia, Qt::QueuedConnection);
     connect(&host, &Host::mediaAction, this, [this](QString value) {
         call("mediaAction", {value});
@@ -167,6 +168,7 @@ QVariantMap Engine::performance() const {
             {"bindingCreations", qulonglong(m_bindingCreations.load(std::memory_order_relaxed))},
             {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed))},
             {"coverUploads", qulonglong(m_coverUploads.load(std::memory_order_relaxed))},
+            {"gpuDrawCalls", qulonglong(m_lastDrawCalls.load(std::memory_order_relaxed))},
             {"timerActive", timer.isActive()}};
 }
 void Engine::wake(bool input) {
@@ -348,6 +350,12 @@ void Engine::step(double time) {
     if (!ready()) {
         return;
     }
+    QElapsedTimer frameTimer;
+    if (scene.isProfiling()) {
+        frameTimer.start();
+        // 复用睡眠场景的帧不能沿用上次模拟耗时，否则现场日志会误报瓶颈。
+        scene.timings = {};
+    }
     ++m_steps;
     const bool reuse = m_sceneSleeping && !scene.changed();
     auto result = call("step", {time, m_width / (m_height / 1080), reuse});
@@ -388,6 +396,9 @@ void Engine::step(double time) {
     const auto musicKey = current["key"].toString("empty");
     m_musicTextures[musicKey] = {current, host.image(m_cover)};
     QSet<QString> retainedKeys{musicKey};
+    for (const auto &key : m_frame["returningMusicKeys"].toArray()) {
+        retainedKeys.insert(key.toString());
+    }
     for (const auto &value : m_frame["draws"].toArray()) {
         const auto key = value.toObject()["musicKey"].toString();
         if (!key.isEmpty()) {
@@ -420,6 +431,9 @@ void Engine::step(double time) {
     if (hits != m_hits) {
         m_hits = hits;
         emit hitsChanged();
+    }
+    if (scene.isProfiling()) {
+        scene.timings.engineMs = frameTimer.nsecsElapsed() / 1000000.;
     }
     emit updated();
 }
@@ -602,6 +616,9 @@ int Engine::selfTest() {
         return 1;
     }
     qInfo() << "[qt_offline] Checking scene matrices, picking and rebuild";
+    const bool fieldMatched = scene.fieldSelfTest();
+    qInfo() << "[qt_offline] Native field grid matches original motion:" << fieldMatched;
+    ok &= fieldMatched;
     scene.review("archive");
     scene.frameFast(50);
     auto expected = fixture["frame"].toObject();
@@ -651,11 +668,21 @@ int Engine::selfTest() {
         scene.captureOnly(false);
         const auto packed = scene.frame["draws"].toArray();
         bool matched = scene.failure.isEmpty() && packed.size() == legacy.size();
+        QHash<int, QJsonObject> referenceDraws;
+        for (const auto &value : legacy) {
+            const auto draw = value.toObject();
+            referenceDraws.insert(draw["id"].toInt(), draw);
+        }
         for (int i = 0; matched && i < packed.size(); ++i) {
-            auto draw = legacy[i].toObject();
+            auto actual = packed[i].toObject();
+            auto draw = referenceDraws.value(actual["id"].toInt());
             draw["matrices"] = QJsonArray{};
             draw["themes"] = QJsonArray{};
-            const auto actual = packed[i].toObject();
+            // 缓冲区槽位属于传输布局；实际矩阵和主题字节在下方独立比较。
+            for (const auto &key : {"matrixBuffer", "themeBuffer"}) {
+                draw.remove(key);
+                actual.remove(key);
+            }
             if (!equivalent(draw, actual)) {
                 qCritical() << "Packet material mismatch" << time << actual["id"];
                 for (auto it = draw.begin(); it != draw.end(); ++it) {
@@ -695,6 +722,9 @@ int Engine::selfTest() {
     }
     ok &= scene.failure.isEmpty();
     checkPacket(packetTime);
+    const bool pickingMatched = scene.pickingSelfTest();
+    qInfo() << "[qt_offline] Native BVH matches original picking:" << pickingMatched;
+    ok &= pickingMatched;
     scene.diagnostics(true);
     scene.review("archive");
     scene.frameFast(50);
@@ -730,6 +760,72 @@ int Engine::selfTest() {
         redBias /= samples;
         qInfo() << "[qt_offline] Library shell red bias:" << redBias;
         ok &= redBias < 20;
+
+        // 高频切换的剔除结果覆盖屏幕外投影。
+        scene.review("archive");
+        scene.setMode("archive");
+        scene.diagnostics(false);
+        double stressTime = 60;
+        for (int i = 0; i < 180; ++i) {
+            scene.navigate("row", 1);
+            scene.frameFast(stressTime += 1. / 60);
+        }
+        scene.captureOnly(true);
+        scene.frameFast(stressTime);
+        const auto culledCount = scene.frame["culledCards"].toInt();
+        const auto shadowCount = scene.frame["shadowCards"].toInt();
+        const auto submitted = scene.frame["draws"].toArray().size();
+        const auto optimizedFrame = scene.frame;
+        const auto optimizedBuffers = scene.drawBuffers;
+        quint64 optimizedDrawCalls = 0;
+        const auto culledPixels = renderReference(root(), scene.frame, m_current, {}, QSize(640, 360),
+                                                  scene.drawBuffers, &optimizedDrawCalls);
+        scene.drawCulling(false);
+        scene.diagnostics(true);
+        scene.frameFast(stressTime);
+        // 关闭 GPU 合批
+        scene.frame["batchDraws"] = false;
+        quint64 referenceDrawCalls = 0;
+        const auto fullPixels = renderReference(root(), scene.frame, m_current, {}, QSize(640, 360),
+                                                scene.drawBuffers, &referenceDrawCalls);
+        qInfo() << "[qt_offline] Culling parity:" << culledCount << "culled," << shadowCount << "shadow-only,"
+                << submitted << "draws vs" << scene.frame["draws"].toArray().size();
+        ok &= culledCount > 0 && shadowCount > 0;
+        ok &= !culledPixels.isNull() && culledPixels == fullPixels;
+        if (culledPixels != fullPixels) {
+            auto noNormalBatch = optimizedFrame;
+            noNormalBatch["batchNormal"] = false;
+            const auto alternate =
+                renderReference(root(), noNormalBatch, m_current, {}, QSize(640, 360), optimizedBuffers);
+            int changedPixels = 0;
+            int maxDifference = 0;
+            for (int y = 0; y < fullPixels.height(); ++y) {
+                for (int x = 0; x < fullPixels.width(); ++x) {
+                    const auto before = fullPixels.pixelColor(x, y);
+                    const auto after = culledPixels.pixelColor(x, y);
+                    if (before != after) {
+                        ++changedPixels;
+                    }
+                    maxDifference = qMax(maxDifference, std::abs(before.red() - after.red()));
+                    maxDifference = qMax(maxDifference, std::abs(before.green() - after.green()));
+                    maxDifference = qMax(maxDifference, std::abs(before.blue() - after.blue()));
+                }
+            }
+            qCritical() << "GPU parity pixels:" << changedPixels << "max channel delta:" << maxDifference
+                        << "without normal batching matches:" << (alternate == fullPixels);
+            const auto diffPath = qEnvironmentVariable("RHINE_GPU_DIFF");
+            if (!diffPath.isEmpty()) {
+                QDir().mkpath(diffPath);
+                culledPixels.save(diffPath + "/optimized.png");
+                fullPixels.save(diffPath + "/reference.png");
+                alternate.save(diffPath + "/without-normal-batching.png");
+            }
+        }
+        qInfo() << "[qt_offline] GPU submissions:" << optimizedDrawCalls << "vs" << referenceDrawCalls;
+        ok &= optimizedDrawCalls < referenceDrawCalls;
+        scene.drawCulling(true);
+        scene.captureOnly(false);
+        scene.diagnostics(true);
     }
     qInfo() << "Qt offline scene, parsing, search, cache, link and motion checks:"
             << (ok ? "passed" : "FAILED");

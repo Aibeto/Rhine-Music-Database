@@ -23,4 +23,5 @@ class RhiScene : public QQuickRhiItem {
     Engine *m_engine = nullptr;
 };
 QImage renderReference(const QString &root, const QJsonObject &frame, const QJsonObject &item,
-                       const QImage &cover, QSize size, const SceneRuntime::DrawBuffers &buffers = {});
+                       const QImage &cover, QSize size, const SceneRuntime::DrawBuffers &buffers = {},
+                       quint64 *drawCalls = nullptr);

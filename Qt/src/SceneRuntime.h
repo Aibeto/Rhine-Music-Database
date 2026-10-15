@@ -3,6 +3,9 @@
 #include <QJSEngine>
 #include <QJsonObject>
 #include <QObject>
+#include <memory>
+class NativeCards;
+class NativePicking;
 // 两个平台使用同一 Qt JS 引擎和场景脚本，保持动画与实例数据一致。
 class SceneRuntime : public QObject {
     Q_OBJECT
@@ -21,10 +24,18 @@ class SceneRuntime : public QObject {
         double jsonMs = 0;
         double buffersMs = 0;
         double summaryMs = 0;
+        double engineMs = 0;
     };
     FrameTimings timings;
     void profileFrames(bool value) {
         m_profileFrames = value;
+    }
+    bool isProfiling() const {
+        return m_profileFrames;
+    }
+    void drawCulling(bool value) {
+        call("drawCulling", {value});
+        m_changed = true;
     }
     // 传输回归只重编码同一个已模拟帧，不能用同时间再次推进原有弹簧。
     void captureOnly(bool value) {
@@ -42,10 +53,24 @@ class SceneRuntime : public QObject {
     void energyIdle(bool value) {
         call("energyIdle", {value});
     }
+    // 异步模型载入后主动通知调度器，避免静止帧缓存永久保留空查看器。
+    Q_INVOKABLE void invalidate() {
+        m_changed = true;
+        emit invalidated();
+    }
     Q_INVOKABLE bool init() {
         return ready();
     }
     Q_INVOKABLE QJSValue loadGeometry(QString asset);
+    Q_INVOKABLE QByteArray fieldGrid(QVariantMap parameters);
+    Q_INVOKABLE void preparePicking();
+    Q_INVOKABLE QVariantMap raycastMesh(int mesh, QVariantList origin, QVariantList direction, int side);
+    bool fieldSelfTest() {
+        return call("fieldSelfTest").toBool();
+    }
+    bool pickingSelfTest() {
+        return call("pickingSelfTest").toBool();
+    }
     Q_INVOKABLE QJSValue frameFast(double time);
     Q_INVOKABLE QJSValue buffer(int) {
         return m_qml->newArray();
@@ -72,6 +97,9 @@ class SceneRuntime : public QObject {
     QJsonObject frame;
     QString failure;
 
+  signals:
+    void invalidated();
+
   private:
     bool m_diagnostics = false;
     bool m_profileFrames = false;
@@ -80,6 +108,8 @@ class SceneRuntime : public QObject {
     QJSEngine context;
     QString m_root;
     QHash<int, QJsonObject> m_drawDefinitions;
+    std::unique_ptr<NativeCards> m_nativeCards;
+    std::unique_ptr<NativePicking> m_nativePicking;
     QJSValue runtime;
     QJSEngine *m_qml;
     QJSValue evaluate(QString code);

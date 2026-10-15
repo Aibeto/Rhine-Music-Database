@@ -1,9 +1,16 @@
 import * as THREE from 'three';
+import {
+    NativeSceneOutput,
+    NativeOcclusion,
+    NativeFocus,
+    createArchiveLighting,
+    resizeNativeOutput,
+} from '../Resources/platform';
+type LightingLook = 'baseline' | 'refined';
 import { ArchiveVisibility } from './archive-visibility';
 import { ArchiveDrawCoverage, ArchiveShadowCoverage } from './archive-draw-coverage';
 import { InstanceUpdates } from './instance-updates';
-import { RenderState } from './render-state';
-import { SharedDepthAO, SharedDepthBokeh } from './shared-depth';
+import type { NativeField } from './field-types';
 import { disposeThreeTree } from './three-resources';
 import { ThemeWave } from './theme-motion';
 import { themeMaterial, themeEnvironment } from './theme-material';
@@ -15,14 +22,7 @@ import {
     type RhythmStyle,
 } from './archive-play-motion';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { createArchiveLighting, type LightingLook } from './archive-lighting';
-import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
-import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
-import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
-import { BokehPass } from 'three/addons/postprocessing/BokehPass.js';
-import { SMAAPass } from 'three/addons/postprocessing/SMAAPass.js';
 import { normalizeQuality, type RenderQuality } from './render-quality';
-import { applyTextureQuality, resizeQuality } from './quality-renderer';
 import { CardAppearance } from './appearance';
 import { configureInternalOptics } from './internal-optics';
 import { DecryptionController } from './decryption';
@@ -105,7 +105,9 @@ export class ArchiveScene {
         this.inputEvents.abort();
         this.cancelPointer();
         for (const group of this.outgoingPool) {
-            this.appearance.dispose(group);
+            if (!group.userData.nativeSharedAppearance) {
+                this.appearance.dispose(group);
+            }
         }
         this.outgoingPool = [];
         disposeThreeTree(this.scene);
@@ -116,13 +118,7 @@ export class ArchiveScene {
         this.assemblyTemplate?.then(disposeThreeTree).catch(() => {});
         this.assemblyTemplate = undefined;
         this.light.shadow.map?.dispose();
-        for (const pass of this.composer.passes) {
-            pass.dispose();
-        }
-        this.composer.dispose();
-        this.renderer.dispose();
-        this.renderer.forceContextLoss();
-        this.renderer.domElement.remove();
+        this.output.domElement.remove();
         this.loaded = false;
     }
     uiOnlyParallax = false;
@@ -143,8 +139,6 @@ export class ArchiveScene {
             const original = (inst.userData.fullMaterial ??= inst.material) as THREE.MeshPhysicalMaterial;
             if (enabled && !inst.userData.fastMaterial) {
                 const fast = original.clone();
-                fast.onBeforeCompile = original.onBeforeCompile;
-                fast.customProgramCacheKey = original.customProgramCacheKey.bind(original);
                 fast.transmission = 0;
                 fast.clearcoat = 0;
                 fast.roughness = Math.max(0.45, original.roughness);
@@ -232,7 +226,7 @@ export class ArchiveScene {
             return null;
         }
         const point = item.point.clone().project(this.camera);
-        const rect = this.renderer.domElement.getBoundingClientRect();
+        const rect = this.output.domElement.getBoundingClientRect();
         return {
             x: rect.left + ((point.x + 1) * rect.width) / 2,
             y: rect.top + ((1 - point.y) * rect.height) / 2,
@@ -240,7 +234,7 @@ export class ArchiveScene {
     }
 
     relayCandidates() {
-        const rect = this.renderer.domElement.getBoundingClientRect();
+        const rect = this.output.domElement.getBoundingClientRect();
         this.scene.updateMatrixWorld(true);
         return [...this.relayPoints.keys()].filter((key) => {
             const p = this.projectRelay(key)!;
@@ -253,22 +247,17 @@ export class ArchiveScene {
             return hit && cellKey(hit) === key;
         });
     }
-    readonly renderer: THREE.WebGLRenderer;
+    readonly output: NativeSceneOutput;
     readonly scene = new THREE.Scene();
     // 参考使用距磁带 72–140 单位的长焦；近裁面 0.1 会把相邻
     // 光学层量化到同一深度，产生可见闪烁。
     // 所有可见前景几何都超过 5，保持构图和镜头不变。
     readonly camera = new THREE.PerspectiveCamera(34, 16 / 9, 5, 300);
-    private composer: EffectComposer;
-    private ao: SharedDepthAO;
-    private bokeh: BokehPass;
+    private ao: NativeOcclusion;
+    private bokeh: NativeFocus;
     private instances: THREE.InstancedMesh[] = [];
     private matrixUpdates?: InstanceUpdates;
     private themeUpdates?: InstanceUpdates;
-    private renderState = new RenderState();
-    private shadowState = new RenderState();
-    private renderedFrames = 0;
-    private reusedFrames = 0;
     private visibility = new ArchiveVisibility();
     private drawCoverage = new ArchiveDrawCoverage();
     private shadowCoverage?: ArchiveShadowCoverage;
@@ -279,6 +268,7 @@ export class ArchiveScene {
         this.extraCoverage = extra;
     }
     private model = new THREE.Group();
+    nativeField?: NativeField;
     private appearance = new CardAppearance();
     private decryption = new DecryptionController();
     private cursor = new THREE.Vector2();
@@ -335,10 +325,55 @@ export class ArchiveScene {
         clarity: number;
     }[] = [];
     private outgoingPool: THREE.Group[] = [];
+    private nativeIdentity = new THREE.Matrix4();
+    /**
+     * 固定局部部件直接引用卡片根矩阵；只有标签等局部偏移部件需要矩阵乘法。
+     * 对象克隆后重新绑定引用，几何及各部件的拾取身份保持独立。
+     */
+    syncNativeMatrices(group: THREE.Object3D) {
+        for (const child of group.children) {
+            const shared = (child.userData.nativeSharedMatrix ??= child.matrix.equals(this.nativeIdentity));
+            if (shared) {
+                child.matrixWorld = group.matrixWorld;
+            } else {
+                child.updateWorldMatrix(false, false);
+            }
+        }
+    }
+    /**
+     * 在原生绘制确认卡片可见后更新其材质，屏幕外副本只推进物理状态。
+     * 重新进入画面时使用本帧完整状态，不逐帧追赶或缩短归位动画。
+     */
+    syncNativeAppearance(group: THREE.Group) {
+        const state = group.userData.nativeAppearance;
+        if (!state) {
+            return;
+        }
+        if (group.userData.nativeSharedAppearance) {
+            // 仅同帧参考绘制需要完整部件树；正式原生帧只发送卡片状态。
+            for (const child of this.model.children) {
+                const copy = child.clone();
+                if (!copy.userData.surface) {
+                    const material = (copy as THREE.Mesh).material as THREE.MeshBasicMaterial;
+                    (copy as THREE.Mesh).material = material.clone();
+                    ((copy as THREE.Mesh).material as THREE.MeshBasicMaterial).map =
+                        material.map?.clone() ?? null;
+                }
+                group.add(copy);
+            }
+            this.appearance.prepare(group);
+            group.userData.nativeSharedAppearance = false;
+        }
+        this.appearance.apply(group, state.quality);
+        this.appearance.setTheme(group, state.theme, state.subdued);
+        this.appearance.setClarity(group, state.clarity);
+    }
     trimMemory(releaseAssembly = false) {
         // 只释放已完成归位的备用对象，保留隐藏前仍在动画中的卡片。
         for (const group of this.outgoingPool) {
-            this.appearance.dispose(group);
+            if (!group.userData.nativeSharedAppearance) {
+                this.appearance.dispose(group);
+            }
         }
         this.outgoingPool = [];
         if (releaseAssembly) {
@@ -350,11 +385,19 @@ export class ArchiveScene {
         }
     }
     private releaseOutgoing(group: THREE.Group) {
+        if (group.userData.nativeRootOnly && !group.userData.nativeSharedAppearance) {
+            // 本地参考绘制生成的临时部件树不进入正式对象池。
+            this.appearance.dispose(group);
+            group.clear();
+            group.userData.nativeSharedAppearance = true;
+        }
         // 已完成归位的对象才进入池；仍可见的归位卡片绝不提前删除。
         if (this.outgoingPool.length < 16) {
             this.outgoingPool.push(group);
         } else {
-            this.appearance.dispose(group);
+            if (!group.userData.nativeSharedAppearance) {
+                this.appearance.dispose(group);
+            }
         }
     }
     private pulses: {
@@ -395,7 +438,6 @@ export class ArchiveScene {
     private motion: MotionPreferences = fullMotion();
     private quality = normalizeQuality(undefined);
     private appliedQuality = '';
-    private smaa = new SMAAPass();
     private aoKernelSize = 32;
     private displayHeight = 0;
     private layoutKind = '';
@@ -408,44 +450,24 @@ export class ArchiveScene {
         private readonly deferSelectionPulse = false,
         private readonly lightingLook: LightingLook = 'baseline',
     ) {
-        this.renderer = new THREE.WebGLRenderer({
-            antialias: true,
-            alpha: false,
-            powerPreference: 'high-performance',
-        });
-        this.renderer.setPixelRatio(
+        this.output = new NativeSceneOutput();
+        this.output.setPixelRatio(
             Math.min(devicePixelRatio, 1.5) * Math.min(innerWidth / 1920, innerHeight / 1080),
         );
-        this.renderer.setSize(container.clientWidth, container.clientHeight);
-        this.renderer.info.autoReset = false;
-        this.renderer.shadowMap.enabled = true;
-        // 同一应用帧中所有合成通道使用同一份几何，
-        // 在主颜色通道生成阴影贴图，再供深度和法线通道复用。
-        this.renderer.shadowMap.autoUpdate = false;
-        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-        this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-        this.renderer.toneMappingExposure = 1.05;
-        this.renderer.domElement.setAttribute(
+        this.output.setSize(container.clientWidth, container.clientHeight);
+        this.output.shadowMap.enabled = true;
+        this.output.toneMappingExposure = 1.05;
+        this.output.domElement.setAttribute(
             'aria-label',
             '三维研究档案阵列，点击选择，左右拖动切列，上下拖动或滚轮切换列内档案',
         );
-        container.appendChild(this.renderer.domElement);
-        this.renderer.domElement.addEventListener(
-            'webglcontextrestored',
-            () => {
-                this.renderState.invalidate();
-                this.shadowState.invalidate();
-            },
-            {
-                signal: this.inputEvents.signal,
-            },
-        );
+        container.appendChild(this.output.domElement);
         this.scene.background = new THREE.Color('#eae5e1');
         // 模拟后每帧只更新一次世界矩阵，后续颜色、
         // 法线、深度及透射渲染复用同一批矩阵。
         this.scene.matrixWorldAutoUpdate = false;
         this.scene.fog = new THREE.Fog('#eae5e1', 22, 47);
-        this.light = createArchiveLighting(this.renderer, this.scene, lightingLook);
+        this.light = createArchiveLighting(this.output, this.scene, lightingLook);
         this.light.castShadow = true;
         Object.assign(this.light.shadow.camera, {
             left: -16,
@@ -475,27 +497,10 @@ export class ArchiveScene {
         this.cameraAim.set(-0.5, 1.1, 0.4);
         this.camera.fov = 6.15;
         this.camera.lookAt(this.cameraAim);
-        this.composer = new EffectComposer(this.renderer);
-        this.composer.addPass(new RenderPass(this.scene, this.camera));
-        this.ao = new SharedDepthAO(this.scene, this.camera, container.clientWidth, container.clientHeight);
+        // 后处理在 QRhi 中执行；这里仅维护相机和质量对应的参数。
+        this.ao = new NativeOcclusion(this.camera);
         this.ao.kernelRadius = lightingLook === 'refined' ? 0.44 : 0.38;
-        this.ao.minDistance = 0.001;
-        this.ao.maxDistance = 0.09;
-        this.composer.addPass(this.ao);
-        this.bokeh = new SharedDepthBokeh(
-            this.scene,
-            this.camera,
-            {
-                focus: 25,
-                aperture: 0.0018,
-                maxblur: 0.011,
-            },
-            () => this.ao,
-        );
-        this.composer.addPass(this.bokeh);
-        this.smaa.enabled = false;
-        this.composer.addPass(this.smaa);
-        this.composer.addPass(new OutputPass());
+        this.bokeh = new NativeFocus();
         this.bindPointer();
     }
 
@@ -601,18 +606,6 @@ export class ArchiveScene {
                 }
                 arrayMat.transparent = false;
                 arrayMat.color.set('#fff7ed');
-                arrayMat.onBeforeCompile = (shader) => {
-                    shader.vertexShader = 'varying float vPanelHeight;\n' + shader.vertexShader;
-                    shader.vertexShader = shader.vertexShader.replace(
-                        '#include <begin_vertex>',
-                        '#include <begin_vertex>\nvPanelHeight = position.y / 3.7;',
-                    );
-                    shader.fragmentShader = 'varying float vPanelHeight;\n' + shader.fragmentShader;
-                    shader.fragmentShader = shader.fragmentShader.replace(
-                        '#include <color_fragment>',
-                        '#include <color_fragment>\ndiffuseColor.rgb *= mix(vec3(0.40, 0.30, 0.20), vec3(1.0, 0.98, 0.94), smoothstep(0.1, 1.0, vPanelHeight));',
-                    );
-                };
                 arrayMat.roughness = 0.28;
                 arrayMat.clearcoat = 0.3;
                 arrayMat.clearcoatRoughness = 0.25;
@@ -634,7 +627,7 @@ export class ArchiveScene {
                 THREE.DynamicDrawUsage,
             );
             geom.setAttribute('archiveTheme', this.themeAttribute);
-            themeMaterial(arrayMat, name, true, this.subduedIndex);
+
             const inst = new THREE.InstancedMesh(geom, arrayMat, count);
             // 所有表面刚性同步移动，在 GPU 上共享变换缓冲区。
             inst.instanceMatrix =
@@ -651,7 +644,7 @@ export class ArchiveScene {
         this.labelCanvas.height = 440;
         this.labelTexture = new THREE.CanvasTexture(this.labelCanvas);
         this.labelTexture.colorSpace = THREE.SRGBColorSpace;
-        this.labelTexture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+        this.labelTexture.anisotropy = this.output.capabilities.getMaxAnisotropy();
         const label = new THREE.Mesh(
             new THREE.PlaneGeometry(0.99, 0.46),
             new THREE.MeshBasicMaterial({
@@ -668,6 +661,7 @@ export class ArchiveScene {
         this.appearance.prepare(this.model);
         this.appearance.apply(this.model, 0);
         this.drawLabel(0);
+        this.model.userData.nativeCard = true;
         this.scene.add(this.model);
         this.model.position.copy(this.cellPosition(poolCell(this.selectedSlot)));
         this.loaded = true;
@@ -713,7 +707,7 @@ export class ArchiveScene {
         canvas.getContext('2d')!.drawImage(this.labelCanvas, 0, 0);
         const texture = new THREE.CanvasTexture(canvas);
         texture.colorSpace = THREE.SRGBColorSpace;
-        texture.anisotropy = this.renderer.capabilities.getMaxAnisotropy();
+        texture.anisotropy = this.output.capabilities.getMaxAnisotropy();
         const label = new THREE.Mesh(
             new THREE.PlaneGeometry(0.99, 0.46),
             new THREE.MeshBasicMaterial({
@@ -725,7 +719,7 @@ export class ArchiveScene {
         );
         label.position.set(-1.36, 3.04, 0.255);
         label.userData.assemblyPart = 'cover';
-        label.userData.themeAmount = themeMaterial(label.material, 'Printed_Canvas');
+        label.userData.themeAmount = themeMaterial();
         label.userData.themeAmount.value = this.themeAmount;
         model.add(label);
         meshes.push(label);
@@ -842,28 +836,22 @@ export class ArchiveScene {
         this.quality = quality;
         if (quality.aoSamples && quality.aoSamples !== this.aoKernelSize) {
             const old = this.ao;
-            this.ao = new SharedDepthAO(this.scene, this.camera, 1, 1, quality.aoSamples);
+            this.ao = new NativeOcclusion(this.camera);
             this.ao.kernelRadius = old.kernelRadius;
             this.ao.minDistance = old.minDistance;
             this.ao.maxDistance = old.maxDistance;
-            const index = this.composer.passes.indexOf(old);
-            this.composer.removePass(old);
-            this.composer.insertPass(this.ao, index);
-            old.dispose();
             this.aoKernelSize = quality.aoSamples;
         }
         this.ao.enabled = quality.aoSamples > 0;
         this.bokeh.enabled = quality.depthOfField > 0;
-        this.smaa.enabled = quality.antialias === 'smaa';
-        this.renderer.shadowMap.enabled = quality.shadows > 0;
-        const size = Math.min(quality.shadows || 1024, this.renderer.capabilities.maxTextureSize);
+        this.output.shadowMap.enabled = quality.shadows > 0;
+        const size = Math.min(quality.shadows || 1024, this.output.capabilities.maxTextureSize);
         if (this.light.shadow.mapSize.x !== size) {
             this.light.shadow.map?.dispose();
             this.light.shadow.map = null;
             this.light.shadow.mapSize.set(size, size);
         }
         this.light.shadow.needsUpdate = true;
-        applyTextureQuality(this.scene, this.renderer, quality);
         this.resize();
     }
     private cellPosition(cell: ArchiveCell) {
@@ -924,39 +912,26 @@ export class ArchiveScene {
         const changed = !sameCell(cell, this.selectedCell);
         if (this.looping && changed && this.loaded && this.lift.value > 0.0001) {
             const reused = this.outgoingPool.pop();
-            const group = reused ?? this.model.clone(true);
+            const group = reused ?? this.output.createCardCopy(this.model);
+            const bounds = group.userData.nativeDrawBounds;
+            const rootOnly = group.userData.nativeRootOnly;
+            const sharedAppearance = group.children.length === 0;
             group.userData = {
                 ...this.model.userData,
+                nativeReturning: true,
+                nativeSharedAppearance: sharedAppearance,
+                nativeDrawBounds: bounds,
+                nativeRootOnly: rootOnly,
+                nativeAppearance: {
+                    quality: ease(this.lift.value / 0.4),
+                    clarity: this.modelClarity(),
+                    theme: this.theme.sample(this.selectedCell, this.clock),
+                    subdued: this.model.children[0].userData.subduedIndex?.value ?? 0,
+                },
             };
             group.position.copy(this.model.position);
             group.rotation.copy(this.model.rotation);
             group.scale.copy(this.model.scale);
-            const label = group.children[group.children.length - 1] as THREE.Mesh;
-            const previous = reused ? (label.material as THREE.MeshBasicMaterial).map : null;
-            const canvas = previous?.image ?? document.createElement('canvas');
-            canvas.width = 1024;
-            canvas.height = 440;
-            canvas.getContext('2d')!.drawImage(this.labelCanvas, 0, 0);
-            if (previous) {
-                previous.needsUpdate = true;
-            } else {
-                const map = new THREE.CanvasTexture(canvas);
-                map.colorSpace = THREE.SRGBColorSpace;
-                label.material = new THREE.MeshBasicMaterial({
-                    map,
-                    toneMapped: false,
-                    transparent: true,
-                    depthWrite: false,
-                });
-            }
-            // 克隆会共享选中标签的材质引用；安装外观着色器前替换它，
-            // 避免每次选择时将主题钩子再次追加到
-            // 原标签材质上。
-            if (!reused) {
-                this.appearance.prepare(group);
-            }
-            this.appearance.apply(group, ease(this.lift.value / 0.4));
-            this.appearance.setClarity(group, this.modelClarity());
             this.scene.add(group);
             this.outgoing.push({
                 group,
@@ -1069,7 +1044,6 @@ export class ArchiveScene {
     }
 
     resize() {
-        this.renderState.invalidate();
         const w = this.container.clientWidth;
         const h = this.container.clientHeight;
         const kind = this.container.closest<HTMLElement>('[data-layout]')?.dataset.layout ?? '';
@@ -1087,29 +1061,17 @@ export class ArchiveScene {
         }
         this.displayHeight = displayHeight;
         this.layoutKind = kind;
-        const dimensions = resizeQuality(
-            this.renderer,
-            this.composer,
-            this.container,
-            this.quality,
-            this.superPerformance,
-        );
+        const dimensions = resizeNativeOutput(this.output, this.container);
         this.ao.setSize(
             Math.max(1, Math.floor(dimensions.width * this.quality.aoResolution)),
             Math.max(1, Math.floor(dimensions.height * this.quality.aoResolution)),
-        );
-        this.ao.setSharing(
-            this.ao.enabled &&
-                this.bokeh.enabled &&
-                this.quality.aoResolution === 1 &&
-                !this.superPerformance,
         );
         this.container.dataset.renderQuality = JSON.stringify({
             ...JSON.parse(this.container.dataset.renderQuality!),
             aoSamples: this.ao.enabled ? this.aoKernelSize : 0,
             aoWidth: this.ao.width,
             aoHeight: this.ao.height,
-            shadows: this.renderer.shadowMap.enabled ? this.light.shadow.mapSize.x : 0,
+            shadows: this.output.shadowMap.enabled ? this.light.shadow.mapSize.x : 0,
             depthOfField: this.bokeh.enabled ? this.quality.depthOfField : 0,
         });
         this.camera.aspect = w / h;
@@ -1138,7 +1100,11 @@ export class ArchiveScene {
         this.onHover?.(cell ? fileAtCell(cell) : null);
     }
     private pickCell(x: number, y: number) {
-        const r = this.renderer.domElement.getBoundingClientRect();
+        // 原生帧只同步可见副本的部件矩阵；射线测试前补齐完整对象，保留原有命中结果。
+        for (const copy of this.outgoing) {
+            copy.group.updateWorldMatrix(true, true);
+        }
+        const r = this.output.domElement.getBoundingClientRect();
         this.cursor.set(((x - r.left) / r.width) * 2 - 1, (-(y - r.top) / r.height) * 2 + 1);
         this.raycaster.setFromCamera(this.cursor, this.camera);
         const hit = this.raycaster.intersectObjects(
@@ -1174,7 +1140,7 @@ export class ArchiveScene {
         this.model.updateMatrixWorld(true);
         this.camera.updateMatrixWorld(true);
         const center = this.model.localToWorld(new THREE.Vector3(0, 1.85, 0));
-        const rect = this.renderer.domElement.getBoundingClientRect();
+        const rect = this.output.domElement.getBoundingClientRect();
         const project = (motion: THREE.Vector3) => {
             const from = center.clone().addScaledVector(motion, -0.5).project(this.camera);
             const to = center.clone().addScaledVector(motion, 0.5).project(this.camera);
@@ -1231,7 +1197,7 @@ export class ArchiveScene {
         this.archiveMomentum = null;
     }
     private bindPointer() {
-        const canvas = this.renderer.domElement;
+        const canvas = this.output.domElement;
         let activePointer: number | null = null;
         let previousX = 0;
         let startX = 0;
@@ -1592,9 +1558,9 @@ export class ArchiveScene {
         this.presence +=
             Math.sign(this.presenceTarget - this.presence) *
             Math.min(step, Math.abs(this.presenceTarget - this.presence));
-        this.renderer.domElement.style.opacity = String(THREE.MathUtils.clamp(this.presence / 0.16, 0, 1));
+        this.output.domElement.style.opacity = String(THREE.MathUtils.clamp(this.presence / 0.16, 0, 1));
         this.theme.beginFrame();
-        themeEnvironment(this.scene, this.renderer, this.themeAmount);
+        themeEnvironment(this.scene, this.output, this.themeAmount);
         const blend = 1 - Math.exp(-dt * (this.motion.selectionTransition ? 2.8 : 35));
         const detailBlend = 1 - Math.exp(-dt * (this.motion.detailTransition ? 2.8 : 35));
         this.reveal = cinematic
@@ -1758,37 +1724,62 @@ export class ArchiveScene {
             return (spectrumPoint.x + 1) / 2;
         };
         const fieldCache = new Map<number, Map<number, number>>();
+        const nativeField =
+            !cinematic && !this.deferSelectionPulse && this.selectionPulse === baselineSelectionWave
+                ? this.nativeField?.(
+                      {
+                          originRow: this.coordinateOrigin.row,
+                          originLane: this.coordinateOrigin.lane,
+                          scanTime: this.scanTime,
+                          scanBlend: this.scanBlend,
+                          shoulder: this.shoulder.value,
+                          laneFocus: this.laneFocus.value,
+                          idleGain: this.idleGain,
+                          time,
+                          flatMix: this.flatMix,
+                          pulseGain: this.pulseGain,
+                          selectionWave: this.motion.selectionWave,
+                          pulses: this.pulses,
+                      },
+                      [...this.cells, this.selectedCell, ...this.outgoing.map((copy) => copy.cell)],
+                  )
+                : undefined;
         const calculateField = (row: number, lane: number) => {
             if (cinematic) {
                 return cinematicField(row, lane, shot, this.shoulder.value, this.laneFocus.value);
             }
-            const height =
-                archiveWave(
-                    row + this.coordinateOrigin.row,
-                    lane + this.coordinateOrigin.lane,
-                    this.scanTime,
-                ) * this.scanBlend;
-            const breathing =
-                idleWave(row + this.coordinateOrigin.row, lane + this.coordinateOrigin.lane, time) *
-                this.idleGain;
-            let pulseHeight = 0;
-            if (!cinematic && this.motion.selectionWave) {
-                let ripple = 0;
-                for (const p of this.pulses) {
-                    const distance = Math.hypot(row - p.row, (lane - p.lane) * 2.2);
-                    const age = time - p.time;
-                    ripple +=
-                        this.selectionPulse(distance, age) *
-                        (this.deferSelectionPulse ? rippleEnvelope(distance, age) : 1);
+            let base = nativeField?.(row, lane);
+            if (base === undefined) {
+                const height =
+                    archiveWave(
+                        row + this.coordinateOrigin.row,
+                        lane + this.coordinateOrigin.lane,
+                        this.scanTime,
+                    ) * this.scanBlend;
+                const breathing =
+                    idleWave(row + this.coordinateOrigin.row, lane + this.coordinateOrigin.lane, time) *
+                    this.idleGain;
+                let pulseHeight = 0;
+                if (!cinematic && this.motion.selectionWave) {
+                    let ripple = 0;
+                    for (const p of this.pulses) {
+                        const distance = Math.hypot(row - p.row, (lane - p.lane) * 2.2);
+                        const age = time - p.time;
+                        ripple +=
+                            this.selectionPulse(distance, age) *
+                            (this.deferSelectionPulse ? rippleEnvelope(distance, age) : 1);
+                    }
+                    pulseHeight = THREE.MathUtils.clamp(ripple, -0.6, 0.6) * this.pulseGain;
                 }
-                pulseHeight = THREE.MathUtils.clamp(ripple, -0.6, 0.6) * this.pulseGain;
+                const distance = row - this.shoulder.value;
+                base =
+                    (height + settlingWave(distance, 26.56) * columnStrength(lane, this.laneFocus.value)) *
+                        (1 - this.flatMix) +
+                    breathing +
+                    pulseHeight;
             }
-            const distance = row - this.shoulder.value;
             return (
-                (height + settlingWave(distance, 26.56) * columnStrength(lane, this.laneFocus.value)) *
-                    (1 - this.flatMix) +
-                breathing +
-                pulseHeight +
+                base +
                 (activePlay && !this.reduced
                     ? rhythmDisplacement(
                           row,
@@ -1907,10 +1898,12 @@ export class ArchiveScene {
                 p.z + entryZ + this.rail.value,
             );
             const quality = ease(o.lift.value / 0.4);
-            this.appearance.apply(o.group, quality);
-            this.appearance.setTheme(o.group, this.theme.sample(o.cell, time), indexDim(o.lift.value));
             o.clarity = this.motion.modelDecryption ? o.clarity * Math.exp(-dt * 9) : 0;
-            this.appearance.setClarity(o.group, o.clarity);
+            const state = (o.group.userData.nativeAppearance ??= {});
+            state.quality = quality;
+            state.theme = this.theme.sample(o.cell, time);
+            state.subdued = indexDim(o.lift.value);
+            state.clarity = o.clarity;
             const { row, lane } = o.cell;
             o.group.rotation.x =
                 (field(row + 0.5, lane) - field(row - 0.5, lane)) * 0.024 * (1 - detail) * (1 - quality);
@@ -2184,7 +2177,8 @@ export class ArchiveScene {
         // 拾取只使用第一个实例表面，其他批次禁用渲染器裁剪，
         // 不需要每帧进行 O(n) 的边界重算。
         if (matricesChanged || countChanged || !this.instances[0].boundingSphere) {
-            this.instances[0].computeBoundingSphere();
+            // QRhi 不使用 Three 的渲染裁剪球；射线拾取在实际输入时按需重算。
+            this.instances[0].boundingSphere = null;
         }
         this.themeUpdates?.commit();
         let neighborTop = -Infinity;
@@ -2229,97 +2223,14 @@ export class ArchiveScene {
         bokehUniforms.focus.value = -focalPoint.z;
         bokehUniforms.aperture.value =
             (THREE.MathUtils.lerp(0.0003, 0.0008, detail) * this.quality.depthOfField) / 100;
-        this.renderer.info.reset();
-        // 模拟和拾取保持实时；只有所有实际输入一致时才复用合成画布，
-        // 包括迟到的纹理和材质。
-        const state = this.renderState;
-        this.scene.updateMatrixWorld();
-        // Qt 自行判断画面和阴影失效；原生适配器不渲染 WebGL，不能重复生成整场景快照。
-        const nativeRenderer = this.renderer as THREE.WebGLRenderer & { isNativeStateOnly?: boolean };
-        if (nativeRenderer.isNativeStateOnly) {
-            return;
-        }
-        // 实例缓冲区变化已足以证明画面变化；忙碌帧避免生成材质和
-        // 矩阵快照，收束后再捕获。
-        if (matricesChanged || cinematic) {
-            state.invalidate();
-        } else {
-            state.begin();
-            state.floats(
-                ...this.camera.projectionMatrix.elements,
-                ...this.camera.matrixWorldInverse.elements,
-                ...this.camera.position.toArray(),
-                fog.near,
-                fog.far,
-                this.themeAmount,
-                this.subduedIndex.value,
-                bokehUniforms.focus.value,
-                bokehUniforms.aperture.value,
-            );
-            this.scene.traverse((object) => {
-                state.add(object.id, Number(object.visible));
-                if (!(object instanceof THREE.Mesh)) {
-                    return;
-                }
-                object.modelViewMatrix.multiplyMatrices(this.camera.matrixWorldInverse, object.matrixWorld);
-                object.normalMatrix.getNormalMatrix(object.modelViewMatrix);
-                state.floats(
-                    ...object.modelViewMatrix.elements,
-                    ...object.normalMatrix.elements,
-                    ...object.matrixWorld.elements,
-                );
-                const mat = object.material as THREE.MeshPhysicalMaterial;
-                // Three 的双面透射通道会自行增加 material.version；
-                // 应追踪应用控制的输入，而不是渲染侧计数。
-                state.add(object.geometry.id, mat.uuid, mat.map?.uuid, mat.map?.version ?? 0);
-                state.floats(
-                    mat.opacity,
-                    mat.roughness,
-                    mat.metalness,
-                    mat.transmission,
-                    mat.thickness,
-                    mat.attenuationDistance,
-                    mat.clearcoat,
-                    mat.clearcoatRoughness,
-                    mat.color.r,
-                    mat.color.g,
-                    mat.color.b,
-                    mat.attenuationColor?.r ?? 0,
-                    mat.attenuationColor?.g ?? 0,
-                    mat.attenuationColor?.b ?? 0,
-                );
-                for (const name of ['appearance', 'glassClarity', 'themeAmount', 'subduedIndex']) {
-                    state.floats(object.userData[name]?.value ?? 0);
-                }
-                if (object instanceof THREE.InstancedMesh) {
-                    state.add(object.count, object.instanceMatrix.version, this.themeAttribute?.version ?? 0);
-                }
-            });
-            if (!state.end()) {
-                this.reusedFrames++;
-                return;
+        // Qt 负责帧和阴影失效；只同步模拟、原生帧包及拾取所需的世界矩阵。
+        this.scene.updateWorldMatrix(false, false);
+        for (const child of this.scene.children) {
+            if (child.userData.nativeCard) {
+                child.updateWorldMatrix(false, false);
+            } else {
+                child.updateMatrixWorld();
             }
-        }
-        this.renderedFrames++;
-        const shadow = this.shadowState;
-        shadow.begin();
-        shadow.add(this.light.shadow.mapSize.x, Number(this.renderer.shadowMap.enabled));
-        shadow.floats(...this.light.matrixWorld.elements, ...this.light.target.matrixWorld.elements);
-        this.scene.traverseVisible((object) => {
-            if (!(object instanceof THREE.Mesh) || !object.castShadow) {
-                return;
-            }
-            shadow.add(object.id, object.geometry.id);
-            shadow.floats(...object.matrixWorld.elements);
-            if (object instanceof THREE.InstancedMesh) {
-                shadow.add(object.count, object.instanceMatrix.version);
-            }
-        });
-        this.renderer.shadowMap.needsUpdate = shadow.end() || this.light.shadow.needsUpdate;
-        if (this.superPerformance) {
-            this.renderer.render(this.scene, this.camera);
-        } else {
-            this.composer.render();
         }
     }
 
@@ -2375,12 +2286,12 @@ export class ArchiveScene {
             cameraPosition: this.camera.position.toArray().map((v) => Math.round(v * 10000) / 10000),
             fieldOfView: this.camera.fov,
             loaded: this.loaded,
-            drawCalls: this.renderer.info.render.calls,
-            renderedFrames: this.renderedFrames,
-            reusedFrames: this.reusedFrames,
+            drawCalls: 0,
+            renderedFrames: 0,
+            reusedFrames: 0,
             superPerformance: this.superPerformance,
             presentation: this.presence,
-            triangles: this.renderer.info.render.triangles,
+            triangles: 0,
             archiveCount: this.drawnCells.length,
             archiveCandidates: this.cells.length,
             archiveCulled: this.cells.length - this.drawnCells.length,
@@ -2448,8 +2359,10 @@ export class ArchiveScene {
                 ?.userData.subduedIndex?.value,
             returningIndexDims: this.outgoing.map((o) => ({
                 cell: o.cell,
-                dim: o.group.children.find((child) => child.userData.surface === 'Index_Inlay')?.userData
-                    .subduedIndex?.value,
+                dim:
+                    o.group.userData.nativeAppearance?.subdued ??
+                    o.group.children.find((child) => child.userData.surface === 'Index_Inlay')?.userData
+                        .subduedIndex?.value,
             })),
             cameraDistance: this.camera.position.distanceTo(this.cameraAim),
             cameraNear: this.camera.near,
@@ -2458,8 +2371,10 @@ export class ArchiveScene {
             fogFar: (this.scene.fog as THREE.Fog).far,
             returningAppearance: this.outgoing.map((o) => ({
                 slot: o.slot,
-                clarity: o.group.children.find((child) => child.userData.surface === 'Frosted_Polymer')
-                    ?.userData.glassClarity?.value,
+                clarity:
+                    o.group.userData.nativeAppearance?.clarity ??
+                    o.group.children.find((child) => child.userData.surface === 'Frosted_Polymer')?.userData
+                        .glassClarity?.value,
                 cell: {
                     ...o.cell,
                 },

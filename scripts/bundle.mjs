@@ -9,7 +9,7 @@ const plugin = {
     setup(b) {
         b.onResolve(
             {
-                filter: /^three$|three\/addons\/(postprocessing\/|loaders\/GLTFLoader)/,
+                filter: /^three$|three\/addons\/loaders\/GLTFLoader/,
             },
             () => ({
                 path: platform,
@@ -17,7 +17,7 @@ const plugin = {
         );
         b.onResolve(
             {
-                filter: /shared-depth$|archive-lighting$|quality-renderer$/,
+                filter: /instance-updates(?:\.ts)?$/,
             },
             () => ({
                 path: platform,
@@ -46,6 +46,12 @@ for (const file of ['timeline', 'runtime']) {
         }
         const absolute = fs.realpathSync(path.resolve(name));
         assert(absolute.startsWith(root + path.sep), `Build input outside independent project: ${name}`);
+        if (file === 'runtime') {
+            assert(
+                !/three\.module\.js$|three\/addons\/postprocessing\//.test(name),
+                `Native runtime must not contain the retired WebGL renderer or postprocessing: ${name}`,
+            );
+        }
         inputs.add(path.relative(root, absolute));
     }
 }

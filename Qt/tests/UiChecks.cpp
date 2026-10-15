@@ -17,6 +17,43 @@
 #include <QWheelEvent>
 #include <functional>
 
+namespace {
+/**
+ * GPU 资源重建后只允许极少像素出现一个 RGB8 量化单位的舍入差异。
+ * 尺寸、透明度及明显颜色差异仍严格失败；帧数据、HUD 命令和矩阵另行逐字节验证。
+ */
+bool equivalentGpuPixels(const QImage &expected, const QImage &actual, int &changedPixels) {
+    changedPixels = 0;
+    if (expected.isNull() || expected.size() != actual.size()) {
+        return false;
+    }
+    if (expected == actual) {
+        return true;
+    }
+    const auto first = expected.convertToFormat(QImage::Format_RGBA8888);
+    const auto second = actual.convertToFormat(QImage::Format_RGBA8888);
+    const auto limit = qMax<qint64>(1, qint64(first.width()) * first.height() / 100000);
+    for (int y = 0; y < first.height(); ++y) {
+        const auto before = first.constScanLine(y);
+        const auto after = second.constScanLine(y);
+        for (int x = 0; x < first.width(); ++x) {
+            bool changed = false;
+            for (int channel = 0; channel < 4; ++channel) {
+                const int difference = std::abs(int(before[x * 4 + channel]) - int(after[x * 4 + channel]));
+                if (difference > 1 || (channel == 3 && difference != 0)) {
+                    return false;
+                }
+                changed |= difference != 0;
+            }
+            if (changed && ++changedPixels > limit) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+}
+
 int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     if (!window) {
         return 1;
@@ -224,11 +261,40 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     }
     evaluate("App.runtime.reduced(true);App.runtime.openViewer();App.runtime.coverFront();");
     refresh();
+    // 异步模型必须真的载入并产生几何；空画面与空参考一致不能算查看器通过。
+    QElapsedTimer modelWait;
+    modelWait.start();
+    while (!backend.frame()["viewerReady"].toBool() && modelWait.elapsed() < 10000) {
+        refresh();
+    }
+    check(backend.frame()["viewerReady"].toBool(), "viewer model finishes loading without extra input");
+    check(!backend.frame()["draws"].toArray().isEmpty(), "viewer contains actual model geometry");
+    if (!output.isEmpty()) {
+        QFile viewerData(output + "/viewer-frame.json");
+        if (viewerData.open(QIODevice::WriteOnly)) {
+            viewerData.write(QJsonDocument(backend.frame()).toJson());
+        }
+    }
     // 比较封面中心区域，避开 HUD；真实窗口不能继续采样资料库的旧景深纹理。
     const auto actualViewer = window->grabWindow().convertToFormat(QImage::Format_RGB32);
     const auto expectedViewer = renderReference(backend.root(), backend.frame(), backend.current(),
                                                 backend.cover(), actualViewer.size(), backend.drawBuffers())
                                     .convertToFormat(QImage::Format_RGB32);
+    // 中心区域必须有可见模型，防止相机或绘制故障让两张空画面再次通过。
+    const auto clearColor = actualViewer.pixelColor(actualViewer.width() / 2, actualViewer.height() * .22);
+    int modelPixels = 0;
+    int modelSamples = 0;
+    for (int y = actualViewer.height() * .3; y < actualViewer.height() * .7; y += 8) {
+        for (int x = actualViewer.width() * .35; x < actualViewer.width() * .65; x += 8) {
+            const auto pixel = actualViewer.pixelColor(x, y);
+            const int contrast = qAbs(pixel.red() - clearColor.red()) +
+                                 qAbs(pixel.green() - clearColor.green()) +
+                                 qAbs(pixel.blue() - clearColor.blue());
+            modelPixels += contrast > 16;
+            ++modelSamples;
+        }
+    }
+    check(modelSamples > 0 && modelPixels > modelSamples * .05, "viewer draws visible model pixels");
     int matchingPixels = 0;
     int sampledPixels = 0;
     if (actualViewer.size() == expectedViewer.size()) {
@@ -750,6 +816,8 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
           "settled song texture cache respects the byte budget");
     const auto beforeRelease = window->grabWindow();
     const auto frameBeforeRelease = backend.frame();
+    const auto buffersBeforeRelease = backend.drawBuffers();
+    const auto commandsBeforeRelease = backend.commands();
     const auto selectedBeforeRelease = backend.current();
     window->hide();
     wait.restart();
@@ -766,6 +834,9 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     }
     settle();
     check(backend.current() == selectedBeforeRelease, "graphics rebuild preserves current song");
+    qInfo() << "Graphics restore exposure:" << window->isVisible() << window->isExposed()
+            << window->visibility() << backend.performance().value("visible")
+            << backend.performance().value("gpuResources");
     check(backend.performance().value("gpuResources").toULongLong() > 0,
           "restored window rebuilds GPU resources");
     const auto afterRelease = window->grabWindow();
@@ -780,8 +851,25 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
             }
         }
     }
-    check(!beforeRelease.isNull() && beforeRelease == afterRelease,
+    auto frameBefore = frameBeforeRelease;
+    auto frameAfter = backend.frame();
+    for (const auto &key : {"time", "boot"}) {
+        frameBefore.remove(key);
+        frameAfter.remove(key);
+    }
+    check(frameBefore == frameAfter, "graphics rebuild preserves exact scene and material data");
+    check(commandsBeforeRelease == backend.commands(), "graphics rebuild preserves exact HUD commands");
+    const auto buffersAfterRelease = backend.drawBuffers();
+    bool buffersMatch = buffersBeforeRelease.size() == buffersAfterRelease.size();
+    for (auto it = buffersBeforeRelease.begin(); it != buffersBeforeRelease.end(); ++it) {
+        const auto after = buffersAfterRelease.value(it.key());
+        buffersMatch &= it->matrices == after.matrices && it->themes == after.themes;
+    }
+    check(buffersMatch, "graphics rebuild preserves exact matrix and theme bytes");
+    int changedPixels = 0;
+    check(equivalentGpuPixels(beforeRelease, afterRelease, changedPixels),
           "background release and rebuild preserve the frozen window pixels");
+    qInfo() << "[ui] Rebuild RGB8 rounding pixels:" << changedPixels;
     if (!output.isEmpty()) {
         QFile metrics(output + "/performance.json");
         if (metrics.open(QIODevice::WriteOnly)) {
