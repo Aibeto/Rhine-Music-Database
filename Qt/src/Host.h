@@ -2,7 +2,6 @@
 #include "AudioPlayer.h"
 #include <QCache>
 #include <QImage>
-#include <QJSValue>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QObject>
@@ -16,13 +15,17 @@
 class Host : public QObject {
     Q_OBJECT
   public:
+    using JsonReply = std::function<void(QJsonObject, QString)>;
+    using TextReply = std::function<void(QString)>;
     explicit Host(QString root, bool offline = false, QObject *parent = nullptr);
     ~Host() override;
-    Q_INVOKABLE void request(QString route, QJSValue params, QJSValue callback);
+    void requestJson(QString route, QJsonObject params, JsonReply callback);
+    void schedule(int ms, std::function<void()> callback);
+    void loadCover(QString url, TextReply callback);
+    void playOfficial(QString id, TextReply callback);
     Q_INVOKABLE void invalidate() {
         emit invalidated();
     }
-    Q_INVOKABLE void delay(int ms, QJSValue callback);
     Q_INVOKABLE bool authenticated() const;
     Q_INVOKABLE bool hasCredential(QString value) const;
     Q_INVOKABLE QString saveCredential();
@@ -31,10 +34,8 @@ class Host : public QObject {
     Q_INVOKABLE void setKugouEdition(QString edition);
     Q_INVOKABLE void acceptCookies(QString json, int responseEpoch, QString credentialKey = {});
     Q_INVOKABLE QString fromLink(QString input) const;
-    Q_INVOKABLE void cover(QString url, QJSValue callback);
     Q_INVOKABLE QString qr(QString key);
     Q_INVOKABLE QString qrImage(QString data);
-    Q_INVOKABLE void play(QString id, QJSValue callback);
     Q_INVOKABLE void mediaMetadata(QString title, QString artist, QString album);
     Q_INVOKABLE bool mediaLoad(QString url, bool alternative = false);
     Q_INVOKABLE void mediaControl(QString action, double value = 0);
@@ -79,7 +80,11 @@ class Host : public QObject {
 
   private:
     struct Waiter {
-        QJSValue callback;
+        JsonReply callback;
+        int epoch;
+    };
+    struct CoverWaiter {
+        TextReply callback;
         int epoch;
     };
     struct Work {
@@ -93,7 +98,7 @@ class Host : public QObject {
         qint64 expiry;
         QJsonObject body;
     };
-    QHash<QString, QList<Waiter>> coverFlights;
+    QHash<QString, QList<CoverWaiter>> coverFlights;
     QHash<QString, Entry> cache;
     QHash<QString, Work> flights;
     QHash<QString, QString> pending;

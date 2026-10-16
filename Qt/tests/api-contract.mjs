@@ -1,13 +1,5 @@
 import assert from 'node:assert/strict';
-import { API, item, parse, pad, time } from '../logic/music.js';
-import { API as RequestAPI } from '../logic/music-api.js';
-import * as items from '../logic/music-items.js';
-
-// 模块拆分后保留原导出对象，避免调用方或跨模块身份比较失效。
-assert.equal(API, RequestAPI);
-for (const [name, exported] of Object.entries({ item, parse, pad, time })) {
-    assert.equal(exported, items[name]);
-}
+import { API } from '../../MusicBridge/client/netease.mjs';
 
 let respond;
 const acceptedCookies = [];
@@ -49,4 +41,4 @@ const malformedRequest = api.request('/search');
 respond('{', '');
 await assert.rejects(malformedRequest, /元数据格式无效/);
 assert.equal(acceptedCookies.length, 1);
-console.log('兼容导出、请求有效性和 Cookie 交付顺序检查通过');
+console.log('SDK 响应有效性和 Cookie 交付顺序检查通过');

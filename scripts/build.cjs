@@ -78,6 +78,9 @@ function prepareResources() {
     fs.cpSync('MusicBridge/upstream', path.join(bridge, 'upstream'), {
         recursive: true,
     });
+    fs.cpSync('MusicBridge/client', path.join(bridge, 'client'), {
+        recursive: true,
+    });
     const bridgePackages = {
         '@neteasecloudmusicapienhanced/api': '4.41.1',
         '@yakult-green-tea/qq-music-api': '3.1.5',
@@ -118,12 +121,20 @@ function prepareResources() {
     fs.copyFileSync(binary, path.join(bridge, nodeName));
     fs.copyFileSync(license, path.join(bridge, 'NODE-LICENSE'));
     fs.chmodSync(path.join(bridge, nodeName), 0o755);
-    run(process.execPath, ['scripts/export-lighting.mjs']);
-    run(process.execPath, ['scripts/bundle.mjs']);
-    run(process.execPath, ['scripts/check-runtime.mjs']);
-    run(process.execPath, ['scripts/bundle-qt.mjs']);
-    run(process.execPath, ['scripts/export-scene-fixture.mjs']);
+    for (const name of ['dfg-lut.bin', 'ao-kernel.bin', 'ao-noise.bin']) {
+        fs.copyFileSync(path.join('Assets/lighting', name), path.join('output/resources', name));
+    }
     fs.copyFileSync('Assets/room-pmrem.bin', 'output/resources/room-pmrem.bin');
+    // 同步清理旧暂存文件，开发运行与发布包使用相同的纯原生资源。
+    for (const name of [
+        'runtime.js',
+        'timeline.js',
+        'qt-logic.js',
+        'archive-cassette-geometry.json',
+        'archive-assembly-geometry.json',
+    ]) {
+        fs.rmSync(path.join('output/resources', name), { force: true });
+    }
 }
 /**
  * 验证 Qt kit 后串行配置和编译，返回部署所需的路径与构建类型。
@@ -245,19 +256,7 @@ function deployApp(qt, config, existingBundle = '') {
         fs.copyFileSync('output/qt-build/RhineMusicDatabase.exe', path.join(app, 'RHINE MUSIC DATABASE.exe'));
     }
 
-    run(process.execPath, ['scripts/package-resources.cjs', resources]);
-    fs.copyFileSync('output/resources/qt-logic.js', path.join(resources, 'qt-logic.js'));
-    fs.copyFileSync('LICENSE', path.join(resources, 'LICENSE'));
-    fs.copyFileSync('vendor/qrcodegen/qrcodegen.hpp', path.join(resources, 'qrcodegen-LICENSE.hpp'));
-    fs.cpSync('licenses/Qt', path.join(resources, 'Qt-Licenses'), {
-        recursive: true,
-    });
-    const qtLicenses = path.resolve(qt, '../../Licenses');
-    if (fs.existsSync(qtLicenses)) {
-        fs.cpSync(qtLicenses, path.join(resources, 'Qt-Licenses'), {
-            recursive: true,
-        });
-    }
+    fs.mkdirSync(resources, { recursive: true });
     if (mac) {
         fs.mkdirSync('output/qt-icon', {
             recursive: true,
@@ -306,8 +305,6 @@ function deployApp(qt, config, existingBundle = '') {
             recursive: true,
             force: true,
         });
-        run('codesign', ['--force', '--sign', '-', path.join(resources, 'MusicBridge/node')]);
-        run('codesign', ['--force', '--deep', '--sign', '-', app]);
     } else {
         run(path.join(qt, 'bin/windeployqt.exe'), [
             '--' + config.toLowerCase(),
@@ -333,6 +330,23 @@ function deployApp(qt, config, existingBundle = '') {
             recursive: true,
             force: true,
         });
+    }
+    // 先部署 Qt，再装入大量 SDK 文件，避免部署工具逐个扫描非原生依赖。
+    run(process.execPath, ['scripts/package-resources.cjs', resources]);
+    fs.copyFileSync('LICENSE', path.join(resources, 'LICENSE'));
+    fs.copyFileSync('vendor/qrcodegen/qrcodegen.hpp', path.join(resources, 'qrcodegen-LICENSE.hpp'));
+    fs.cpSync('licenses/Qt', path.join(resources, 'Qt-Licenses'), {
+        recursive: true,
+    });
+    const qtLicenses = path.resolve(qt, '../../Licenses');
+    if (fs.existsSync(qtLicenses)) {
+        fs.cpSync(qtLicenses, path.join(resources, 'Qt-Licenses'), {
+            recursive: true,
+        });
+    }
+    if (mac) {
+        run('codesign', ['--force', '--sign', '-', path.join(resources, 'MusicBridge/node')]);
+        run('codesign', ['--force', '--deep', '--sign', '-', app]);
     }
     return app;
 }

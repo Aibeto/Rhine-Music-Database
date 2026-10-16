@@ -22,22 +22,13 @@ run(process.execPath, ['scripts/check-repository.cjs']);
 run(python, ['scripts/check-qt-project.py']);
 for (const script of [
     'scripts/check-music-upstream.cjs',
-    'scripts/check-runtime.mjs',
     'Qt/tests/api-contract.mjs',
-    'Qt/tests/music-state.mjs',
-    'Qt/tests/hud-layout.mjs',
-    'Qt/tests/list-navigation.mjs',
-    'Qt/tests/search-groups.mjs',
-    'Qt/tests/player-state.mjs',
-    'Qt/tests/lyrics-state.mjs',
-    'Qt/tests/discover-state.mjs',
-    'Qt/tests/account-actions.mjs',
+    'Qt/tests/native-client.mjs',
     'Qt/tests/qq-state.mjs',
     'Qt/tests/kugou-state.mjs',
+    'Qt/tests/lyrics-format.mjs',
     'Qt/tests/kugou-device.cjs',
-    'Qt/tests/login-state.mjs',
     'Qt/tests/device-state.cjs',
-    'Qt/tests/performance.mjs',
 ]) {
     run(process.execPath, [script]);
 }

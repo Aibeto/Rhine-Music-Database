@@ -10,6 +10,7 @@ class NativePicking {
     explicit NativePicking(QString root);
     ~NativePicking();
     void prepare();
+    void trimMemory();
     QVariantMap raycast(int mesh, const QVariantList &origin, const QVariantList &direction, int side);
 
   private:

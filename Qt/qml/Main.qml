@@ -10,16 +10,6 @@ Window {
     minimumHeight: 540
     visible: true
     flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint | Qt.WindowFullscreenButtonHint
-    property int windowedVisibility: Window.Windowed
-    // 退出全屏时恢复进入前的窗口模式，保留窗口尺寸与场景坐标换算。
-    function toggleFullscreen() {
-        if (visibility === Window.FullScreen) {
-            visibility = windowedVisibility;
-        } else {
-            windowedVisibility = visibility === Window.Maximized ? Window.Maximized : Window.Windowed;
-            showFullScreen();
-        }
-    }
     title: "RHINE MUSIC DATABASE"
     color: "#e7e7e1"
     property real stageScale: height / 1080
@@ -39,13 +29,7 @@ Window {
     }
     Shortcut {
         sequences: Qt.platform.os === "osx" ? [StandardKey.FullScreen, "F11"] : ["F11"]
-        onActivated: root.toggleFullscreen()
-    }
-    Connections {
-        target: rhine
-        function onFullscreenRequested() {
-            root.toggleFullscreen();
-        }
+        onActivated: rhine.toggleFullscreen()
     }
     RhiScene {
         anchors.fill: parent
@@ -75,40 +59,11 @@ Window {
         onExited: rhine.pointer("pointerleave", 0, 0)
         onCanceled: rhine.pointer("pointercancel", 0, 0)
         onWheel: function (wheel) {
-            var delta = wheel.pixelDelta.y !== 0 ? wheel.pixelDelta.y : wheel.angleDelta.y / 8;
-            rhine.wheel(wheel.x / root.stageScale, wheel.y / root.stageScale, delta, wheel.pixelDelta.y !== 0);
+            rhine.wheelInput(wheel.x / root.stageScale, wheel.y / root.stageScale, wheel.pixelDelta.y, wheel.angleDelta.y);
             wheel.accepted = true;
         }
         Keys.onPressed: function (event) {
-            var names = {};
-            names[Qt.Key_Left] = "ArrowLeft";
-            names[Qt.Key_Right] = "ArrowRight";
-            names[Qt.Key_Up] = "ArrowUp";
-            names[Qt.Key_Down] = "ArrowDown";
-            names[Qt.Key_Return] = "Enter";
-            names[Qt.Key_Enter] = "Enter";
-            names[Qt.Key_Escape] = "Escape";
-            if (event.key === Qt.Key_MediaTogglePlayPause || event.key === Qt.Key_MediaPlay || event.key === Qt.Key_MediaPause) {
-                rhine.action("player:toggle");
-                event.accepted = true;
-                return;
-            }
-            if (event.key === Qt.Key_MediaNext) {
-                rhine.action("player:next");
-                event.accepted = true;
-                return;
-            }
-            if (event.key === Qt.Key_MediaPrevious) {
-                rhine.action("player:prev");
-                event.accepted = true;
-                return;
-            }
-            var key = names[event.key] || event.text;
-            if (key) {
-                // Qt 在 macOS 将 ControlModifier 映射到 ⌘。
-                rhine.key(key, (event.modifiers & Qt.ControlModifier) !== 0);
-                event.accepted = true;
-            }
+            event.accepted = rhine.keyEvent(event.key, event.modifiers, event.text);
         }
     }
     Item {
@@ -139,42 +94,9 @@ Window {
                     }
                     onWheel: function (wheel) {
                         var p = mapToItem(inputLayer, wheel.x, wheel.y);
-                        rhine.wheel(p.x / root.stageScale, p.y / root.stageScale, wheel.pixelDelta.y !== 0 ? wheel.pixelDelta.y : wheel.angleDelta.y / 8, wheel.pixelDelta.y !== 0);
+                        rhine.wheelInput(p.x / root.stageScale, p.y / root.stageScale, wheel.pixelDelta.y, wheel.angleDelta.y);
                         wheel.accepted = true;
                     }
-                }
-            }
-        }
-    }
-    // 两个拖动区域保持固定对象，避免每帧更新命中列表时丢失鼠标抓取。
-    Item {
-        anchors.fill: parent
-        Repeater {
-            model: 2
-            delegate: MouseArea {
-                required property int index
-                property var bounds: index === 0 ? rhine.state.seek : rhine.state.volume
-                visible: !!bounds
-                x: (bounds ? bounds.x : 0) * root.stageScale
-                y: (bounds ? bounds.y : 0) * root.stageScale
-                width: (bounds ? bounds.width : 0) * root.stageScale
-                height: (bounds ? bounds.height : 0) * root.stageScale
-                cursorShape: Qt.PointingHandCursor
-                function applyPosition(value) {
-                    if (width > 0) {
-                        rhine.action((index === 0 ? "player:seek-fraction:" : "player:volume-fraction:") + Math.max(0, Math.min(1, value / width)));
-                    }
-                }
-                onPressed: function (mouse) {
-                    applyPosition(mouse.x);
-                }
-                onPositionChanged: function (mouse) {
-                    if (pressed) {
-                        applyPosition(mouse.x);
-                    }
-                }
-                onReleased: function (mouse) {
-                    applyPosition(mouse.x);
                 }
             }
         }
@@ -182,7 +104,7 @@ Window {
     // 密码只在输入组件和单次登录请求中短暂存在，提交后立即清空。
     Item {
         id: formFields
-        visible: rhine.state.modal === "playlist-form" || (rhine.state.modal === "login" && ["phone", "email"].indexOf(rhine.state.loginMethod) >= 0)
+        visible: rhine.state.modal === "playlist-form" || (rhine.state.modal === "login" && (rhine.state.loginMethod === "phone" || rhine.state.loginMethod === "email"))
         x: (rhine.state.inputX || 0) * root.stageScale
         y: (rhine.state.modalOffset || 0) * root.stageScale
         width: (rhine.state.inputWidth || 0) * root.stageScale
@@ -196,13 +118,7 @@ Window {
             }
         }
         function submit() {
-            var data = (rhine.state.modal !== "login") ? {
-                name: accountField.text
-            } : {
-                account: accountField.text,
-                password: passwordField.text
-            };
-            rhine.form(JSON.stringify(data));
+            rhine.submitForm(accountField.text, passwordField.text);
             passwordField.text = "";
         }
         Rectangle {
@@ -294,26 +210,23 @@ Window {
             height: region ? region.height * root.stageScale : 0
             cursorShape: Qt.PointingHandCursor
             onPressed: function (mouse) {
-                rhine.action("player:" + modelData + "-fraction:" + Math.max(0, Math.min(1, mouse.x / width)));
+                rhine.adjustPlayer(modelData, mouse.x, width);
             }
             onPositionChanged: function (mouse) {
                 if (pressed) {
-                    rhine.action("player:" + modelData + "-fraction:" + Math.max(0, Math.min(1, mouse.x / width)));
+                    rhine.adjustPlayer(modelData, mouse.x, width);
                 }
             }
         }
     }
     Connections {
         target: rhine
-        property string lastMethod: ""
-        function onStateChanged() {
-            if (lastMethod !== rhine.state.loginMethod) {
-                lastMethod = rhine.state.loginMethod;
-                accountField.text = "";
-                passwordField.text = "";
-            }
+        function onClearCredentials() {
+            accountField.text = "";
+            passwordField.text = "";
         }
     }
+
     Rectangle {
         visible: searchInput.visible
         x: searchInput.x
@@ -349,16 +262,13 @@ Window {
             if (visible) {
                 text = rhine.state.query || "";
                 forceActiveFocus();
-            } else
+            } else {
                 inputLayer.forceActiveFocus();
+            }
         }
         Keys.onEscapePressed: rhine.action("close-modal")
         Keys.onReturnPressed: function (event) {
-            if ((event.modifiers & Qt.ControlModifier) !== 0) {
-                rhine.key("Enter", true);
-            } else {
-                rhine.query(text);
-            }
+            rhine.searchAccepted(text, event.modifiers);
         }
         Text {
             anchors.fill: parent

@@ -1,8 +1,6 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
-import { QQAPI, qqItem } from '../logic/qq.js';
-import { MusicStore, API } from '../logic/music.js';
-import { Player } from '../logic/player.js';
+import { QQAPI, qqItem } from '../../MusicBridge/client/qq.mjs';
+import { API } from '../../MusicBridge/client/netease.mjs';
 const song = {
     mid: 'songMID',
     name: 'QQ 曲目',
@@ -434,17 +432,6 @@ assert.deepEqual(
     calls.slice(-2).map((v) => v.params.quality),
     ['flac', '128'],
 );
-const qqPlayer = new Player(host, sparse);
-qqPlayer.quality = 'exhigh';
-await qqPlayer.play(parsed, [parsed]);
-assert.match(qqPlayer.status, /已切换为标准音质/);
-assert.deepEqual(
-    calls
-        .filter((call) => call.route === '/qq/getMusicPlay')
-        .slice(-2)
-        .map((v) => v.params.quality),
-    ['320', '128'],
-);
 host.request = (route, params, done) => {
     if (route === '/qq/getMusicPlay') {
         calls.push({
@@ -500,54 +487,4 @@ const beforeExpired = calls.length;
 await assert.rejects(() => sparse.playback(parsed, 'lossless', false, () => true), /401/);
 assert.equal(calls.length, beforeExpired + 1);
 host.request = normalRequest;
-const runtime = {
-    musicIdentity() {},
-    musicClear() {},
-    setMode() {},
-    select() {},
-};
-const store = new MusicStore(host, runtime, JSON.parse(fs.readFileSync('Resources/slots.json')));
-await store.switchProvider('qq');
-assert.equal(provider, 'qq');
-assert.equal(store.api.provider, 'qq');
-assert.equal(store.editable, false);
-const before = calls.length;
-store.uid = '42';
-await store.mutate('/like', {}, () => {});
-assert.equal(calls.length, before);
-store.loginMethod = 'wechat';
-await store.startLogin();
-assert.equal(store.uid, '42');
-assert.equal(saved, 1);
-assert.equal(calls.find((v) => v.route === '/qq/login/qr/key').params.channel, 'wechat');
-await new Promise((resolve) => setImmediate(resolve));
-await store.loadMoreSource(1);
-assert.equal(store.lists[1][0].id, 'songMID');
-let release;
-store.api.search = () => new Promise((resolve) => (release = resolve));
-const pending = store.search('迟到');
-await store.switchProvider('netease');
-release({
-    items: [parsed],
-    rawCount: 1,
-    total: 1,
-    more: false,
-});
-await pending;
-assert.equal(store.lists[0].length, 0);
-assert.equal(store.uid, '');
-const player = new Player(host, api);
-player.enqueue({
-    ...parsed,
-    id: '1',
-    provider: 'qq',
-});
-player.enqueue({
-    ...parsed,
-    id: '1',
-    provider: 'netease',
-});
-assert.equal(player.queue.length, 2);
-console.log(
-    'QQ mid/mediaId mapping, account collections, private playlist paging, recommendation mapping, WeChat QR flow and platform cancellation passed offline',
-);
+console.log('QQ SDK 标识、账号列表、私有歌单分页、推荐映射和音质回退通过');

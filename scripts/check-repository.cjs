@@ -8,7 +8,7 @@ const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclud
     encoding: 'utf8',
 })
     .split('\0')
-    .filter(Boolean);
+    .filter((file) => file && fs.existsSync(file));
 assert(files.length, 'Repository is empty');
 // 根目录采用明确清单，避免临时笔记换成其他扩展名后绕过文档检查。
 const rootFiles = new Set([
@@ -37,7 +37,6 @@ const sourceDirectories = new Set([
     'MusicBridge',
     'Qt',
     'Resources',
-    'Scene',
     'licenses',
     'scripts',
     'vendor',

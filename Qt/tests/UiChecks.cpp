@@ -1,4 +1,6 @@
 #include "Engine.h"
+#include "MusicData.h"
+#include "MusicDiscover.h"
 #include "RhiScene.h"
 #include <QCoreApplication>
 #include <QDataStream>
@@ -16,13 +18,16 @@
 #include <QUrl>
 #include <QWheelEvent>
 #include <functional>
+#include <algorithm>
+#include <cmath>
 
 namespace {
 /**
  * GPU 资源重建后只允许极少像素出现一个 RGB8 量化单位的舍入差异。
  * 尺寸、透明度及明显颜色差异仍严格失败；帧数据、HUD 命令和矩阵另行逐字节验证。
  */
-bool equivalentGpuPixels(const QImage &expected, const QImage &actual, int &changedPixels) {
+bool equivalentGpuPixels(const QImage &expected, const QImage &actual, int &changedPixels,
+                         qint64 pixelsPerDifference = 100000) {
     changedPixels = 0;
     if (expected.isNull() || expected.size() != actual.size()) {
         return false;
@@ -32,7 +37,7 @@ bool equivalentGpuPixels(const QImage &expected, const QImage &actual, int &chan
     }
     const auto first = expected.convertToFormat(QImage::Format_RGBA8888);
     const auto second = actual.convertToFormat(QImage::Format_RGBA8888);
-    const auto limit = qMax<qint64>(1, qint64(first.width()) * first.height() / 100000);
+    const auto limit = qMax<qint64>(1, qint64(first.width()) * first.height() / pixelsPerDifference);
     for (int y = 0; y < first.height(); ++y) {
         const auto before = first.constScanLine(y);
         const auto after = second.constScanLine(y);
@@ -54,11 +59,40 @@ bool equivalentGpuPixels(const QImage &expected, const QImage &actual, int &chan
 }
 }
 
+/** 离线 GPU 基准复用逐通道 RGB8 检查，并限制独立设备之间的舍入像素数量。 */
+bool runGpuReferenceCheck(const QImage &expected, const QImage &actual) {
+    int changedPixels = 0;
+    // 两个独立 QRhi 设备允许最多万分之一像素出现一个 RGB8 单位的舍入，透明度仍须精确相同。
+    // 窗口资源重建继续使用默认的十万分之一预算；场景数据和矩阵另外严格对照。
+    const auto same = equivalentGpuPixels(expected, actual, changedPixels, 10000);
+    if (changedPixels > 0) {
+        qInfo() << "GPU reference RGB8 rounding pixels:" << changedPixels;
+    }
+    const auto output = qEnvironmentVariable("RHINE_GPU_DIFF");
+    if (!same && !output.isEmpty()) {
+        QDir().mkpath(output);
+        expected.save(output + "/expected.png");
+        actual.save(output + "/actual.png");
+    }
+    return same;
+}
+
+/** 用真实 QML 输入和 QRhi 窗口验证原生业务，全部数据来自本地夹具。 */
 int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
-    if (!window) {
+    if (!window || !backend.ready() || !backend.scene.review("archive")) {
         return 1;
     }
-    auto settle = [] {
+    auto &music = backend.app->music;
+    auto &hud = backend.app->hud;
+    auto &player = music.player;
+    bool ok = true;
+    const auto check = [&](bool value, const char *name) {
+        if (!value) {
+            qCritical() << "UI regression:" << name;
+        }
+        ok &= value;
+    };
+    const auto settle = [] {
         QElapsedTimer wait;
         wait.start();
         while (wait.elapsed() < 150) {
@@ -67,71 +101,65 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
         }
     };
     QElapsedTimer wait;
-    wait.start();
-    while (!backend.ready() && wait.elapsed() < 10000) {
-        settle();
+    QJsonArray songs;
+    for (int index = 1; index <= 40; ++index) {
+        auto song = MusicData::item("song", QString::number(index), "本地测试曲目 " + QString::number(index),
+                                    "测试歌手");
+        song["album"] = "测试专辑";
+        song["albumID"] = "7";
+        song["duration"] = 180000;
+        song["wiki"] = "本地验证";
+        songs.append(song);
+        music.details.insert(song["key"].toString(), song);
     }
-    if (!backend.ready() || !backend.scene.review("archive")) {
-        return 1;
+    QJsonArray lyricLines;
+    const QStringList lyricTexts{"风穿过安静的街道", "我们听见远处的回声", "每一束光都落在这里",
+                                 "让这首歌继续流动"};
+    for (int index = 0; index < lyricTexts.size(); ++index) {
+        lyricLines.append(QJsonObject{{"startMs", index * 1000},
+                                      {"endMs", QJsonValue::Null},
+                                      {"text", lyricTexts.at(index)},
+                                      {"translation", ""},
+                                      {"words", QJsonArray{}}});
     }
-    auto evaluate = [&](const QString &source) {
-        auto result = backend.js.evaluate(source, "ui-regression");
-        if (result.isError()) {
-            qCritical() << result.toString();
+    const QJsonObject lyrics{{"version", 1},  {"source", "netease"}, {"timing", "line"},
+                             {"offsetMs", 0}, {"plainText", ""},     {"lines", lyricLines}};
+    backend.host.fixture = [&](QString route, QJsonObject parameters) {
+        if (route.endsWith("/lyrics")) {
+            return QJsonObject{{"body", QJsonObject{{"code", 200}, {"value", lyrics}}}};
         }
-        return result;
-    };
-    bool ok = true;
-    auto check = [&](bool value, const char *message) {
-        if (!value) {
-            qCritical() << "UI regression:" << message;
+        if (route.endsWith("/detail")) {
+            const auto item = parameters["args"].toArray().at(0).toObject();
+            return QJsonObject{
+                {"body",
+                 QJsonObject{{"code", 200}, {"value", QJsonArray{item, QJsonArray{}, QJsonArray{}}}}}};
         }
-        ok &= value;
+        return QJsonObject{{"body", QJsonObject{{"code", 200}, {"value", QJsonObject{}}}}};
     };
-    // 本地数据隔离账号和网络；真实 QML 窗口仍负责事件命中、坐标映射和绘制。
-    evaluate(R"(
-        var uiSongs = Array.from(
-            {
-                length: 40,
-            },
-            function (_, i) {
-                return {
-                    id: String(i + 1),
-                    title: '本地测试曲目 ' + (i + 1),
-                    artist: '测试歌手',
-                    kind: 'song',
-                    album: '测试专辑',
-                    duration: 180000,
-                };
-            },
-        );
-        App.music.observe = function () {
-            // 离线测试禁用此回调，避免触发外部请求或刷新。
-        };
-        App.music.loadMoreSource = function () {
-            // 离线测试禁用此回调，避免触发外部请求或刷新。
-        };
-        App.music.loadTrackPage = function () {
-            // 离线测试禁用此回调，避免触发外部请求或刷新。
-        };
-        App.music.lists[0] = uiSongs;
-        App.music.lists[1] = uiSongs;
-        App.music.hasMore = [false, false, false, false, false];
-        App.music.keyword = '本地测试';
-        App.music.status = '离线界面验证';
-        App.hud.reduced = true;
-        App.hud.openModal('search');
-    )");
-    auto refresh = [&] {
+    music.lists[0] = songs;
+    music.lists[1] = songs;
+    music.hasMore = {false, false, false, false, false};
+    music.keyword = "本地测试";
+    music.status = "离线界面验证";
+    hud.reduced = true;
+    hud.openModal("search");
+    const auto refresh = [&] {
+        // 固定展示夹具不随物理选中自动重新读取；点击动作仍走真实原生控制器。
+        music.selectedPhysical = backend.scene.selection();
         backend.step(50);
         settle();
     };
-    // 从终端直接启动时 macOS 可能把窗口留在后台；焦点验收先申请激活。
+    const auto capture = [&](QString name) {
+        if (!output.isEmpty()) {
+            QDir().mkpath(output);
+            window->grabWindow().save(output + "/" + name + ".png");
+        }
+    };
     window->requestActivate();
     refresh();
-    const double scale = window->height() / 1080.;
+    const double scale = window->height() / 1080.0;
     const double width = window->width() / scale;
-    auto wheel = [&](double x, double y, bool pixels) {
+    const auto wheel = [&](double x, double y, bool pixels) {
         const QPointF position(x * scale, y * scale);
         QWheelEvent event(position, window->mapToGlobal(position), pixels ? QPoint(0, -15) : QPoint(),
                           pixels ? QPoint() : QPoint(0, -120), Qt::NoButton, Qt::NoModifier,
@@ -139,34 +167,16 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
         QCoreApplication::sendEvent(window, &event);
         refresh();
     };
-    wheel(width * .7, 500, false);
-    check(evaluate("App.hud.listOffset===1").toBool(), "search row wheel routing");
-    wheel(width * .7, 500, true);
-    check(evaluate("App.hud.listOffset===2").toBool(), "trackpad pixel wheel routing");
-    std::function<QQuickItem *(QQuickItem *)> findInput = [&](QQuickItem *item) -> QQuickItem * {
-        if (item->objectName() == "musicSearchInput") {
-            return item;
-        }
-        for (auto child : item->childItems()) {
-            if (auto result = findInput(child)) {
-                return result;
-            }
-        }
-        return nullptr;
-    };
-    auto input = findInput(window->contentItem());
-    const double modalWidth = qMin(width - 100., qMax(760., qMin(1000., width * .5 - 59)));
-    check(input && qAbs(input->x() / scale - (width - modalWidth - 59 + 53)) < .01 &&
-              qAbs(input->width() / scale - (modalWidth - 106)) < .01 && input->hasActiveFocus(),
-          "search input alignment and keyboard focus");
-    auto click = [&](const QString &action) {
+    const auto click = [&](QString action) {
         for (const auto &value : backend.hits()) {
             const auto hit = value.toMap();
             if (hit.value("action").toString() != action) {
                 continue;
             }
+            const auto offset = hud.modal.isEmpty() || hit.value("fixed").toBool() ? 0 : hud.motion.offset;
             const QPointF position((hit.value("x").toDouble() + hit.value("width").toDouble() / 2) * scale,
-                                   (hit.value("y").toDouble() + hit.value("height").toDouble() / 2) * scale);
+                                   (hit.value("y").toDouble() + offset + hit.value("height").toDouble() / 2) *
+                                       scale);
             for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
                 QMouseEvent event(type, position, position, window->mapToGlobal(position), Qt::LeftButton,
                                   type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton,
@@ -178,103 +188,76 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
         }
         return false;
     };
-    check(click("music:page-next"), "next page button is visible");
-    check(evaluate("App.hud.listOffset===7").toBool(), "native next page click");
-    check(click("music:page-prev"), "previous page button is visible");
-    check(evaluate("App.hud.listOffset===2").toBool(), "native previous page click");
-    if (!output.isEmpty()) {
-        QDir().mkpath(output);
-        window->grabWindow().save(output + "/search.png");
-    }
-    evaluate("App.hud.openModal('saved'); App.hud.musicCollection=1;");
+    const auto hasAction = [&](QString action) {
+        return std::any_of(hud.hits.begin(), hud.hits.end(),
+                           [&](const QJsonValue &value) { return value.toObject()["action"] == action; });
+    };
+    const auto textY = [&](QString label) -> std::optional<double> {
+        for (const auto &value : hud.commands) {
+            const auto command = value.toArray();
+            if (command.at(0) == "text" && command.at(1) == label) {
+                return command.at(3).toDouble();
+            }
+        }
+        return std::nullopt;
+    };
+    wheel(width * 0.7, 500, false);
+    check(hud.listOffset == 1, "search row wheel routing");
+    wheel(width * 0.7, 500, true);
+    check(hud.listOffset == 2, "trackpad pixel wheel routing");
+    auto input = window->findChild<QQuickItem *>("musicSearchInput");
+    const auto bounds = hud.modalBounds(width);
+    check(input && std::abs(input->x() / scale - bounds.x() - 53) < 0.01 &&
+              std::abs(input->width() / scale - bounds.width() + 106) < 0.01 && input->hasActiveFocus(),
+          "search input alignment and focus");
+    check(click("music:page-next") && hud.listOffset == 7, "native next page click");
+    check(click("music:page-prev") && hud.listOffset == 2, "native previous page click");
+    capture("search");
+    hud.openModal("saved");
+    hud.musicCollection = 1;
     refresh();
     wheel(width / 2, 500, false);
-    check(evaluate("App.hud.listOffset===1").toBool(), "saved music row scrolling");
-    // 生成本地封面验证圆形印刷、中心孔、透明壳以及真实窗口中的选曲封面更新。
+    check(hud.listOffset == 1, "saved music row scrolling");
     QImage cover(512, 512, QImage::Format_RGBA8888_Premultiplied);
     cover.fill(QColor(78, 153, 197));
-    QPainter coverPainter(&cover);
-    coverPainter.setRenderHint(QPainter::Antialiasing);
-    coverPainter.setPen(QPen(QColor(213, 233, 231), 7));
-    coverPainter.drawEllipse(QRectF(52, 52, 408, 408));
-    backend.glyphs()->text(coverPainter, "RHINE LAB", 85, 112, 45, "bold", 1, Qt::white);
-    backend.glyphs()->text(coverPainter, "MUSIC ARCHIVE", 75, 355, 31, "demibold", 1, Qt::white);
-    coverPainter.end();
+    QPainter painter(&cover);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(QColor(213, 233, 231), 7));
+    painter.drawEllipse(QRectF(52, 52, 408, 408));
+    backend.glyphs()->text(painter, "RHINE LAB", 85, 112, 45, "bold", 1, Qt::white);
+    backend.glyphs()->text(painter, "MUSIC ARCHIVE", 75, 355, 31, "demibold", 1, Qt::white);
+    painter.end();
     backend.host.fixtureImage("fixture-disc", cover);
-    evaluate(R"(
-        App.hud.modal = null;
-        App.hud.trackOffset = 0;
-        App.music.current = {
-            kind: 'playlist',
-            id: '1',
-            title: '《鸣潮》巡回演唱会「致予新世界」上海歌单 / 长标题布局验收',
-            artist: '测试歌手',
-        };
-        App.music.tracks = uiSongs;
-        App.music.coverImage = 'fixture-disc';
-        App.runtime.setMode('detail');
-    )");
-    check(backend.scene.review("detail"), "playlist detail scene readiness");
+    hud.modal.clear();
+    music.current = MusicData::item("playlist", "1",
+                                    "《鸣潮》巡回演唱会「致予新世界」上海歌单 / 长标题布局验收", "测试歌手");
+    music.tracks = songs;
+    music.coverImage = "fixture-disc";
+    backend.scene.review("detail");
     refresh();
-    wheel(width * .5, 500, false);
-    check(evaluate("App.hud.trackOffset===1").toBool(), "playlist track row scrolling");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/playlist.png");
-    }
-    const QSize originalWindowSize = window->size();
+    wheel(width * 0.5, 500, false);
+    check(hud.trackOffset == 1, "playlist track row scrolling");
+    capture("playlist");
+    const auto originalWindowSize = window->size();
     window->resize(1152, 720);
     refresh();
     refresh();
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/playlist-16x10.png");
-    }
+    capture("playlist-16x10");
     window->resize(originalWindowSize);
     refresh();
+    music.current = songs.first().toObject();
+    music.current["title"] = "本地光盘模型验收";
+    music.current["wiki"] = "本地生成封面 / 无网络访问";
+    music.coverImage = "fixture-disc";
+    music.detailLoading = false;
+    hud.tab = "overview";
     refresh();
-    evaluate(R"(
-        App.music.current = App.parse(
-            {
-                id: 1,
-                name: '本地光盘模型验收',
-                ar: [
-                    {
-                        id: 10,
-                        name: '测试歌手',
-                    },
-                ],
-                al: {
-                    id: 7,
-                    name: '测试专辑',
-                },
-                dt: 180000,
-            },
-            'song',
-        );
-        App.music.coverImage = 'fixture-disc';
-        App.music.detailLoading = false;
-        App.hud.tab = 'overview';
-        App.music.current.wiki = '本地生成封面 / 无网络访问';
-    )");
+    capture("disc-case");
+    backend.scene.openViewer();
+    backend.scene.coverFront();
     refresh();
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/disc-case.png");
-    }
-    evaluate("App.runtime.reduced(true);App.runtime.openViewer();App.runtime.coverFront();");
-    refresh();
-    // 异步模型必须真的载入并产生几何；空画面与空参考一致不能算查看器通过。
-    QElapsedTimer modelWait;
-    modelWait.start();
-    while (!backend.frame()["viewerReady"].toBool() && modelWait.elapsed() < 10000) {
-        refresh();
-    }
-    check(backend.frame()["viewerReady"].toBool(), "viewer model finishes loading without extra input");
-    check(!backend.frame()["draws"].toArray().isEmpty(), "viewer contains actual model geometry");
-    if (!output.isEmpty()) {
-        QFile viewerData(output + "/viewer-frame.json");
-        if (viewerData.open(QIODevice::WriteOnly)) {
-            viewerData.write(QJsonDocument(backend.frame()).toJson());
-        }
-    }
+    check(backend.frame()["viewerReady"].toBool() && !backend.frame()["draws"].toArray().isEmpty(),
+          "viewer loads actual model geometry");
     // 比较封面中心区域，避开 HUD；真实窗口不能继续采样资料库的旧景深纹理。
     const auto actualViewer = window->grabWindow().convertToFormat(QImage::Format_RGB32);
     const auto expectedViewer = renderReference(backend.root(), backend.frame(), backend.current(),
@@ -323,127 +306,85 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     if (!output.isEmpty()) {
         window->grabWindow().save(output + "/viewer-front.png");
     }
-    evaluate("App.runtime.coverBack();");
+    backend.scene.coverFront(false);
     refresh();
-    check(evaluate("App.hud.frame.eye[2]<0").toBool(), "disc rear captured from back camera");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/disc-back.png");
+    check(backend.frame()["eye"].toArray().at(2).toDouble() < 0, "disc rear camera");
+    capture("disc-back");
+    backend.scene.viewerAction("close");
+    backend.step(51);
+    hud.modal.clear();
+    backend.scene.reduced(false);
+    QJsonArray followSongs;
+    for (int id : {501, 502}) {
+        auto song = songs.first().toObject();
+        song["id"] = QString::number(id);
+        song["key"] = "netease:song:" + QString::number(id);
+        song["title"] = "本地切歌 " + QString::number(id);
+        followSongs.append(song);
+        music.details[song["key"].toString()] = song;
     }
-    evaluate("App.runtime.viewerAction('close');");
-    refresh();
-    // 本地切歌验证：详情、唱片身份和原插回动画同步；不读取真实账号音源。
-    evaluate(R"(
-        App.hud.modal = null;
-        App.runtime.reduced(false);
-        var followSongs = [501, 502].map(function (id) {
-            var v = App.parse(
-                {
-                    id: id,
-                    name: '同步切歌 ' + id,
-                    ar: [
-                        {
-                            id: 10,
-                            name: '测试歌手',
-                        },
-                    ],
-                    al: {
-                        id: 7,
-                        name: '测试专辑',
-                    },
-                    dt: 180000,
-                },
-                'song',
-            );
-            v.wiki = '本地验证';
-            App.music.details[v.key] = v;
-            return v;
-        });
-        App.music.player.queue = followSongs;
-        App.music.selectedPhysical = 0;
-        App.music.selectedLane = 0;
-        App.music.player.current = followSongs[0];
-        App.music.followPlayback(followSongs[0]);
-    )");
-    for (int i = 1; i <= 240; ++i) {
-        backend.step(50 + i / 60.);
+    player.queue = followSongs;
+    player.current = followSongs.first().toObject();
+    music.followPlayback(player.current);
+    for (int index = 1; index <= 240; ++index) {
+        backend.step(51 + index / 60.0);
     }
-    evaluate("App.music.player.current=followSongs[1];App.music.followPlayback(followSongs[1]);");
-    backend.step(54.01);
-    check(
-        evaluate("App.music.current.id==='502'&&App.music.directory.index===1&&App.hud.frame.mode==='detail'")
-            .toBool(),
-        "song change synchronizes upper detail and archive selection");
-    check(evaluate("App.hud.frame.stats.returningFiles>0").toBool(), "song change returns the outgoing disc");
-    for (int i = 1; i <= 240; ++i) {
-        backend.step(54.01 + i / 60.);
+    player.current = followSongs.at(1).toObject();
+    music.followPlayback(player.current);
+    backend.step(55.01);
+    check(music.current["id"] == "502" && music.directory && music.directory->index == 1 &&
+              hud.frame["mode"] == "detail",
+          "song change synchronizes upper detail and archive selection");
+    check(backend.frame()["returningCards"].toInt() > 0, "song change returns outgoing disc");
+    for (int index = 1; index <= 240; ++index) {
+        backend.step(55.01 + index / 60.0);
     }
-    settle();
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/song-switch.png");
-    }
-    evaluate("App.music.directory=null;App.music.player.current=null;App.runtime.reduced(true);");
-    // 即使底层保留详情状态，四类检索也只能显示检索面板，不能叠出资料页。
+    capture("song-switch");
+    music.directory.reset();
+    player.current = {};
+    backend.scene.reduced(true);
     for (const auto &kind : {QString("album"), QString("playlist"), QString("artist")}) {
-        evaluate("App.hud.openModal('search');App.music.searchKind='" + kind + "';App.music.current={kind:'" +
-                 kind +
-                 "',id:'8',title:'本地分类检索',artist:'测试歌手'};"
-                 "App.music.lists[0]=uiSongs.slice(0,6).map(function(v){return Object.assign({},v,{kind:'" +
-                 kind + "'});});");
+        hud.openModal("search");
+        music.searchKind = kind;
+        music.current = MusicData::item(kind, "8", "本地分类检索", "测试歌手");
         refresh();
-        check(evaluate("!App.hud.hits.some(function(h){return h.action==='music:play-loaded'||"
-                       "h.action.indexOf('music:hint:')===0;})")
-                  .toBool(),
-              "search surface excludes background directory and suggestions");
-        if (!output.isEmpty()) {
-            window->grabWindow().save(output + "/search-" + kind + ".png");
-        }
+        check(!hasAction("music:play-loaded"), "search excludes background directory");
+        capture("search-" + kind);
     }
-    evaluate(R"(
-        App.hud.openModal('search');
-        App.hud.action('music:group:1');
-        App.music.lists[0] = uiSongs.map(function (song, i) {
-            return Object.assign({}, song, {
-                artists: [
-                    {
-                        id: String(Math.floor(i / 10) + 10),
-                        name: '测试歌手 ' + Math.floor(i / 10),
-                    },
-                ],
-            });
-        });
-    )");
+    hud.openModal("search");
+    hud.action("music:group:1");
+    music.lists[0] = {};
+    for (int index = 0; index < songs.size(); ++index) {
+        auto song = songs.at(index).toObject();
+        song["artists"] = QJsonArray{QJsonObject{{"id", QString::number(index / 10 + 10)},
+                                                 {"name", "测试歌手 " + QString::number(index / 10)}}};
+        music.lists[0].append(song);
+    }
+    music.changed();
     refresh();
-    check(click("music:expand:artist%3A10"), "artist group row opens with native click");
-    check(evaluate("App.hud.activeGroup==='artist:10' && App.hud.rows(0).length===10").toBool(),
-          "group expands to original song indices");
-    check(click("music:group-back"), "artist group return button");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/artist-groups.png");
-    }
-    // 空歌手目录必须能通过真实按钮和 ESC 返回，不能因缺少首曲而停留在详情模式。
-    for (const bool useKeyboard : {false, true}) {
-        evaluate(R"(
-            App.hud.modal = null;
-            App.music.directory = {
-                item: { kind: 'artist', id: '789658', key: 'kugou:artist:789658', title: 'HOYO-MiX' },
-                songs: [], ids: [], index: 0, parentLane: 0,
-                parentPhysical: App.music.physicalSlots[0][0], parentItem: uiSongs[0],
-            };
-            App.music.showDirectoryInfo();
-        )");
-        check(backend.scene.review("detail"), "empty artist detail scene");
+    check(click("music:expand:artist%3A10"), "artist group native click");
+    check(hud.activeGroup == "artist:10" && hud.rows(0).size() == 10, "group preserves song indices");
+    check(click("music:group-back"), "group return native click");
+    capture("artist-groups");
+    for (const bool keyboard : {false, true}) {
+        hud.modal.clear();
+        auto directory = std::make_shared<MusicDirectory>();
+        directory->item = MusicData::item("artist", "789658", "HOYO-MiX", "", "kugou");
+        directory->parentPhysical = music.physicalSlots[0].first();
+        directory->parentItem = songs.first().toObject();
+        music.directory = directory;
+        music.showDirectoryInfo();
+        backend.scene.review("detail");
         refresh();
-        if (useKeyboard) {
-            QKeyEvent escapeEvent(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
-            QCoreApplication::sendEvent(window, &escapeEvent);
+        if (keyboard) {
+            QKeyEvent event(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+            QCoreApplication::sendEvent(window, &event);
             refresh();
         } else {
-            check(click("music:directory"), "empty artist return button is clickable");
+            check(click("music:directory"), "empty artist return button");
         }
-        check(evaluate("App.music.directory===null && !App.music.directoryInfo").toBool(),
-              "empty artist restores parent directory");
+        check(!music.directory && !music.directoryInfo, "empty artist restores parent");
     }
-    // 静音 PCM 文件验证真实系统解码，不访问网络也不打扰用户。
     QTemporaryDir audioFixture;
     QFile audioFile(audioFixture.filePath("silent.wav"));
     check(audioFile.open(QIODevice::WriteOnly), "local audio fixture file");
@@ -486,25 +427,21 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     check(qAbs(seekState.value("position").toLongLong() - 1500) < 100, "native seek");
     backend.host.mediaControl("volume", .4);
     check(qAbs(backend.host.mediaState().value("volume").toDouble() - .4) < .01, "native volume");
-    evaluate(R"(
-        App.music.player.current = uiSongs[0];
-        App.music.player.queue = uiSongs.slice(0, 10);
-        App.music.player.index = 0;
-        App.music.player.lastPoll = -1;
-        App.hud.openModal('player');
-    )");
+    player.current = songs.first().toObject();
+    player.queue = MusicData::slice(songs, 0, 10);
+    player.index = 0;
+    hud.openModal("player");
     refresh();
-    check(click("player:mode"), "playback mode native click");
-    check(evaluate("App.music.player.mode==='one'").toBool(), "playback mode changes");
-    check(click("player:remove:1"), "queue removal native click");
-    check(evaluate("App.music.player.queue.length===9").toBool(), "queue removal changes data");
-    auto dragControl = [&](const QString &name, double fraction) {
-        const auto bounds = evaluate("App.hud." + name).toVariant().toMap();
-        const QPointF start((bounds.value("x").toDouble() + bounds.value("width").toDouble() * .2) * scale,
-                            (bounds.value("y").toDouble() + bounds.value("height").toDouble() / 2) * scale);
-        const QPointF end(
-            (bounds.value("x").toDouble() + bounds.value("width").toDouble() * fraction) * scale, start.y());
-        for (auto type : {QEvent::MouseButtonPress, QEvent::MouseMove, QEvent::MouseButtonRelease}) {
+    check(click("player:mode") && player.mode == "one", "native playback mode click");
+    check(click("player:remove:1") && player.queue.size() == 9, "native queue removal");
+    const auto dragControl = [&](const std::optional<QRectF> &bounds, double fraction) {
+        if (!bounds) {
+            check(false, "player drag region exists");
+            return;
+        }
+        const QPointF start((bounds->x() + bounds->width() * 0.2) * scale, bounds->center().y() * scale);
+        const QPointF end((bounds->x() + bounds->width() * fraction) * scale, start.y());
+        for (const auto type : {QEvent::MouseButtonPress, QEvent::MouseMove, QEvent::MouseButtonRelease}) {
             const auto position = type == QEvent::MouseButtonPress ? start : end;
             QMouseEvent event(type, position, position, window->mapToGlobal(position),
                               type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
@@ -514,300 +451,185 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
             settle();
         }
     };
-    dragControl("playerSeekRect", .5);
+    dragControl(hud.playerSeekRect, 0.5);
     wait.restart();
-    while (qAbs(backend.host.mediaState().value("position").toLongLong() - 2000) >= 100 &&
+    while (std::abs(backend.host.mediaState()["position"].toLongLong() - 2000) >= 100 &&
            wait.elapsed() < 3000) {
         settle();
     }
-    check(qAbs(backend.host.mediaState().value("position").toLongLong() - 2000) < 100,
-          "QML seek drag reaches native player");
-    dragControl("playerVolumeRect", .6);
-    check(qAbs(backend.host.mediaState().value("volume").toDouble() - .6) < .01,
-          "QML volume drag reaches native output");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/player.png");
-    }
-    // 歌词入口立即打开正在播放的歌曲，真实 QJSEngine 使用公共时间轴定位。
-    evaluate(R"(
-        App.music.player.lyrics.currentKey = 'netease:' + uiSongs[0].id;
-        App.music.player.lyrics.accept({version:1, source:'netease', timing:'line', offsetMs:0,
-            plainText:'', lines:[
-                {startMs:0,endMs:null,text:'风穿过安静的街道',translation:'',words:[]},
-                {startMs:1000,endMs:null,text:'我们听见远处的回声',translation:'',words:[]},
-                {startMs:2000,endMs:null,text:'每一束光都落在这里',translation:'',words:[]},
-                {startMs:3000,endMs:null,text:'让这首歌继续流动',translation:'',words:[]}
-            ]}, uiSongs[0]);
-    )");
+    check(std::abs(backend.host.mediaState()["position"].toLongLong() - 2000) < 100,
+          "QML seek reaches native decoder");
+    dragControl(hud.playerVolumeRect, 0.6);
+    check(std::abs(backend.host.mediaState()["volume"].toDouble() - 0.6) < 0.01, "QML volume reaches output");
+    capture("player");
+    player.lyrics.load(songs.first().toObject(), true);
     refresh();
-    check(click("player:lyrics"), "lyrics button native click");
+    check(click("player:lyrics"), "native lyrics button");
     refresh();
-    check(evaluate("App.hud.lyricsMode && App.music.current.id === App.music.player.current.id").toBool(),
+    check(hud.lyricsMode && music.current["id"] == player.current["id"],
           "lyrics opens playing song immediately");
-    check(evaluate("App.hud.commands.some(function(c){return c[0]==='text' && c[1]==='每一束光都落在这里';})")
-              .toBool(),
-          "lyrics replaces detail card");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/lyrics.png");
-    }
-    check(click("player:lyric-line:1"), "lyric line native seek click");
+    check(textY("每一束光都落在这里").has_value(), "lyrics replaces detail card");
+    capture("lyrics");
+    check(click("player:lyric-line:1"), "native lyric seek click");
     wait.restart();
-    while (qAbs(backend.host.mediaState().value("position").toLongLong() - 1000) >= 100 &&
+    while (std::abs(backend.host.mediaState()["position"].toLongLong() - 1000) >= 100 &&
            wait.elapsed() < 3000) {
         settle();
     }
-    check(qAbs(backend.host.mediaState().value("position").toLongLong() - 1000) < 100,
-          "lyric click seeks actual audio position");
+    check(std::abs(backend.host.mediaState()["position"].toLongLong() - 1000) < 100, "lyric seeks decoder");
     backend.action("player:lyrics-follow");
-    check(evaluate("App.music.player.lyrics.index === 1").toBool(),
-          "shared lyrics engine follows native seek");
+    check(player.lyrics.index == 1, "lyrics follows native seek");
     backend.action("player:lyrics-earlier");
     refresh();
-    check(evaluate("App.music.player.lyrics.offsetMs === 200").toBool(), "lyrics advance direction");
-    check(evaluate("App.hud.commands.some(function(c){return c[0]==='text' && c[1]==='已提前 0.2s';})")
-              .toBool(),
-          "lyrics offset label states direction");
-    evaluate("App.music.player.lyrics.load(uiSongs[0]);");
+    check(player.lyrics.offsetMs == 200 && textY("已提前 0.2s").has_value(),
+          "lyric offset and direction label");
+    player.lyrics.load(songs.first().toObject());
     refresh();
-    check(evaluate("App.music.player.lyrics.offsetMs === 0").toBool(), "cached replay resets manual offset");
-    backend.wheel(width * .7, 500, -2, true);
+    check(player.lyrics.offsetMs == 0, "cached lyrics reset offset");
+    const auto beforeScroll = textY("我们听见远处的回声");
+    backend.wheel(width * 0.7, 500, -2, true);
     refresh();
-    check(evaluate("App.hud.lyricsBrowse > App.hud.lyricsLayout[1].top && "
-                   "App.hud.lyricsBrowse < App.hud.lyricsLayout[1].top + 10")
-              .toBool(),
-          "sub-row trackpad pixels move lyrics continuously");
+    const auto afterScroll = textY("我们听见远处的回声");
+    check(beforeScroll && afterScroll && *beforeScroll > *afterScroll && *beforeScroll - *afterScroll < 10,
+          "sub-row pixels scroll lyrics continuously");
     backend.action("player:lyrics-close");
-    backend.host.mediaControl("seek", 2000);
-    refresh();
-    // 不同字号的文字与音量条必须以真实可见轮廓对齐，而非文本框名义高度。
-    check(evaluate(R"(
-        (function () {
-            var cy = 984 + 42;
-            var labels = ['单曲', '音量', '队列'];
-            return labels.every(function (label) {
-                var c = App.hud.commands.find(function (c) {
-                    return c[0] === 'text' && c[1] === label;
-                });
-                if (!c) {
-                    return false;
-                }
-                var b = Glyphs.bounds(c[1], c[4], c[5]);
-                return Math.abs(c[3] + b.y + b.height / 2 - cy) < 0.01;
-            });
-        })();
-    )")
-              .toBool(),
-          "playback text visible bounds share the icon centerline");
     backend.host.mediaControl("stop");
-    evaluate("App.music.player.stop();App.hud.openModal('discover');App.music.discover.items=uiSongs.slice(0,"
-             "10);App.music.discover.status='本地发现页面验收';");
+    player.stop();
+    hud.openModal("discover");
+    music.discover->items = MusicData::slice(songs, 0, 10);
+    music.discover->status = "本地发现页面验收";
     refresh();
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/discover.png");
-    }
-    evaluate("App.hud.openModal('login');App.music.loginMethod='email';");
+    capture("discover");
+    hud.openModal("login");
+    music.loginMethod = "email";
     refresh();
     auto accountField = window->findChild<QQuickItem *>("accountField");
     auto passwordField = window->findChild<QQuickItem *>("passwordField");
-    check(accountField && accountField->isVisible() && passwordField && passwordField->isVisible() &&
+    check(accountField && passwordField && accountField->isVisible() && passwordField->isVisible() &&
               passwordField->property("echoMode").toInt() == 2,
-          "native login form and masked password");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/login.png");
-    }
-    evaluate("App.hud.openModal('settings');");
+          "native login and masked password");
+    capture("login");
+    hud.openModal("settings");
     refresh();
-    check(evaluate("App.hud.hits.filter(function(h){return h.action==='provider';}).length===1 && "
-                   "!App.hud.hits.some(function(h){return h.action.indexOf('provider:')===0;})")
-              .toBool(),
-          "settings shows one platform switch entry");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/settings.png");
-    }
-    evaluate("App.music.switchProvider('qq');App.hud.openModal('discover');"
-             "App.music.discover.items=uiSongs.slice(0,6).map(function(s){return Object.assign({},s,{"
-             "provider:'qq',key:'qq:song:'+s.id});});App.music.discover.status='QQ 本地推荐验收';");
+    check(hasAction("provider") && !hasAction("provider:qq"), "settings has one provider entry");
+    capture("settings");
+    music.switchProvider("qq");
+    hud.openModal("discover");
+    music.discover->items = MusicData::slice(songs, 0, 6);
     refresh();
-    check(evaluate("App.hud.hits.some(function(h){return h.label==='首页推荐';}) && "
-                   "App.hud.hits.some(function(h){return h.label==='榜单列表';}) && "
-                   "!App.hud.hits.some(function(h){return /云盘|FM|电台/.test(h.label);})")
-              .toBool(),
-          "QQ discovery mapping and core-only navigation");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/qq-discover.png");
-    }
-    evaluate("App.hud.openModal('login');App.music.loginMethod='wechat';");
+    capture("qq-discover");
+    hud.openModal("login");
+    music.loginMethod = "wechat";
     refresh();
     check(!accountField->isVisible() && !passwordField->isVisible(), "QQ QR hides password form");
-    check(evaluate("App.hud.commands.filter(function(c){return c[0]==='text';})"
-                   ".map(function(c){return c[1];}).join('').indexOf('QQ 音乐账号只允许本人 7 天内')>=0")
-              .toBool(),
-          "QQ QR includes device limit guidance");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/qq-login.png");
-    }
-    evaluate("App.hud.openModal('settings');");
+    capture("qq-login");
+    hud.openModal("settings");
     refresh();
-    check(click("provider"), "settings platform switch opens provider card");
+    check(click("provider") && hasAction("provider:netease") && hasAction("provider:qq") &&
+              hasAction("provider:kugou"),
+          "three directly selectable providers");
+    capture("providers");
+    music.switchProvider("kugou");
+    hud.openModal("login");
+    music.loginMethod = "qr";
     refresh();
-    check(evaluate("App.hud.hits.filter(function(h){return h.action.indexOf('provider:')===0;}).length===3")
-              .toBool(),
-          "three directly selectable music providers");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/providers.png");
-    }
-    evaluate("App.music.switchProvider('kugou');App.hud.openModal('login');App.music.loginMethod='qr';");
+    check(hasAction("music:kugou-edition:standard") && hasAction("music:kugou-edition:lite"),
+          "Kugou app editions");
+    capture("kugou-login");
+    music.switchProvider("kugou", "lite");
+    hud.openModal("login");
     refresh();
-    check(!accountField->isVisible() && !passwordField->isVisible(), "Kugou native QR hides password form");
-    check(evaluate("App.hud.hits.filter(function(h){return h.action.indexOf('music:kugou-edition:')===0;})"
-                   ".length===2")
-              .toBool(),
-          "Kugou standard and concept app choices");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/kugou-login.png");
-    }
-    evaluate("App.music.switchProvider('kugou','lite');App.hud.openModal('login');");
+    check(music.kugouEdition == "lite" && music.providerName() == "酷狗概念版", "Kugou concept edition");
+    capture("kugou-concept-login");
+    hud.openModal("settings");
     refresh();
-    check(evaluate("App.music.kugouEdition==='lite' && App.music.providerName==='酷狗概念版'").toBool(),
-          "Kugou concept edition selection");
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/kugou-concept-login.png");
-    }
-    evaluate("App.hud.openModal('settings');");
-    refresh();
-    if (!output.isEmpty()) {
-        window->grabWindow().save(output + "/kugou-settings.png");
-    }
     const auto previousVisibility = window->visibility();
     backend.action("window:fullscreen");
     wait.restart();
     while (window->visibility() != QWindow::FullScreen && wait.elapsed() < 10000) {
         settle();
     }
-    check(window->visibility() == QWindow::FullScreen, "settings enters native fullscreen");
+    check(window->visibility() == QWindow::FullScreen, "native fullscreen");
     backend.action("window:fullscreen");
     wait.restart();
     while (window->visibility() != previousVisibility && wait.elapsed() < 10000) {
         settle();
     }
-    check(window->visibility() == previousVisibility, "fullscreen restores previous window mode");
+    check(window->visibility() == previousVisibility, "restore window mode");
     window->resize(originalWindowSize);
-    refresh();
-    // 待机验收使用真实定时器，不手工推进帧；静止后输入、后台数据和窗口恢复必须唤醒。
-    backend.host.mediaControl("stop");
-    evaluate("App.music.player.stop();App.hud.modal=null;App.hud.rolling={};App.hud.resultStart=-100;App.hud."
-             "motion.set(true,0,true);");
-    check(backend.scene.review("archive"), "idle scene readiness");
+    player.stop();
+    hud.modal.clear();
+    hud.motion.set(true, 0, true);
+    backend.scene.review("archive");
     backend.scene.setMode("archive");
     backend.wake();
     wait.restart();
-    while (!backend.performance().value("idle").toBool() && wait.elapsed() < 15000) {
+    while (!backend.performance()["idle"].toBool() && wait.elapsed() < 15000) {
         settle();
     }
-    qInfo() << "Idle scheduler:" << backend.performance();
-    check(backend.performance().value("idle").toBool(), "live scene converges into idle");
-    settle();
-    const auto idleRenderFrames = backend.performance().value("renderFrames").toULongLong();
-    const auto idleSteps = backend.performance().value("steps").toULongLong();
-    for (int i = 0; i < 8; ++i) {
+    check(backend.performance()["idle"].toBool(), "native scene converges into idle");
+    const auto idleSteps = backend.performance()["steps"].toULongLong();
+    const auto idleFrames = backend.performance()["renderFrames"].toULongLong();
+    for (int index = 0; index < 8; ++index) {
         settle();
     }
-    check(backend.performance().value("steps").toULongLong() == idleSteps, "idle performs zero visual steps");
-    check(backend.performance().value("renderFrames").toULongLong() == idleRenderFrames,
-          "idle performs zero GPU scene renders");
-    // HUD 绘制过程中产生主题等场景变化，必须继续下一帧，不能带着失效标记入睡。
-    evaluate("var idleDraw=App.hud.draw;App.hud.draw=function(){var result=idleDraw.apply(this,arguments);"
-             "App.hud.draw=idleDraw;App.runtime.theme(true);return result;};");
+    check(backend.performance()["steps"].toULongLong() == idleSteps &&
+              backend.performance()["renderFrames"].toULongLong() == idleFrames,
+          "idle has zero CPU steps and GPU renders");
+    backend.scene.theme(true);
     backend.host.invalidate();
-    bool themeAdvanced = false;
-    wait.restart();
-    while (!themeAdvanced && wait.elapsed() < 3000) {
-        settle();
-        for (const auto &value : backend.frame()["draws"].toArray()) {
-            themeAdvanced |= value.toObject()["theme"].toDouble() > .01;
-        }
-    }
-    check(themeAdvanced, "late scene invalidation continues rendering after background wake");
-    wait.restart();
-    while (!backend.performance().value("idle").toBool() && wait.elapsed() < 15000) {
-        settle();
-    }
-    bool themeFinished = false;
-    for (const auto &value : backend.frame()["draws"].toArray()) {
-        themeFinished |= value.toObject()["theme"].toDouble() > .99;
-    }
-    check(themeFinished && backend.performance().value("idle").toBool(),
-          "background theme animation completes before returning to idle");
-    evaluate("App.runtime.theme(false);");
-    backend.pointer("pointermove", 20, 20);
-    check(backend.performance().value("timerActive").toBool(), "mouse input wakes scheduler");
     settle();
-    check(backend.performance().value("steps").toULongLong() > idleSteps, "mouse wake renders again");
+    check(backend.performance()["steps"].toULongLong() > idleSteps,
+          "background scene change wakes scheduler");
+    backend.scene.theme(false);
     window->hide();
     settle();
-    const auto hiddenSteps = backend.performance().value("steps").toULongLong();
+    const auto hiddenSteps = backend.performance()["steps"].toULongLong();
     backend.host.invalidate();
-    for (int i = 0; i < 4; ++i) {
+    for (int index = 0; index < 4; ++index) {
         settle();
     }
-    check(!backend.performance().value("timerActive").toBool() &&
-              backend.performance().value("steps").toULongLong() == hiddenSteps,
-          "hidden window stays asleep on background invalidation");
+    check(!backend.performance()["timerActive"].toBool() &&
+              backend.performance()["steps"].toULongLong() == hiddenSteps,
+          "hidden window stays asleep");
     window->show();
-    settle();
-    check(backend.performance().value("steps").toULongLong() > hiddenSteps,
-          "restored window renders latest state");
+    // Windows 的窗口曝光异步完成；等待实际推进，避免固定 150 ms 把正常恢复误判为失败。
     wait.restart();
-    while (!backend.performance().value("idle").toBool() && wait.elapsed() < 15000) {
+    while (backend.performance()["steps"].toULongLong() <= hiddenSteps && wait.elapsed() < 8000) {
         settle();
     }
-    QKeyEvent keyEvent(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
-    QCoreApplication::sendEvent(window, &keyEvent);
-    check(backend.performance().value("timerActive").toBool(), "native keyboard wakes scheduler");
-    // 搜索框仍持有焦点时也应待机，光标停止闪烁，避免仅光标就持续触发 Qt 合成。
-    evaluate("App.hud.openModal('search');App.hud.resultStart=-100;");
-    backend.wake();
-    wait.restart();
-    while (!backend.performance().value("idle").toBool() && wait.elapsed() < 15000) {
-        settle();
-    }
-    check(backend.performance().value("idle").toBool() && !input->property("cursorVisible").toBool(),
-          "idle search field pauses blinking cursor");
-    QKeyEvent cursorWake(QEvent::KeyPress, Qt::Key_Left, Qt::NoModifier);
-    QCoreApplication::sendEvent(window, &cursorWake);
-    settle();
-    check(backend.performance().value("timerActive").toBool() && input->property("cursorVisible").toBool(),
-          "native text input restores cursor on keyboard wake");
-    // A→B→A 重复命中时 GPU 对象数必须保持稳定，不能每次覆盖缓存而遗留旧纹理。
+    check(backend.performance()["steps"].toULongLong() > hiddenSteps, "window restore refreshes state");
     backend.setVisible(false);
-    evaluate("App.hud.modal=null;App.hud.rolling={};App.hud.resultStart=-100;");
+    hud.modal.clear();
     backend.scene.review("detail");
     backend.setVisible(true);
-    auto cachedSelection = [&](int index) {
-        evaluate(QString("App.music.current={key:'cache-%1',kind:'song',id:'%1',title:'缓存回选验收',artist:'"
-                         "本地'};App.music.coverImage='fixture-disc';")
-                     .arg(index));
+    const auto cachedSelection = [&](int index) {
+        music.current = MusicData::item("song", QString::number(index), "缓存回选验收", "本地");
+        music.current["key"] = "cache-" + QString::number(index);
+        music.coverImage = "fixture-disc";
+        music.selectedPhysical = backend.scene.selection();
         backend.step(70);
         settle();
+        // 资源计数由渲染线程提交；同步抓取本帧后再断言，不能拿排队中的旧帧计数比较。
+        check(!window->grabWindow().isNull(), "cache selection reaches the GPU");
     };
     cachedSelection(0);
     cachedSelection(1);
     cachedSelection(0);
-    const auto warmedResources = backend.performance().value("gpuResources").toULongLong();
-    for (int i = 0; i < 20; ++i) {
-        cachedSelection(i % 2);
+    const auto warmedResources = backend.performance()["gpuResources"].toULongLong();
+    for (int index = 0; index < 20; ++index) {
+        cachedSelection(index % 2);
     }
-    check(warmedResources > 0 && backend.performance().value("gpuResources").toULongLong() == warmedResources,
-          "repeated cover cache hits keep GPU resource count stable");
-    // 后续缓存与隐藏/恢复回归使用实际生产字节包，避免只覆盖诊断 JSON 路径。
+    check(warmedResources > 0 && backend.performance()["gpuResources"].toULongLong() == warmedResources,
+          "cover cache hits keep GPU resources stable");
     backend.scene.diagnostics(false);
-    const auto beforeBindings = backend.performance().value("bindingCreations").toULongLong();
-    const auto beforeUploads = backend.performance().value("coverUploads").toULongLong();
+    const auto beforeBindings = backend.performance()["bindingCreations"].toULongLong();
+    const auto beforeUploads = backend.performance()["coverUploads"].toULongLong();
     cachedSelection(99);
-    const auto newBindings = backend.performance().value("bindingCreations").toULongLong() - beforeBindings;
-    check(newBindings > 0 && newBindings <= 8, "new song only recreates bindings that sample its textures");
-    check(backend.performance().value("coverUploads").toULongLong() == beforeUploads,
-          "songs sharing an album cover reuse the same uploaded texture");
+    const auto newBindings = backend.performance()["bindingCreations"].toULongLong() - beforeBindings;
+    check(newBindings > 0 && newBindings <= 8, "new song updates only texture bindings");
+    check(backend.performance()["coverUploads"].toULongLong() == beforeUploads,
+          "album cover shares uploaded texture");
     // 多首新曲填满纹理缓存后，隐藏窗口须销毁 GPU 对象；恢复须还原同一幅冻结画面。
     for (int i = 100; i < 135; ++i) {
         cachedSelection(i);

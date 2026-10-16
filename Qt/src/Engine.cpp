@@ -9,32 +9,23 @@
 #include <QJsonDocument>
 #include <QPainter>
 #include <QThread>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
-/**
- * 建立原生 Host、场景和 JS 状态层，并保持对象所有权边界。
- * 先注入桥接对象，再执行脚本初始化；定时器只负责已就绪场景。
- */
+bool runNativeHostChecks(const QString &root);
+bool runNativeMusicChecks(const QString &root);
+bool runGpuReferenceCheck(const QImage &expected, const QImage &actual);
+
+/** 建立纯原生音乐、HUD 和场景状态；Qt 定时器只在输入或动画尚未收束时运行。 */
 Engine::Engine(QString path, bool offline, QObject *parent)
-    : QObject(parent), host(path, offline), scene(path, &js), m_glyphs(path) {
-    QJSEngine::setObjectOwnership(&host, QJSEngine::CppOwnership);
-    QJSEngine::setObjectOwnership(&m_glyphs, QJSEngine::CppOwnership);
-    js.globalObject().setProperty("Host", js.newQObject(&host));
-    js.globalObject().setProperty("Glyphs", js.newQObject(&m_glyphs));
-    evaluate("var globalThis=this;Array.prototype.at=function(i){i=Math.trunc(i)||0;return "
-             "this[i<0?this.length+i:i];};");
-    QJSEngine::setObjectOwnership(&scene, QJSEngine::CppOwnership);
-    js.globalObject().setProperty("RhineNative", js.newQObject(&scene));
-    evaluate(host.read("qt-logic.js"), "qt-logic.js");
-    app = evaluate("RhineQt.create(Host,Glyphs,RhineNative," + host.read("slots.json") + ")", "create");
-    js.globalObject().setProperty("App", app);
-    evaluate("App.init().catch(function(e){throw e;});");
-    scene.diagnostics(offline);
+    : QObject(parent), host(path, offline), scene(path), m_glyphs(path) {
+    const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
+    app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
+    app->initialize();
     connect(&host, &Host::invalidated, this, [this] { wake(false); });
-    connect(&scene, &SceneRuntime::invalidated, this, [this] { wake(false); });
     connect(&host, &Host::mediaChanged, this, &Engine::pollMedia, Qt::QueuedConnection);
     connect(&host, &Host::mediaAction, this, [this](QString value) {
-        call("mediaAction", {value});
+        app->mediaAction(value);
         wake();
     });
     clock.start();
@@ -49,25 +40,8 @@ Engine::Engine(QString path, bool offline, QObject *parent)
 Engine::~Engine() {
     timer.stop();
     mediaTimer.stop();
+    app.reset();
     host.shutdown();
-    app = QJSValue();
-    js.globalObject().setProperty("App", QJSValue());
-}
-QJSValue Engine::evaluate(QString code, QString name) {
-    auto result = js.evaluate(code, name);
-    if (result.isError()) {
-        failure = result.toString() + "\n" + result.property("stack").toString();
-        qWarning().noquote() << failure;
-    }
-    return result;
-}
-QJSValue Engine::call(QString method, QJSValueList args) {
-    auto result = app.property(method).callWithInstance(app, args);
-    if (result.isError()) {
-        failure = result.toString() + "\n" + result.property("stack").toString();
-        qWarning().noquote() << failure;
-    }
-    return result;
 }
 bool Engine::ready() const {
     return scene.ready();
@@ -200,7 +174,7 @@ void Engine::setVisible(bool value) {
     m_visible = value;
     if (!value) {
         flushPointer();
-        call("pointer", {"pointercancel", 0, 0});
+        app->pointer("pointercancel", 0, 0);
         m_pressed = m_wheelPending = false;
         m_wheelDelta = m_wheelSteps = 0;
         m_wheelDistance = 0;
@@ -230,13 +204,11 @@ void Engine::trimMemory() {
     }
     host.trimMemory(retainedImages);
     scene.trimMemory();
-    js.collectGarbage();
 }
 void Engine::pollMedia() {
-    call("poll", {clock.elapsed() / 1000., true});
-    auto player = app.property("music").property("player");
-    const bool active =
-        player.property("loading").toBool() || player.property("state").property("playing").toBool();
+    app->poll(clock.elapsed() / 1000.0, true);
+    const auto &player = app->music.player;
+    const bool active = player.loading || player.state["playing"].toBool();
     if (active && !mediaTimer.isActive()) {
         mediaTimer.start();
     }
@@ -249,7 +221,7 @@ void Engine::flushPointer() {
         return;
     }
     m_pointerPending = false;
-    call("pointer", {"pointermove", m_pointerX, m_pointerY});
+    app->pointer("pointermove", m_pointerX, m_pointerY);
 }
 /**
  * 推进本帧动画并决定是否继续调度。
@@ -262,7 +234,7 @@ void Engine::tick() {
     flushPointer();
     if (m_wheelPending) {
         const int steps = int(m_wheelSteps);
-        call("wheel", {m_wheelX, m_wheelY, m_wheelDelta, steps, m_wheelDistance});
+        app->hud.wheel(m_wheelX, m_wheelY, m_wheelDelta, steps, m_wheelDistance);
         m_wheelSteps -= steps;
         m_wheelPending = false;
         m_wheelDelta = 0;
@@ -273,7 +245,7 @@ void Engine::tick() {
     }
     step(m_animationTime);
     if (now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
-        !call("animating", {m_animationTime}).toBool() && m_frame["mode"] != "boot") {
+        !app->hud.animating(m_animationTime) && m_frame["mode"] != "boot") {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();
@@ -289,25 +261,107 @@ void Engine::resize(double width, double height) {
     wake();
 }
 void Engine::action(QString value) {
-    // 窗口模式交给 QML 原生窗口处理，不进入音乐状态或场景动画。
+    // 窗口模式由 Qt 原生窗口处理，不进入音乐状态或场景动画。
     if (value == "window:fullscreen") {
-        emit fullscreenRequested();
+        toggleFullscreen();
         return;
     }
-    call("action", {value});
+    app->hud.action(value);
     pollMedia();
     wake();
 }
-void Engine::form(QString value) {
-    call("form", {value});
+/**
+ * 将输入控件的原始数据转换为原生业务操作；密码不写入公开状态。
+ */
+void Engine::submitForm(QString account, QString password) {
+    QJsonObject values;
+    if (app->hud.modal == "login") {
+        values = {{"account", account}, {"password", password}};
+    } else {
+        values = {{"name", account}};
+    }
+    app->hud.form(values);
     wake();
 }
+void Engine::setWindow(QQuickWindow *window) {
+    m_window = window;
+}
+void Engine::toggleFullscreen() {
+    if (!m_window) {
+        return;
+    }
+    if (m_window->visibility() == QWindow::FullScreen) {
+        m_window->setVisibility(m_windowedVisibility);
+    } else {
+        m_windowedVisibility =
+            m_window->visibility() == QWindow::Maximized ? QWindow::Maximized : QWindow::Windowed;
+        m_window->showFullScreen();
+    }
+}
+bool Engine::keyEvent(int keyCode, int modifiers, QString text) {
+    switch (keyCode) {
+    case Qt::Key_MediaTogglePlayPause:
+    case Qt::Key_MediaPlay:
+    case Qt::Key_MediaPause:
+        action("player:toggle");
+        return true;
+    case Qt::Key_MediaNext:
+        action("player:next");
+        return true;
+    case Qt::Key_MediaPrevious:
+        action("player:prev");
+        return true;
+    case Qt::Key_Left:
+        text = "ArrowLeft";
+        break;
+    case Qt::Key_Right:
+        text = "ArrowRight";
+        break;
+    case Qt::Key_Up:
+        text = "ArrowUp";
+        break;
+    case Qt::Key_Down:
+        text = "ArrowDown";
+        break;
+    case Qt::Key_Return:
+    case Qt::Key_Enter:
+        text = "Enter";
+        break;
+    case Qt::Key_Escape:
+        text = "Escape";
+        break;
+    default:
+        break;
+    }
+    if (text.isEmpty()) {
+        return false;
+    }
+    // Qt 在 macOS 将 ControlModifier 映射到命令键。
+    key(text, modifiers & Qt::ControlModifier);
+    return true;
+}
+void Engine::searchAccepted(QString text, int modifiers) {
+    if (modifiers & Qt::ControlModifier) {
+        key("Enter", true);
+    } else {
+        query(text);
+    }
+}
+void Engine::wheelInput(double x, double y, double pixelDelta, double angleDelta) {
+    wheel(x, y, pixelDelta != 0 ? pixelDelta : angleDelta / 8, pixelDelta != 0);
+}
+void Engine::adjustPlayer(QString control, double x, double width) {
+    if (width <= 0 || (control != "seek" && control != "volume")) {
+        return;
+    }
+    action("player:" + control + "-fraction:" + QString::number(std::clamp(x / width, 0., 1.), 'g', 16));
+}
 void Engine::query(QString value) {
-    call("query", {value});
+    app->hud.setQuery(value);
     wake();
 }
 void Engine::key(QString value, bool command) {
-    call("key", {value, command});
+    app->hud.key(value, command);
     wake();
 }
 void Engine::pointer(QString type, double x, double y) {
@@ -320,7 +374,7 @@ void Engine::pointer(QString type, double x, double y) {
         m_pointerPending = true;
     } else {
         flushPointer();
-        call("pointer", {type, x, y});
+        app->pointer(type, x, y);
         if (type == "pointerdown") {
             m_pressed = true;
         }
@@ -358,11 +412,10 @@ void Engine::step(double time) {
     }
     ++m_steps;
     const bool reuse = m_sceneSleeping && !scene.changed();
-    auto result = call("step", {time, m_width / (m_height / 1080), reuse});
-    if (result.isError() || result.isNull() || result.isUndefined()) {
+    const auto object = app->step(time, m_width / (m_height / 1080), reuse);
+    if (object.isEmpty()) {
         return;
     }
-    const auto object = QJsonObject::fromVariantMap(result.toVariant(QJSValue::ConvertJSObjects).toMap());
     m_frame = scene.frame;
     auto signature = m_frame;
     for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor"}) {
@@ -425,6 +478,11 @@ void Engine::step(double time) {
     auto state = object["state"].toObject().toVariantMap();
     if (state != m_state) {
         m_state = state;
+        const auto loginMethod = m_state.value("loginMethod").toString();
+        if (loginMethod != m_loginMethod) {
+            m_loginMethod = loginMethod;
+            emit clearCredentials();
+        }
         emit stateChanged();
     }
     auto hits = object["hits"].toArray().toVariantList();
@@ -460,374 +518,43 @@ void Engine::snapshot(QString path) {
         file.write(QJsonDocument(m_frame).toJson());
     }
 }
+/** 独立包离线验收直接检查原生状态、原始模型与实际 QRhi 输出，不创建脚本引擎。 */
 int Engine::selfTest() {
-    qInfo() << "[qt_offline] Waiting for runtime";
-    QElapsedTimer wait;
-    wait.start();
-    while (!ready() && wait.elapsed() < 10000) {
-        QCoreApplication::processEvents();
-        QThread::msleep(1);
-    }
-    if (!ready() || !failure.isEmpty()) {
-        qCritical() << "Runtime failed" << failure;
-        return 1;
-    }
-    qInfo() << "[qt_offline] Runtime ready; checking local search and cache";
-    auto check = [this](QString expression) {
-        auto r = evaluate(expression, "offline-regression");
-        if (r.isError() || !r.toBool()) {
-            qCritical() << "Failed:" << expression << r.toString();
-            return false;
-        }
-        return true;
-    };
-    int requests = 0;
-    host.fixture = [&](QString route, QJsonObject) {
-        ++requests;
-        if (route == "/search") {
-            return QJsonDocument::fromJson(
-                       R"({"body":{"code":200,"result":{"songCount":2,"songs":[{"id":1,"name":"本地歌曲","dt":180000,"ar":[{"name":"测试歌手"}],"al":{"id":7,"name":"测试专辑"}}]}}})")
-                .object();
-        }
-        return QJsonDocument::fromJson(R"({"body":{"code":200,"songs":[]}})").object();
-    };
-    evaluate("App.runtime.setMode('archive');App.music.search('本地');");
-    wait.restart();
-    while (app.property("music").property("searchLoading").toBool() && wait.elapsed() < 10000) {
-        QCoreApplication::processEvents();
-        QThread::msleep(1);
-    }
-    step(2.1);
     bool ok =
-        !m_frame.isEmpty() && scene.failure.isEmpty() && DiscGeometry::validate() &&
-        check("App.music.current.title==='本地歌曲' && App.music.totals[0]===2 && "
-              "App.music.searchCursor===1") &&
-        check("App.music.physicalSlots.length===5 && App.music.physicalSlots.every(function(x){return "
-              "x.length===8;})") &&
-        check(
-            "App.parse({id:1,name:'x',ar:[{name:'A'}],al:{id:2,name:'B'},dt:125000},'song').artist==='A'") &&
-        check("Host.fromLink('https://music.163.com/#/song?id=123')==='song:123' && "
-              "Host.fromLink('https://evil.test/song?id=123')===''") &&
-        check("new App.ReelCurve(0,1,0,0).sample(.46)[0]===1");
-    // 覆盖启动背景、页脚和弹窗使用的四项 RGBA，避免离线测试漏掉真实 HUD 绘制路径。
-    const QJsonArray swatches{
-        QJsonArray{"fill", QJsonArray{119. / 255, 123. / 255, 96. / 255, 1}, 0, 0, 1, 1},
-        QJsonArray{"fill", QJsonArray{.5, .5, .5, 1, "calibratedWhite"}, 1, 0, 1, 1},
-        QJsonArray{"fill", QJsonArray{0, 0, 1, .5}, 2, 0, 1, 1}};
-    QImage hudColors(3, 1, QImage::Format_RGBA8888_Premultiplied);
-    hudColors.fill(Qt::transparent);
-    {
-        QPainter painter(&hudColors);
-        m_glyphs.commands(painter, swatches, [](QString) { return QImage(); });
-    }
-    ok &= hudColors.pixelColor(0, 0) == QColor(119, 123, 96) &&
-          qAbs(hudColors.pixelColor(1, 0).red() - 146) <= 1 &&
-          qAbs(hudColors.pixelColor(2, 0).alpha() - 128) <= 1;
-    qInfo() << "[qt_offline] HUD RGBA, calibrated color and alpha checks completed";
-    // 同查询合并、稳定参数缓存、退出账号后 Cookie 不复活。
-    const auto before = requests;
-    evaluate("var "
-             "cacheDone=0;App.music.api.search('本地','song').then(function(){cacheDone++;});App.music.api."
-             "search('本地','song').then(function(){cacheDone++;});");
-    wait.restart();
-    while (js.globalObject().property("cacheDone").toInt() < 2 && wait.elapsed() < 2000) {
-        QCoreApplication::processEvents();
-        QThread::msleep(1);
-    }
-    ok &= requests == before && check("cacheDone===2");
-    ok &= Host::lifetime("/search") == 900 && Host::lifetime("/login/qr/check") == 0 &&
-          Host::cacheKey("guest", "/search", {{"keywords", "x"}, {"timestamp", 1}}) ==
-              Host::cacheKey("guest", "/search", {{"timestamp", 2}, {"keywords", "x"}});
-    // 本地凭据样本
-    host.cookies = {
-        {"MUSIC_U", "fixture-netease"},
-        {"qqmusic_session", "fixture-qq"},
-        {"__qqSessions", QJsonArray{QJsonObject{{"credential", "fixture-secret"}}}},
-        {"__kugou", QJsonObject{{"standard", QJsonObject{{"token", "fixture-kugou"}, {"userid", "42"}}},
-                                {"lite", QJsonObject{{"token", "fixture-concept"}, {"userid", "43"}}}}}};
-    host.setProvider("qq");
-    ok &= host.authenticated();
-    host.setProvider("netease");
-    host.logout();
-    ok &= !host.authenticated() && host.cookies["qqmusic_session"].toString() == "fixture-qq" &&
-          host.cookies["__qqSessions"].isArray() && host.hasCredential("kugou");
-    host.setProvider("qq");
-    ok &= host.authenticated();
-    host.logout();
-    ok &= !host.authenticated() && !host.cookies.contains("__qqSessions") && host.hasCredential("kugou");
-    host.setProvider("kugou");
-    ok &= host.authenticated();
-    host.logout();
-    ok &= !host.authenticated();
-    host.setKugouEdition("lite");
-    ok &= host.authenticated();
-    host.logout();
-    ok &= !host.authenticated() && host.cookies.isEmpty();
-    host.setKugouEdition("standard");
-    host.setProvider("netease");
-    const auto originalFixture = host.fixture;
-    host.fixture = [](QString, QJsonObject) {
-        return QJsonObject{{"body", QJsonObject{{"code", 200}}},
-                           {"qqSessions", QJsonArray{QJsonObject{{"credential", "fixture-secret"}}}}};
-    };
-    evaluate("var qqPrivateResult=false;Host.request('/qq/user/detail',{},function(raw){"
-             "var r=JSON.parse(raw);qqPrivateResult=!('qqSessions' in r)&&"
-             "raw.indexOf('fixture-secret')<0;});");
-    wait.restart();
-    while (!js.globalObject().property("qqPrivateResult").toBool() && wait.elapsed() < 2000) {
-        QCoreApplication::processEvents();
-    }
-    ok &= check("qqPrivateResult");
-    host.fixture = [](QString, QJsonObject) {
-        return QJsonObject{
-            {"body", QJsonObject{{"code", 803}}},
-            {"kugouCredentials", QJsonObject{{"token", "fixture-kugou-secret"}, {"userid", "42"}}}};
-    };
-    // 代数失效的回调不接受私有认证
-    evaluate("var kgStaleDone=false;App.music.api.request('/kugou/login/qr/check',{},[803],function(){"
-             "return false;}).catch(function(){kgStaleDone=true;});");
-    wait.restart();
-    while (!js.globalObject().property("kgStaleDone").toBool() && wait.elapsed() < 2000) {
-        QCoreApplication::processEvents();
-    }
-    ok &= check("kgStaleDone") && !host.hasCredential("kugou");
-    evaluate("var kgPrivateDone=false;Host.request('/kugou/login/qr/check',{},function(raw){"
-             "var r=JSON.parse(raw);kgPrivateDone=!('kugouCredentials' in r)&&"
-             "raw.indexOf('fixture-kugou-secret')<0;Host.acceptCookies('[]',r._epoch,r._credentialKey);});");
-    wait.restart();
-    while (!js.globalObject().property("kgPrivateDone").toBool() && wait.elapsed() < 2000) {
-        QCoreApplication::processEvents();
-    }
-    ok &= check("kgPrivateDone") && host.hasCredential("kugou");
-    host.fixture = originalFixture;
-    host.cookies = {};
-    QFile fixtureFile(root() + "/scene-fixture.json");
-    if (!fixtureFile.open(QIODevice::ReadOnly)) {
-        qCritical() << "Missing offline scene fixture:" << fixtureFile.fileName()
-                    << fixtureFile.errorString();
+        ready() && DiscGeometry::validate() && runNativeHostChecks(root()) && runNativeMusicChecks(root());
+    scene.review("archive");
+    step(2.101);
+    ok &= !m_frame["draws"].toArray().isEmpty() && m_frame["stats"].toObject()["archiveCount"].toInt() > 0;
+    QFile fixture(root() + "/scene-fixture.json");
+    if (!fixture.open(QIODevice::ReadOnly)) {
+        qCritical() << "Missing offline scene fixture";
         return 1;
     }
-    QJsonParseError fixtureError;
-    auto fixture = QJsonDocument::fromJson(fixtureFile.readAll(), &fixtureError).object();
-    if (fixtureError.error != QJsonParseError::NoError || !fixture["frame"].isObject() ||
-        !fixture["rays"].isArray()) {
-        qCritical() << "Invalid offline scene fixture:" << fixtureFile.fileName()
-                    << fixtureError.errorString();
-        return 1;
-    }
-    qInfo() << "[qt_offline] Checking scene matrices, picking and rebuild";
-    const bool fieldMatched = scene.fieldSelfTest();
-    qInfo() << "[qt_offline] Native field grid matches original motion:" << fieldMatched;
-    ok &= fieldMatched;
-    scene.review("archive");
-    scene.frameFast(50);
-    auto expected = fixture["frame"].toObject();
-    auto close = [](QJsonArray a, QJsonArray b) {
-        if (a.size() != b.size()) {
-            return false;
+    const auto expected = QJsonDocument::fromJson(fixture.readAll()).object();
+    const auto legacy = expected["frame"].toObject();
+    ok &= equivalent(m_frame["view"], legacy["view"]) &&
+          equivalent(m_frame["projection"], legacy["projection"]);
+    for (const auto &entry : expected["rays"].toArray()) {
+        const auto ray = entry.toObject();
+        const auto hit = scene.pick(ray["x"].toDouble(), ray["y"].toDouble());
+        const auto cell = ray["hit"].toObject();
+        if (cell.isEmpty()) {
+            ok &= !hit;
+        } else {
+            ok &= hit && hit->lane == cell["lane"].toInt() && hit->row == cell["row"].toInt();
         }
-        for (int i = 0; i < a.size(); ++i) {
-            if (qAbs(a[i].toDouble() - b[i].toDouble()) > 1e-5) {
-                return false;
-            }
-        }
-        return true;
-    };
-    ok &= close(scene.frame["view"].toArray(), expected["view"].toArray()) &&
-          close(scene.frame["projection"].toArray(), expected["projection"].toArray());
-    auto actualDraws = scene.frame["draws"].toArray();
-    auto expectedDraws = expected["draws"].toArray();
-    ok &= actualDraws.size() == expectedDraws.size();
-    for (int i = 0; i < qMin(actualDraws.size(), expectedDraws.size()); ++i) {
-        auto a = actualDraws[i].toObject();
-        auto b = expectedDraws[i].toObject();
-        ok &= a["name"] == b["name"] && a["count"] == b["count"] &&
-              close(a["matrices"].toArray(), b["matrices"].toArray()) &&
-              close(a["themes"].toArray(), b["themes"].toArray());
     }
-    for (auto ray : fixture["rays"].toArray()) {
-        auto r = ray.toObject();
-        auto hit = scene.pick(r["x"].toDouble(), r["y"].toDouble());
-        const auto value = QJsonValue::fromVariant(hit.toVariant(QJSValue::ConvertJSObjects));
-        ok &= value == r["hit"];
-    }
-    ok &= scene.failure.isEmpty();
-    // 再次重建，覆盖旧几何释放与缓存回收路径。
-    ok &= scene.review("archive");
-    scene.frameFast(50);
-    ok &= close(scene.frame["view"].toArray(), expected["view"].toArray());
-    // 生产字节包必须还原完整材质与浮点缓冲；诊断路径仍作为独立的 JSON 基准。
-    auto checkPacket = [&](double time) {
-        scene.diagnostics(true);
-        scene.frameFast(time);
-        auto legacy = scene.frame["draws"].toArray();
-        const auto legacyBuffers = scene.drawBuffers;
-        scene.diagnostics(false);
-        scene.captureOnly(true);
-        scene.frameFast(time);
-        scene.captureOnly(false);
-        const auto packed = scene.frame["draws"].toArray();
-        bool matched = scene.failure.isEmpty() && packed.size() == legacy.size();
-        QHash<int, QJsonObject> referenceDraws;
-        for (const auto &value : legacy) {
-            const auto draw = value.toObject();
-            referenceDraws.insert(draw["id"].toInt(), draw);
-        }
-        for (int i = 0; matched && i < packed.size(); ++i) {
-            auto actual = packed[i].toObject();
-            auto draw = referenceDraws.value(actual["id"].toInt());
-            draw["matrices"] = QJsonArray{};
-            draw["themes"] = QJsonArray{};
-            // 缓冲区槽位属于传输布局；实际矩阵和主题字节在下方独立比较。
-            for (const auto &key : {"matrixBuffer", "themeBuffer"}) {
-                draw.remove(key);
-                actual.remove(key);
-            }
-            if (!equivalent(draw, actual)) {
-                qCritical() << "Packet material mismatch" << time << actual["id"];
-                for (auto it = draw.begin(); it != draw.end(); ++it) {
-                    if (!equivalent(it.value(), actual[it.key()])) {
-                        qCritical() << it.key() << it.value() << actual[it.key()];
-                    }
-                }
-                matched = false;
-            }
-            const auto id = actual["id"].toInt();
-            if (legacyBuffers.value(id).matrices != scene.drawBuffers.value(id).matrices ||
-                legacyBuffers.value(id).themes != scene.drawBuffers.value(id).themes) {
-                qCritical() << "Packet buffer mismatch" << time << id;
-                matched = false;
-            }
-        }
-        if (!matched) {
-            qCritical() << "Native scene packet differs from the JSON reference";
-        }
-        ok &= matched;
-    };
-    checkPacket(50);
-    checkPacket(50);
-    // 连续选曲、归位和再次选曲覆盖对象池复用，以及两侧静态定义缓存同步删除。
-    scene.setMode("archive");
-    double packetTime = 50;
-    for (int i = 0; i < 120; ++i) {
-        scene.navigate("row", 1);
-        scene.frameFast(packetTime += 1. / 60);
-    }
-    for (int i = 0; i < 180; ++i) {
-        scene.frameFast(packetTime += 1. / 60);
-    }
-    for (int i = 0; i < 40; ++i) {
-        scene.navigate("row", -1);
-        scene.frameFast(packetTime += 1. / 60);
-    }
-    ok &= scene.failure.isEmpty();
-    checkPacket(packetTime);
-    const bool pickingMatched = scene.pickingSelfTest();
-    qInfo() << "[qt_offline] Native BVH matches original picking:" << pickingMatched;
-    ok &= pickingMatched;
-    scene.diagnostics(true);
-    scene.review("archive");
-    scene.frameFast(50);
     if (qEnvironmentVariableIntValue("RHINE_GPU_TEST") == 1) {
-        qInfo() << "[qt_offline] Starting GPU render; software renderer:"
-                << qEnvironmentVariableIntValue("RHINE_SOFTWARE_GPU");
-        auto pixels = renderReference(root(), scene.frame, m_current, {}, QSize(640, 360));
-        qInfo() << "[qt_offline] GPU readback completed" << pixels.size();
-        ok &= pixels.size() == QSize(640, 360);
-        int contrast = 0;
-        auto first = pixels.pixelColor(0, 0);
-        for (int y = 0; y < pixels.height(); y += 12) {
-            for (int x = 0; x < pixels.width(); x += 12) {
-                if (pixels.pixelColor(x, y) != first) {
-                    ++contrast;
-                }
-            }
+        const QSize size(960, 540);
+        const auto actual =
+            renderReference(root(), m_frame, m_current, host.image(m_cover), size, scene.drawBuffers);
+        const auto original = renderReference(root(), legacy, m_current, host.image(m_cover), size);
+        ok &= runGpuReferenceCheck(original, actual);
+        if (!ok) {
+            qCritical() << "Native GPU frame differs from original fixture";
         }
-        ok &= contrast > 20;
-        // 资料库详情的象牙色外壳不能被内部光照层染红；非空读回无法覆盖此回归。
-        ok &= scene.review("detail");
-        scene.frameFast(50);
-        auto detail = renderReference(root(), scene.frame, m_current, {}, QSize(640, 360));
-        double redBias = 0;
-        int samples = 0;
-        for (int y = 150; y < 250; y += 4) {
-            for (int x = 84; x < 116; x += 4) {
-                const auto color = detail.pixelColor(x, y);
-                redBias += color.red() - color.green();
-                ++samples;
-            }
-        }
-        redBias /= samples;
-        qInfo() << "[qt_offline] Library shell red bias:" << redBias;
-        ok &= redBias < 20;
-
-        // 高频切换的剔除结果覆盖屏幕外投影。
-        scene.review("archive");
-        scene.setMode("archive");
-        scene.diagnostics(false);
-        double stressTime = 60;
-        for (int i = 0; i < 180; ++i) {
-            scene.navigate("row", 1);
-            scene.frameFast(stressTime += 1. / 60);
-        }
-        scene.captureOnly(true);
-        scene.frameFast(stressTime);
-        const auto culledCount = scene.frame["culledCards"].toInt();
-        const auto shadowCount = scene.frame["shadowCards"].toInt();
-        const auto submitted = scene.frame["draws"].toArray().size();
-        const auto optimizedFrame = scene.frame;
-        const auto optimizedBuffers = scene.drawBuffers;
-        quint64 optimizedDrawCalls = 0;
-        const auto culledPixels = renderReference(root(), scene.frame, m_current, {}, QSize(640, 360),
-                                                  scene.drawBuffers, &optimizedDrawCalls);
-        scene.drawCulling(false);
-        scene.diagnostics(true);
-        scene.frameFast(stressTime);
-        // 关闭 GPU 合批
-        scene.frame["batchDraws"] = false;
-        quint64 referenceDrawCalls = 0;
-        const auto fullPixels = renderReference(root(), scene.frame, m_current, {}, QSize(640, 360),
-                                                scene.drawBuffers, &referenceDrawCalls);
-        qInfo() << "[qt_offline] Culling parity:" << culledCount << "culled," << shadowCount << "shadow-only,"
-                << submitted << "draws vs" << scene.frame["draws"].toArray().size();
-        ok &= culledCount > 0 && shadowCount > 0;
-        ok &= !culledPixels.isNull() && culledPixels == fullPixels;
-        if (culledPixels != fullPixels) {
-            auto noNormalBatch = optimizedFrame;
-            noNormalBatch["batchNormal"] = false;
-            const auto alternate =
-                renderReference(root(), noNormalBatch, m_current, {}, QSize(640, 360), optimizedBuffers);
-            int changedPixels = 0;
-            int maxDifference = 0;
-            for (int y = 0; y < fullPixels.height(); ++y) {
-                for (int x = 0; x < fullPixels.width(); ++x) {
-                    const auto before = fullPixels.pixelColor(x, y);
-                    const auto after = culledPixels.pixelColor(x, y);
-                    if (before != after) {
-                        ++changedPixels;
-                    }
-                    maxDifference = qMax(maxDifference, std::abs(before.red() - after.red()));
-                    maxDifference = qMax(maxDifference, std::abs(before.green() - after.green()));
-                    maxDifference = qMax(maxDifference, std::abs(before.blue() - after.blue()));
-                }
-            }
-            qCritical() << "GPU parity pixels:" << changedPixels << "max channel delta:" << maxDifference
-                        << "without normal batching matches:" << (alternate == fullPixels);
-            const auto diffPath = qEnvironmentVariable("RHINE_GPU_DIFF");
-            if (!diffPath.isEmpty()) {
-                QDir().mkpath(diffPath);
-                culledPixels.save(diffPath + "/optimized.png");
-                fullPixels.save(diffPath + "/reference.png");
-                alternate.save(diffPath + "/without-normal-batching.png");
-            }
-        }
-        qInfo() << "[qt_offline] GPU submissions:" << optimizedDrawCalls << "vs" << referenceDrawCalls;
-        ok &= optimizedDrawCalls < referenceDrawCalls;
-        scene.drawCulling(true);
-        scene.captureOnly(false);
-        scene.diagnostics(true);
     }
-    qInfo() << "Qt offline scene, parsing, search, cache, link and motion checks:"
+    qInfo() << "Qt native scene, Host, music, playback and offline package checks:"
             << (ok ? "passed" : "FAILED");
     return ok ? 0 : 1;
 }
@@ -839,39 +566,35 @@ int Engine::renderFixtures(QString source, QString output) {
             return 1;
         }
         const auto fixture = QJsonDocument::fromJson(input.readAll()).object();
-        js.globalObject().setProperty("Fixture", js.toScriptValue(fixture.toVariantMap()));
-        auto result = evaluate(R"(
-            Object.assign(App.music, Fixture.store);
-            if (!App.music.current.id) {
-                App.music.current = null;
-            }
-            App.music.directory = Fixture.store.directory || null;
-            App.hud.rolling = {};
-            App.hud.trackOffset = 0;
-            App.hud.bodyOffset = 0;
-            App.hud.listOffset = 0;
-            Object.assign(App.hud, Fixture.hud);
-            App.hud.modal = Fixture.hud.modal || null;
-            App.hud.motion.set(true, 0, true);
-            App.hud.draw(Fixture.frame, 1920, 50);
-        )",
-                               "visual-fixture");
-        if (result.isError()) {
-            return 1;
+        const auto store = fixture["store"].toObject();
+        const auto settings = fixture["hud"].toObject();
+        app->music.current = store["current"].toObject();
+        const auto lists = store["lists"].toArray();
+        const auto totals = store["totals"].toArray();
+        const auto more = store["hasMore"].toArray();
+        for (int lane = 0; lane < 5; ++lane) {
+            app->music.lists[lane] = lists.at(lane).toArray();
+            app->music.totals[lane] = totals.at(lane).toInt();
+            app->music.hasMore[lane] = more.at(lane).toBool();
         }
+        app->music.keyword = store["keyword"].toString();
+        app->music.status = store["status"].toString();
+        app->hud.modal = settings["modal"].toString();
+        app->hud.dark = settings["dark"].toBool();
+        app->hud.themeMode = settings["themeMode"].toString();
+        app->hud.reduced = settings["reduced"].toBool();
+        app->hud.motion.set(true, 0, true);
         m_frame = fixture["frame"].toObject();
-        m_current = fixture["store"].toObject()["current"].toObject();
-        m_commands = QJsonArray::fromVariantList(result.property("commands").toVariant().toList());
+        app->hud.draw(m_frame, 1920, 50);
+        m_commands = app->hud.commands;
+        m_current = app->music.current;
         m_cover.clear();
-        auto folder = output + "/" + fixture["name"].toString();
+        const auto folder = output + "/" + fixture["name"].toString();
         snapshot(folder);
         QFile hitsFile(folder + "/qt-hits.json");
         if (hitsFile.open(QIODevice::WriteOnly)) {
-            hitsFile.write(
-                QJsonDocument(QJsonArray::fromVariantList(result.property("hits").toVariant().toList()))
-                    .toJson());
+            hitsFile.write(QJsonDocument(app->hud.hits).toJson());
         }
-        qInfo().noquote() << "Qt visual" << fixture["name"].toString();
     }
     return failure.isEmpty() ? 0 : 1;
 }

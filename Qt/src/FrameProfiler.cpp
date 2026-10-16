@@ -16,7 +16,7 @@ FrameProfiler::FrameProfiler(Engine *engine, QQuickWindow *window, const QString
     }
     clock.start();
     epochMs = QDateTime::currentMSecsSinceEpoch();
-    stream << "timestamp_ms,step_cpu_ms,scene_script_ms,scene_decode_ms,scene_buffers_ms,"
+    stream << "timestamp_ms,step_cpu_ms,scene_native_ms,scene_metadata_ms,scene_buffers_ms,"
               "latest_present_gap_ms,latest_sync_cpu_ms,latest_submit_cpu_ms,presents,draws,"
               "returning_cards,culled_cards,shadow_only_cards,latest_gpu_draw_calls\n";
     engine->scene.profileFrames(true);
@@ -45,8 +45,8 @@ FrameProfiler::FrameProfiler(Engine *engine, QQuickWindow *window, const QString
     connect(engine, &Engine::updated, this, [this, engine] {
         const auto &timings = engine->scene.timings;
         const auto frame = engine->frame();
-        stream << epochMs + clock.elapsed() << ',' << timings.engineMs << ',' << timings.scriptMs << ','
-               << timings.jsonMs << ',' << timings.buffersMs << ','
+        stream << epochMs + clock.elapsed() << ',' << timings.engineMs << ',' << timings.simulateMs << ','
+               << timings.metadataMs << ',' << timings.buffersMs << ','
                << presentGapNs.load(std::memory_order_relaxed) / 1000000. << ','
                << syncNs.load(std::memory_order_relaxed) / 1000000. << ','
                << submitNs.load(std::memory_order_relaxed) / 1000000. << ','

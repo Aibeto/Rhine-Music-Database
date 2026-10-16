@@ -1,11 +1,11 @@
 # 来源与许可
 
-- Three.js（项目锁定版本 0.183.2），MIT：原项目运动与场景代码复用其数学库；共享着色器中的 ACES、GGX、CubeUV、透射采样公式参考对应 shader chunks。许可见 `node_modules/three/LICENSE`。
+- Three.js（项目锁定版本 0.183.2），MIT：保留的静态 DFG/SSAO 查找资源及共享着色器中的 ACES、GGX、CubeUV、透射采样公式参考对应实现。应用运行时不加载 Three.js，完整许可保留在下文。
 - MiSans：沿用仓库 `licenses/MiSans-license.pdf`、已转换的 `Assets/fonts/` 的许可与版本记录。导出轮廓仍属字体使用，需要在分发前核对完整许可。
 - Novecento 固定字形：沿用 `Resources/boot-lettering-art.json`。本目录不复制被 Git 排除的个人 Webfont kit；网页字体授权不能被视为桌面应用分发授权。
 - 模型、标志与档案：原样复用本项目及其来源记录，未添加新美术。正式分发原生应用前，仍需按仓库原有署名与许可记录确认分发范围。
 
-- @kitlangton/rolling-number 0.4.1，MIT：`Qt/logic/motion.js` 复用其运动曲线计算。以下保留两个 MIT 组件的完整许可；构建包随附本文件。
+- @kitlangton/rolling-number 0.4.1，MIT：`Qt/src/UiMotion.cpp` 保留其运动曲线算法。以下保留两个 MIT 组件的完整许可；构建包随附本文件。
 
 ## MIT notices
 

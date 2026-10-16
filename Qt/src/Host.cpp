@@ -11,7 +11,6 @@
 #include <QFutureWatcher>
 #include <QGuiApplication>
 #include <QImageReader>
-#include <QJSEngine>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkCookie>
@@ -29,6 +28,9 @@ static QString hash(QByteArray value) {
 }
 // 按路由隔离平台的缓存、限流和账号范围。
 static QString routeProvider(const QString &route) {
+    if (route.startsWith("/native/")) {
+        return route.section('/', 2, 2);
+    }
     if (route.startsWith("/qq/")) {
         return "qq";
     }
@@ -102,6 +104,22 @@ Host::~Host() {
     shutdown();
 }
 int Host::lifetime(const QString &route) {
+    if (route.startsWith("/native/")) {
+        const auto operation = route.section('/', 3, 3);
+        if (operation == "songs" || operation == "wiki") {
+            return 86400;
+        }
+        if (operation == "detail" || operation == "artistAlbums") {
+            return 21600;
+        }
+        if (QStringList{"userPlaylists", "likedIDs", "likedSongs", "likedAlbums"}.contains(operation)) {
+            return 60;
+        }
+        if (operation == "search" || operation == "categories") {
+            return 900;
+        }
+        return 0;
+    }
     if (route.startsWith("/kugou/")) {
         if (route.startsWith("/kugou/login/") || route == "/kugou/song/url" ||
             route == "/kugou/register/dev") {
@@ -148,14 +166,13 @@ QString Host::diskPath(QString key) const {
     return AppStorage::cacheDirectory() + "/metadata/" + key + ".json";
 }
 /**
- * 接收脚本层请求，在协议外层执行缓存、合并和限流。
+ * 接收原生业务请求，在协议外层执行缓存、合并和限流。
  * 记录当前账号代数，异步结果只能交付给仍有效的请求。
  */
-void Host::request(QString route, QJSValue params, QJSValue callback) {
+void Host::requestJson(QString route, QJsonObject values, JsonReply callback) {
     if (stopped) {
         return;
     }
-    auto values = QJsonObject::fromVariantMap(params.toVariant().toMap());
     const auto service = routeProvider(route);
     auto token = cookies[service == "qq" ? "qqmusic_session" : "MUSIC_U"].toString();
     if (service == "kugou") {
@@ -172,7 +189,7 @@ void Host::request(QString route, QJSValue params, QJSValue callback) {
                       QStringList{"/song/detail",  "/song/wiki/summary", "/album", "/artists",
                                   "/artist/album", "/playlist/detail",   "/search"}
                           .contains(route);
-    Waiter waiter{callback, epoch};
+    Waiter waiter{std::move(callback), epoch};
     if (disk && !cache.contains(key)) {
         QFile f(diskPath(key));
         if (f.open(QIODevice::ReadOnly)) {
@@ -198,6 +215,7 @@ void Host::request(QString route, QJSValue params, QJSValue callback) {
         send(key);
     }
 }
+
 void Host::pump() {
     if (stopped || !active.isEmpty() || queue.isEmpty()) {
         return;
@@ -302,7 +320,7 @@ void Host::finish(QString key, QJsonObject response, QString error) {
         return;
     }
     const auto work = flights.take(key);
-    // QQ 原始认证记录只经过 C++ 与子进程，禁止出现在脚本回调中。
+    // QQ 原始认证记录只经过 C++ 与子进程，禁止出现在界面回调中。
     if (response["qqSessions"].isArray() && response["qqSessions"] != cookies["__qqSessions"] &&
         !work.waiters.isEmpty() && work.waiters.first().epoch == epoch) {
         cookies["__qqSessions"] = response["qqSessions"];
@@ -311,7 +329,7 @@ void Host::finish(QString key, QJsonObject response, QString error) {
         }
     }
     response.remove("qqSessions");
-    // 酷狗原始认证暂存，等待脚本确认请求代数仍有效
+    // 酷狗原始认证暂存，等待原生业务确认请求代数仍有效。
     if (response["kugouCredentials"].isObject() && !work.waiters.isEmpty() &&
         work.waiters.first().epoch == epoch) {
         const auto credentialKey = QUuid::createUuid().toString();
@@ -372,8 +390,7 @@ void Host::respond(const Waiter &waiter, QJsonObject response, QString error) {
         return;
     }
     response["_epoch"] = waiter.epoch;
-    auto callback = waiter.callback;
-    callback.call({QString::fromUtf8(QJsonDocument(response).toJson(QJsonDocument::Compact)), error});
+    waiter.callback(response, error);
 }
 /**
  * 只接受当前账号代数对应的 Cookie，避免过期请求覆盖新登录。
@@ -403,10 +420,10 @@ void Host::acceptCookies(QString json, int responseEpoch, QString credentialKey)
         saveCredential();
     }
 }
-void Host::delay(int ms, QJSValue callback) {
-    QTimer::singleShot(qMax(0, ms), this, [this, callback]() mutable {
+void Host::schedule(int ms, std::function<void()> callback) {
+    QTimer::singleShot(qMax(0, ms), this, [this, callback = std::move(callback)] {
         if (!stopped) {
-            callback.call();
+            callback();
         }
     });
 }
@@ -535,7 +552,7 @@ QString Host::fromLink(QString input) const {
     }
     return kind + ":" + id;
 }
-void Host::cover(QString input, QJSValue callback) {
+void Host::loadCover(QString input, TextReply callback) {
     QUrl url(input.replace("http://", "https://"));
     const auto domain = url.host();
     if (!(domain == "music.126.net" || domain.endsWith(".music.126.net") || domain == "music.163.com" ||
@@ -549,7 +566,7 @@ void Host::cover(QString input, QJSValue callback) {
     url.setQuery(query);
     auto key = url.toString();
     if (images.contains(key)) {
-        callback.call({key});
+        callback(key);
         return;
     }
     if (offline) {
@@ -584,7 +601,7 @@ void Host::cover(QString input, QJSValue callback) {
             coverFlights.remove(key);
             return;
         }
-        // 工作者只接触不可变字节和 QImage；JS 回调与缓存仍在 Host 所在线程执行。
+        // 工作者只接触不可变字节和 QImage；回调与缓存仍在 Host 所在线程执行。
         auto watcher = new QFutureWatcher<QImage>(this);
         connect(watcher, &QFutureWatcher<QImage>::finished, this, [this, watcher, key, imageEpoch] {
             const auto image = watcher->result();
@@ -604,8 +621,7 @@ void Host::cover(QString input, QJSValue callback) {
             images.insert(key, new QImage(image), qMax(1, int(image.sizeInBytes() / 1024)));
             for (const auto &waiter : waiters) {
                 if (waiter.epoch == epoch) {
-                    auto callback = waiter.callback;
-                    callback.call({key});
+                    waiter.callback(key);
                 }
             }
         });
@@ -623,7 +639,6 @@ void Host::cover(QString input, QJSValue callback) {
         }));
     });
 }
-
 QString Host::qrImage(QString data) {
     if (data.size() > 8 * 1024 * 1024 ||
         !QRegularExpression("^data:image/(png|jpeg|gif|webp);base64,").match(data).hasMatch()) {
@@ -669,19 +684,19 @@ void Host::fixtureImage(const QString &key, const QImage &image) {
         images.insert(key, new QImage(image), int(image.sizeInBytes() / 1024));
     }
 }
-void Host::play(QString id, QJSValue callback) {
+void Host::playOfficial(QString id, TextReply callback) {
     if (!QRegularExpression("^[0-9]{1,20}$").match(id).hasMatch()) {
-        callback.call({"请先选择一首歌曲"});
+        callback("请先选择一首歌曲");
         return;
     }
     if (offline) {
-        callback.call({"OFFLINE_PLAY:" + id});
+        callback("OFFLINE_PLAY:" + id);
         return;
     }
     QPointer<Host> guarded(this);
     platformPlay(id, activates(), [guarded, callback](QString message) mutable {
         if (guarded && !guarded->stopped) {
-            callback.call({message});
+            callback(message);
         }
     });
 }

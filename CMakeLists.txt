@@ -25,12 +25,8 @@ if(NOT TARGET Qt6::MultimediaPrivate)
 endif()
 qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 NEW)
-set_source_files_properties(Qt/qml/Main.qml PROPERTIES QT_RESOURCE_ALIAS Main.qml)
 # 自维护源码和锁定的二维码库构成独立应用目标。
-qt_add_executable(
-    RhineMusicDatabase
-    WIN32
-    MACOSX_BUNDLE
+set(RHINE_APP_SOURCES
     Qt/src/AudioPlayer.cpp
     Qt/src/AudioPlayer.h
     Qt/src/AppStorage.cpp
@@ -41,17 +37,62 @@ qt_add_executable(
     Qt/src/FrameProfiler.h
     Qt/src/NativeCards.cpp
     Qt/src/NativeCards.h
-    Qt/src/ArchiveField.cpp
-    Qt/src/ArchiveField.h
     Qt/src/NativePicking.cpp
     Qt/src/NativePicking.h
+    Qt/src/UiMotion.cpp
+    Qt/src/UiMotion.h
     Qt/tests/UiChecks.cpp
+    Qt/tests/NativeHostChecks.cpp
+    Qt/tests/NativeMusicChecks.cpp
     Qt/src/Icon.cpp
-    Qt/src/SceneRuntime.cpp
-    Qt/src/SceneRuntime.h
     Qt/src/main.cpp
     Qt/src/Host.cpp
     Qt/src/Host.h
+    Qt/src/MusicApi.cpp
+    Qt/src/MusicApi.h
+    Qt/src/LyricsController.cpp
+    Qt/src/LyricsController.h
+    Qt/src/MusicPlayer.cpp
+    Qt/src/MusicPlayer.h
+    Qt/src/MusicData.cpp
+    Qt/src/MusicData.h
+    Qt/src/MusicLibrary.cpp
+    Qt/src/MusicLibrary.h
+    Qt/src/NativeHud.h
+    Qt/src/NativeHud.cpp
+    Qt/src/NativeHudController.cpp
+    Qt/src/NativeHudMusic.cpp
+    Qt/src/NativeHudInput.cpp
+    Qt/src/NativeHudDetail.cpp
+    Qt/src/NativeHudPlayer.cpp
+    Qt/src/NativeHudLibrary.cpp
+    Qt/src/NativeHudModal.cpp
+    Qt/src/NativeHudBoot.cpp
+    Qt/src/SceneTypes.h
+    Qt/src/SceneAppearance.h
+    Qt/src/SceneAppearance.cpp
+    Qt/src/NativeApplication.h
+    Qt/src/NativeApplication.cpp
+    Qt/src/NativeScene.h
+    Qt/src/NativeScene.cpp
+    Qt/src/NativeSceneUpdate.cpp
+    Qt/src/NativeSceneCamera.cpp
+    Qt/src/NativeSceneFrame.cpp
+    Qt/src/NativeSceneInput.cpp
+    Qt/src/NativeViewer.h
+    Qt/src/NativeViewer.cpp
+    Qt/src/SceneMath.h
+    Qt/src/SceneMath.cpp
+    Qt/src/SceneDrag.h
+    Qt/src/SceneDrag.cpp
+    Qt/src/SceneMotion.h
+    Qt/src/SceneMotion.cpp
+    Qt/src/BootTimeline.cpp
+    Qt/src/MusicDirectory.cpp
+    Qt/src/MusicAccount.cpp
+    Qt/src/MusicMutation.cpp
+    Qt/src/MusicDiscover.cpp
+    Qt/src/MusicDiscover.h
     Qt/src/Platform.cpp
     Qt/src/Engine.cpp
     Qt/src/Engine.h
@@ -62,7 +103,40 @@ qt_add_executable(
     Qt/src/Glyphs.cpp
     Qt/src/Glyphs.h
     vendor/qrcodegen/qrcodegen.cpp)
+list(TRANSFORM RHINE_APP_SOURCES PREPEND "${CMAKE_CURRENT_SOURCE_DIR}/")
+if(APPLE)
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+endif()
+# 原生业务和场景由应用与独立回归共用，测试不需要复制整套源码目标。
+set(RHINE_CORE_SOURCES ${RHINE_APP_SOURCES})
+list(FILTER RHINE_CORE_SOURCES EXCLUDE REGEX
+     "/(main|Engine|Icon|RhiScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/")
+list(REMOVE_ITEM RHINE_APP_SOURCES ${RHINE_CORE_SOURCES})
+add_library(RhineCore STATIC ${RHINE_CORE_SOURCES})
+target_include_directories(
+    RhineCore
+    PUBLIC Qt/src
+    PRIVATE vendor/qrcodegen)
+target_compile_definitions(RhineCore PUBLIC RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}")
+target_link_libraries(
+    RhineCore
+    PUBLIC Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Multimedia
+    PRIVATE Qt6::MultimediaPrivate)
+add_subdirectory(Qt)
+target_link_libraries(RhineMusicDatabase PRIVATE RhineCore)
+set_source_files_properties(Qt/qml/Main.qml TARGET_DIRECTORY RhineMusicDatabase PROPERTIES QT_RESOURCE_ALIAS
+                                                                                           Main.qml)
 target_include_directories(RhineMusicDatabase PRIVATE vendor/qrcodegen Qt/src)
+qt_add_resources(
+    RhineMusicDatabase
+    "rhine_animation"
+    PREFIX
+    "/animation"
+    BASE
+    "Assets/animation"
+    FILES
+    Assets/animation/boot-tracks.json)
 qt_add_resources(
     RhineMusicDatabase
     "rhine_icons"
@@ -78,14 +152,6 @@ qt_add_resources(
     Assets/icons/icon-256.png
     Assets/icons/icon-512.png
     Assets/icons/icon-1024.png)
-qt_add_qml_module(
-    RhineMusicDatabase
-    URI
-    RhineMusic
-    VERSION
-    1.0
-    QML_FILES
-    Qt/qml/Main.qml)
 # 着色器按原通道顺序打包，所有后端使用同一份公式。
 qt_add_shaders(
     RhineMusicDatabase
@@ -126,12 +192,10 @@ target_link_libraries(
             Qt6::Multimedia)
 # 平台分支只处理原生能力、部署身份及链接依赖。
 if(APPLE)
-    enable_language(OBJCXX)
-    set(CMAKE_OBJCXX_STANDARD 20)
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/Platform.mm)
-    target_link_libraries(RhineMusicDatabase PRIVATE "-framework Security" "-framework AppKit"
-                                                     "-framework MediaPlayer")
-    target_compile_options(RhineMusicDatabase PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_sources(RhineCore PRIVATE Qt/src/Platform.mm)
+    target_link_libraries(RhineCore PRIVATE "-framework Security" "-framework AppKit"
+                                            "-framework MediaPlayer")
+    target_compile_options(RhineCore PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     set_target_properties(
         RhineMusicDatabase
         PROPERTIES MACOSX_BUNDLE_GUI_IDENTIFIER ${RHINE_APPLICATION_ID}
@@ -140,10 +204,11 @@ if(APPLE)
 elseif(WIN32)
     configure_file(Qt/WindowsIcon.rc.in "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc" @ONLY)
     target_sources(RhineMusicDatabase PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc")
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/PlatformWindows.cpp)
-    target_link_libraries(RhineMusicDatabase PRIVATE crypt32 shell32 user32 windowsapp runtimeobject
-                                                     Qt6::MultimediaPrivate)
+    target_sources(RhineCore PRIVATE Qt/src/PlatformWindows.cpp)
+    target_link_libraries(RhineCore PRIVATE crypt32 shell32 user32 windowsapp runtimeobject
+                                            Qt6::MultimediaPrivate)
     target_compile_options(RhineMusicDatabase PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+    target_compile_options(RhineCore PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 else()
     message(FATAL_ERROR "Supported desktop platforms are macOS and Windows")
 endif()
@@ -157,10 +222,9 @@ if(APPLE AND RHINE_PACKAGE_APP)
         GLOB_RECURSE
         RHINE_RESOURCE_INPUTS
         CONFIGURE_DEPENDS
-        "${CMAKE_CURRENT_SOURCE_DIR}/Scene/*"
         "${CMAKE_CURRENT_SOURCE_DIR}/Resources/*"
+        "${CMAKE_CURRENT_SOURCE_DIR}/MusicBridge/client/*"
         "${CMAKE_CURRENT_SOURCE_DIR}/Assets/*"
-        "${CMAKE_CURRENT_SOURCE_DIR}/Qt/logic/*"
         "${CMAKE_CURRENT_SOURCE_DIR}/scripts/*")
     list(
         APPEND RHINE_RESOURCE_INPUTS "${CMAKE_CURRENT_SOURCE_DIR}/package.json"
@@ -179,7 +243,35 @@ if(APPLE AND RHINE_PACKAGE_APP)
         COMMENT "Packaging standalone music panel resources and Qt runtime"
         VERBATIM)
 endif()
+qt_finalize_executable(RhineMusicDatabase)
 enable_testing()
+qt_add_executable(RhineSceneMotionRegression Qt/tests/SceneMotionChecks.cpp Qt/src/SceneMotion.cpp
+                  Qt/src/BootTimeline.cpp Qt/src/SceneMath.cpp Qt/src/SceneDrag.cpp)
+target_include_directories(RhineSceneMotionRegression PRIVATE Qt/src)
+target_compile_definitions(RhineSceneMotionRegression PRIVATE RHINE_SCENE_MOTION_TEST_MAIN)
+target_link_libraries(RhineSceneMotionRegression PRIVATE Qt6::Core)
+qt_add_resources(
+    RhineSceneMotionRegression
+    "scene_motion_tracks"
+    PREFIX
+    "/animation"
+    BASE
+    "Assets/animation"
+    FILES
+    Assets/animation/boot-tracks.json)
+if(MSVC)
+    target_compile_options(RhineSceneMotionRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_scene_motion_regression
+         COMMAND RhineSceneMotionRegression "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/scene-motion.qz")
+qt_add_executable(RhineUiMotionRegression Qt/tests/UiMotionRegression.cpp Qt/src/UiMotion.cpp)
+target_include_directories(RhineUiMotionRegression PRIVATE Qt/src)
+target_link_libraries(RhineUiMotionRegression PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(RhineUiMotionRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_ui_motion_regression COMMAND RhineUiMotionRegression
+                                              "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/ui-motion.qz")
 qt_add_executable(RhinePlatformRegression Qt/tests/PlatformRegression.cpp Qt/src/AppStorage.cpp
                   Qt/src/AudioPlayer.cpp)
 target_include_directories(RhinePlatformRegression PRIVATE Qt/src)
@@ -207,3 +299,33 @@ set_tests_properties(
     qt_offline
     PROPERTIES ENVIRONMENT
                "QT_QPA_PLATFORM=offscreen;RHINE_RESOURCES=${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
+
+qt_add_executable(RhineNativeSceneRegression Qt/tests/NativeSceneChecks.cpp)
+target_compile_definitions(RhineNativeSceneRegression PRIVATE RHINE_SCENE_REGRESSION_TEST_MAIN)
+target_link_libraries(RhineNativeSceneRegression PRIVATE RhineCore)
+qt_add_resources(
+    RhineNativeSceneRegression
+    "native_scene_tracks"
+    PREFIX
+    "/animation"
+    BASE
+    "Assets/animation"
+    FILES
+    Assets/animation/boot-tracks.json)
+if(MSVC)
+    target_compile_options(RhineNativeSceneRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_native_scene_regression
+         COMMAND RhineNativeSceneRegression "${CMAKE_CURRENT_SOURCE_DIR}/output/resources"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/scene-frame.qz")
+
+qt_add_executable(RhineNativeHudRegression Qt/tests/NativeHudChecks.cpp)
+target_compile_definitions(RhineNativeHudRegression PRIVATE RHINE_HUD_REGRESSION_TEST_MAIN)
+target_link_libraries(RhineNativeHudRegression PRIVATE RhineCore)
+if(MSVC)
+    target_compile_options(RhineNativeHudRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_native_hud_regression
+         COMMAND RhineNativeHudRegression "${CMAKE_CURRENT_SOURCE_DIR}/output/resources"
+                 "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/hud-panels.qz")
+set_tests_properties(qt_native_hud_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

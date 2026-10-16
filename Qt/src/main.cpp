@@ -74,7 +74,7 @@ int main(int argc, char **argv) {
 #else
                        "/resources";
 #endif
-        root = QFileInfo(bundled + "/runtime.js").exists() ? QDir(bundled).absolutePath()
+        root = QFileInfo(bundled + "/slots.json").exists() ? QDir(bundled).absolutePath()
                                                            : QDir::currentPath() + "/output/resources";
     }
     const bool test = args.contains("--self-test");
@@ -122,6 +122,7 @@ int main(int argc, char **argv) {
     window->setGraphicsConfiguration(graphics);
     window->show();
 #endif
+    backend.setWindow(window);
     window->installEventFilter(&backend);
     if (args.contains("--frame-profile")) {
         const auto path = args.value(args.indexOf("--frame-profile") + 1);
@@ -176,7 +177,7 @@ int main(int argc, char **argv) {
             }
             if (!*reviewed) {
                 *reviewed = true;
-                backend.js.evaluate("App.runtime.review('archive');");
+                backend.scene.review("archive");
                 return;
             }
             backend.step(50);

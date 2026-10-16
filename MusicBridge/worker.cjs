@@ -100,6 +100,10 @@ function loadClient(name, request) {
  * 沿用锁定上游的协议与错误语义，响应 Cookie 交给父进程隔离处理。
  */
 async function dispatch(message) {
+    if (message.route?.startsWith('/native/')) {
+        const client = await import('./client/dispatch.mjs');
+        return client.dispatch(message, dispatch);
+    }
     if (message.route?.startsWith('/qq/')) {
         return require('./qq.cjs').dispatch(message);
     }

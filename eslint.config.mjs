@@ -1,5 +1,3 @@
-import tsParser from '@typescript-eslint/parser';
-
 // 只检查自维护脚本；上游、依赖和生成文件保留原样。
 export default [
     {
@@ -7,16 +5,13 @@ export default [
     },
     {
         files: [
-            'Qt/logic/**/*.js',
             'Qt/tests/**/*.{mjs,cjs}',
             'MusicBridge/*.cjs',
+            'MusicBridge/client/**/*.mjs',
             'scripts/*.{cjs,mjs}',
-            'Scene/**/*.ts',
-            'Resources/**/*.ts',
             'eslint.config.mjs',
         ],
         languageOptions: {
-            parser: tsParser,
             ecmaVersion: 'latest',
             sourceType: 'module',
         },

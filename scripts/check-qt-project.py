@@ -40,6 +40,11 @@ runtime_sources = "\n".join(
     if path.suffix in {".cpp", ".h", ".mm"}
 )
 assert not re.search(
+    r"QJSEngine|QJSValue|QWebEngine|QWebView", runtime_sources
+), "Script runtime in native business"
+for retired in ["Scene", "Qt/logic", "Qt/src/SceneRuntime.cpp", "scripts/bundle-qt.mjs"]:
+    assert not (root / retired).exists(), f"Retired application source remains: {retired}"
+assert not re.search(
     r"cc\.[a-z]+\.rhine|native-panel|RhineMusicPanel", runtime_sources + plist + cmake
 ), "Legacy application namespace"
 assert "kSecAttrService : QString::fromLatin1(AppIdentity::Id).toNSString()" in runtime_sources

@@ -6,7 +6,7 @@ const root = path.resolve(__dirname, '..');
 process.chdir(root);
 const checkOnly = process.argv.includes('--check');
 const python = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-const sourceRoots = ['Scene/', 'Resources/', 'Qt/', 'MusicBridge/', 'scripts/', '.github/'];
+const sourceRoots = ['Resources/', 'Qt/', 'MusicBridge/', 'scripts/', '.github/'];
 const configuration = new Set([
     'package.json',
     'MusicBridge/package.json',
@@ -41,7 +41,8 @@ const files = [...new Set(paths)].filter((file) => {
     return (
         configuration.has(file) ||
         (sourceRoots.some((folder) => file.startsWith(folder)) &&
-            /\.(?:js|cjs|mjs|ts|cpp|h|mm|qml|py|sh|glsl|vert|frag|yml|yaml)$/.test(file))
+            (/\.(?:js|cjs|mjs|ts|cpp|h|mm|qml|py|sh|glsl|vert|frag|yml|yaml)$/.test(file) ||
+                path.basename(file) === 'CMakeLists.txt'))
     );
 });
 
@@ -108,7 +109,7 @@ async function main() {
             formatted = run(python, ['-m', 'black', '--quiet', '--config', 'pyproject.toml', '-'], {
                 input: source,
             });
-        } else if (file === 'CMakeLists.txt') {
+        } else if (path.basename(file) === 'CMakeLists.txt') {
             formatted = run(
                 python,
                 ['-m', 'cmakelang.format', '--config-files', '.cmake-format.json', '--', '-'],

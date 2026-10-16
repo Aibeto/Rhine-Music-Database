@@ -1,13 +1,14 @@
-// 真实加载两个版本的上游模块，替换 HTTP 响应，验证版本配置及重启后的固定设备。
+// 使用随包 Node 加载两个版本的上游模块，以本地响应验证版本配置及重启后的固定设备。
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const bridge = path.resolve(process.argv[2] || 'MusicBridge');
+const bridge = path.resolve(process.argv[2] || 'output/resources/MusicBridge');
 const temporary = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'rhine-kugou-edition-'));
 const hook = path.resolve(__dirname, 'fixtures/bridge-http.cjs');
+const runtime = path.join(bridge, process.platform === 'win32' ? 'node.exe' : 'node');
 async function request(edition) {
-    const child = spawn(process.execPath, ['--require', hook, path.join(bridge, 'worker.cjs')], {
+    const child = spawn(runtime, ['--require', hook, path.join(bridge, 'worker.cjs')], {
         cwd: bridge,
         env: {
             ...process.env,
@@ -21,7 +22,10 @@ async function request(edition) {
     try {
         const result = await new Promise((resolve, reject) => {
             let buffer = '';
-            const timer = setTimeout(() => reject(new Error('Kugou worker timed out')), 10000);
+            const timer = setTimeout(
+                () => reject(new Error('Kugou packaged worker timed out: ' + edition)),
+                30000,
+            );
             child.on('error', reject);
             child.stdout.on('data', (chunk) => {
                 buffer += chunk;

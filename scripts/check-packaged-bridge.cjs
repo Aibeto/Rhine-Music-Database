@@ -60,7 +60,7 @@ async function main() {
             return new Promise((resolve, reject) => {
                 const timer = setTimeout(() => {
                     pending.delete(id);
-                    reject(new Error('IPC timeout: ' + errors));
+                    reject(new Error('IPC timeout (' + id + '): ' + errors));
                 }, 15000);
                 pending.set(id, {
                     resolve,
@@ -82,6 +82,12 @@ async function main() {
             type: 1,
         });
         assert.equal(search.body.code, 200);
+        const nativeSearch = await request('native-search', '/native/netease/search', {
+            args: ['fixture', 'song', 0],
+        });
+        assert.equal(nativeSearch.body.code, 200);
+        assert.deepEqual(nativeSearch.body.value.items, []);
+        assert.equal(nativeSearch.body.value.total, 0);
         const audio = await request('audio', '/song/url/v1', {
             id: '1',
             level: 'lossless',

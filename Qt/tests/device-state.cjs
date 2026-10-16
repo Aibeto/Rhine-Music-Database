@@ -6,8 +6,11 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'rhine-device-state-'));
 const devicePath = path.join(temporaryDirectory, 'qq-device.json');
-const modulePath = path.resolve(
-    'MusicBridge/node_modules/@yakult-green-tea/qq-music-api/dist/src/services/auth/deviceContext.js',
+const bridge = path.resolve('output/resources/MusicBridge');
+const runtime = path.join(bridge, process.platform === 'win32' ? 'node.exe' : 'node');
+const modulePath = path.join(
+    bridge,
+    'node_modules/@yakult-green-tea/qq-music-api/dist/src/services/auth/deviceContext.js',
 );
 const source = `
 const context = require(process.env.RHINE_TEST_DEVICE_MODULE);
@@ -18,7 +21,7 @@ const digest = require('node:crypto').createHash('sha256').update(JSON.stringify
 process.stdout.write(digest);
 `;
 function readDeviceDigest() {
-    const result = spawnSync(process.execPath, ['-e', source], {
+    const result = spawnSync(runtime, ['-e', source], {
         encoding: 'utf8',
         env: {
             ...process.env,

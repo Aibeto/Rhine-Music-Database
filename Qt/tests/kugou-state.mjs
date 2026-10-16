@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
-import { KugouAPI, kugouItem } from '../logic/kugou.js';
-import { API, MusicStore } from '../logic/music.js';
-import { HUD } from '../logic/hud.js';
+import { KugouAPI, kugouItem } from '../../MusicBridge/client/kugou.mjs';
+import { API } from '../../MusicBridge/client/netease.mjs';
 import { createRequire } from 'node:module';
 const require = createRequire(import.meta.url);
 const { createBridge, ROUTES } = require('../../MusicBridge/kugou.cjs');
@@ -146,32 +145,6 @@ assert.equal(requests.at(-1)[1].type, 0);
 const track = await api.playback(parsed, 'lossless', false, () => true);
 assert.equal(track.qualityFallback, '标准');
 assert.equal(requests.at(-1)[1].album_audio_id, '456');
-const store = new MusicStore(host, { musicClear() {}, setMode() {} }, { columns: [], records: [] });
-assert.equal(store.provider, 'kugou');
-assert.equal(store.uid, '42');
-for (const provider of ['qq', 'netease', 'kugou', 'qq', 'kugou']) {
-    await store.switchProvider(provider);
-    assert.equal(store.provider, provider);
-    assert.equal(active, provider);
-    assert.equal(store.api.provider, provider);
-}
-assert.equal(store.uid, '42');
-assert.equal(store.editable, false);
-console.log('酷狗原始标识、分页、歌单归属、音质回退、设备注册、扫码状态、凭据隔离和三平台切换通过');
-
-await store.switchProvider('kugou', 'lite');
-assert.equal(store.kugouEdition, 'lite');
-assert.equal(store.providerName, '酷狗概念版');
-assert.equal(store.accountKey, 'kugou-lite');
-assert.equal(prefs.get('account-id-kugou-standard'), '42');
-await store.switchProvider('qq');
-await store.switchProvider('kugou');
-assert.equal(store.kugouEdition, 'lite');
-assert.equal(store.accountKey, 'kugou-lite');
-await store.switchProvider('kugou', 'standard');
-assert.equal(store.accountKey, 'kugou-standard');
-assert.equal(store.uid, '42');
-
 const pages = [];
 const paged = new KugouAPI({
     host: {},
@@ -191,13 +164,6 @@ assert.equal(pagedSongs.length, 2);
 api.playlists.unshift({ title: '音乐资料库', owned: true, isDefault: true, id: 'library', listid: '99' });
 await api.likedSongs();
 assert.equal(requests.at(-1)[1].listid, '1');
-const beforeDisabled = requests.length;
-store.showSource(4);
-await store.loadMoreSource(4);
-assert.equal(requests.length, beforeDisabled);
-assert.equal(store.hasMore[4], false);
-assert.equal(store.activeSources.includes(4), false);
-
 // 使用真实接口的数组形状与字段名，验证歌手、专辑和权益资料的转换。
 const detailCalls = [];
 const detailsApi = new KugouAPI({
@@ -290,26 +256,4 @@ assert.equal(hydrated.albumID, '123');
 assert.equal(hydrated.duration, 242000);
 assert.equal(hydrated.artists[0].id, '789658');
 
-// 空目录不能选中第一首歌；按钮和键盘必须都恢复父页面。
-for (const action of ['music:directory', 'Escape']) {
-    let restored = false;
-    const emptyStore = {
-        directory: { songs: [] },
-        returnToDirectory: MusicStore.prototype.returnToDirectory,
-        leaveDirectory() {
-            this.directory = null;
-            restored = true;
-        },
-        changed() {},
-    };
-    const hud = new HUD({}, {}, emptyStore, {});
-    hud.frame = { mode: 'detail' };
-    if (action === 'Escape') {
-        hud.key(action, false);
-    } else {
-        hud.action(action);
-    }
-    assert.equal(restored, true);
-    assert.equal(emptyStore.directory, null);
-}
-console.log('酷狗歌手字段、专辑 30 条分页、歌曲详情补齐与空目录返回回归通过');
+console.log('酷狗 SDK 标识、设备注册、30 条分页、歌曲详情补齐和音质回退通过');

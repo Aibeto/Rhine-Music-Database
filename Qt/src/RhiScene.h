@@ -1,5 +1,5 @@
 #pragma once
-#include "SceneRuntime.h"
+#include "SceneTypes.h"
 #include <QImage>
 #include <QJsonObject>
 #include <QQuickRhiItem>
@@ -23,5 +23,5 @@ class RhiScene : public QQuickRhiItem {
     Engine *m_engine = nullptr;
 };
 QImage renderReference(const QString &root, const QJsonObject &frame, const QJsonObject &item,
-                       const QImage &cover, QSize size, const SceneRuntime::DrawBuffers &buffers = {},
+                       const QImage &cover, QSize size, const SceneDrawBuffers &buffers = {},
                        quint64 *drawCalls = nullptr);

@@ -13,18 +13,14 @@ const files = [
     'archive-cassette.bin',
     'archive-cassette-indices.bin',
     'archive-cassette.json',
-    'archive-cassette-geometry.json',
     'archive-assembly.bin',
     'archive-assembly-indices.bin',
     'archive-assembly.json',
-    'archive-assembly-geometry.json',
     'NotoSansSymbols2-Regular.ttf',
     'slots.json',
     'scene-fixture.json',
     'boot-lettering-art.json',
     'misans-glyphs.json',
-    'runtime.js',
-    'timeline.js',
     ...['light', 'regular', 'demibold', 'bold'].map((w) => `RhineMiSans-${w}.otf`),
 ];
 fs.mkdirSync(out, {
@@ -53,6 +49,9 @@ const nodeName = process.platform === 'win32' ? 'node.exe' : 'node';
 fs.copyFileSync(path.join(bridge, nodeName), path.join(target, nodeName));
 fs.chmodSync(path.join(target, nodeName), 0o755);
 fs.cpSync(path.join(bridge, 'upstream'), path.join(target, 'upstream'), {
+    recursive: true,
+});
+fs.cpSync(path.join(bridge, 'client'), path.join(target, 'client'), {
     recursive: true,
 });
 const worker = fs.readFileSync(path.join(bridge, 'worker.cjs'), 'utf8');

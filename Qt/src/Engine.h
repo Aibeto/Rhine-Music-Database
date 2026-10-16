@@ -1,10 +1,11 @@
 #pragma once
 #include "Glyphs.h"
 #include "Host.h"
-#include "SceneRuntime.h"
+#include "NativeApplication.h"
 #include <QElapsedTimer>
-#include <QJSEngine>
 #include <QVariantMap>
+#include <QQuickWindow>
+#include <QPointer>
 #include <atomic>
 class Engine : public QObject {
     Q_OBJECT
@@ -40,7 +41,13 @@ class Engine : public QObject {
     }
     Q_INVOKABLE void resize(double width, double height);
     Q_INVOKABLE void action(QString action);
-    Q_INVOKABLE void form(QString json);
+    Q_INVOKABLE void submitForm(QString account, QString password);
+    Q_INVOKABLE bool keyEvent(int key, int modifiers, QString text);
+    Q_INVOKABLE void searchAccepted(QString text, int modifiers);
+    Q_INVOKABLE void wheelInput(double x, double y, double pixelDelta, double angleDelta);
+    Q_INVOKABLE void adjustPlayer(QString control, double x, double width);
+    Q_INVOKABLE void toggleFullscreen();
+    void setWindow(QQuickWindow *window);
     Q_INVOKABLE void query(QString query);
     Q_INVOKABLE void key(QString key, bool command);
     Q_INVOKABLE void pointer(QString type, double x, double y);
@@ -48,7 +55,7 @@ class Engine : public QObject {
     Q_INVOKABLE void snapshot(QString path);
     void step(double time);
     QVariantMap performance() const;
-    SceneRuntime::DrawBuffers drawBuffers() const {
+    SceneDrawBuffers drawBuffers() const {
         return scene.drawBuffers;
     }
     struct MusicTexture {
@@ -80,9 +87,8 @@ class Engine : public QObject {
     int selfTest();
     int renderFixtures(QString source, QString output);
     Host host;
-    QJSEngine js;
-    SceneRuntime scene;
-    QJSValue app;
+    NativeScene scene;
+    std::unique_ptr<NativeApplication> app;
     QString failure;
   signals:
     void updated();
@@ -90,7 +96,7 @@ class Engine : public QObject {
     void hudUpdated();
     void stateChanged();
     void hitsChanged();
-    void fullscreenRequested();
+    void clearCredentials();
 
   protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -123,7 +129,7 @@ class Engine : public QObject {
     quint64 m_steps = 0, m_sceneUpdates = 0, m_hudUpdates = 0;
     int m_stableFrames = 0;
     QJsonObject m_sceneSignature;
-    SceneRuntime::DrawBuffers m_previousBuffers;
+    SceneDrawBuffers m_previousBuffers;
     void tick();
     void flushPointer();
     void pollMedia();
@@ -134,8 +140,9 @@ class Engine : public QObject {
     QVariantList m_hits;
     QJsonObject m_frame, m_current;
     QJsonArray m_commands;
+    QPointer<QQuickWindow> m_window;
+    QWindow::Visibility m_windowedVisibility = QWindow::Windowed;
+    QString m_loginMethod;
     QString m_cover;
     qint64 m_coverRevision = 0;
-    QJSValue evaluate(QString code, QString name = {});
-    QJSValue call(QString method, QJSValueList args = {});
 };

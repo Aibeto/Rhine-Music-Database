@@ -26,7 +26,7 @@ assert.equal(kugou.version, source.kugouVersion);
 assert.equal(kugou.integrity, source.kugouIntegrity);
 assert.equal(kugou.resolved, 'https://codeload.github.com/MakcRe/KuGouMusicApi/tar.gz/' + source.kugouCommit);
 // 状态编排和拆分后的请求层都不得复制原生协议实现。
-const api = ['Qt/logic/music.js', 'Qt/logic/music-api.js']
+const api = ['Qt/src/MusicApi.cpp', 'MusicBridge/client/netease.mjs']
     .map((file) => fs.readFileSync(file, 'utf8'))
     .join('\n');
 assert(!/CommonCrypto|function\s+(?:aes|weapi|eapi)|RhineMusicNative/.test(api));

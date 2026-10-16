@@ -34,7 +34,6 @@ for asset in ["archive-cassette", "archive-assembly"]:
     vertices = []
     index_values = []
     parts = []
-    geometry = []
     for node in gltf["nodes"]:
         if "mesh" not in node:
             continue
@@ -64,21 +63,15 @@ for asset in ["archive-cassette", "archive-assembly"]:
                     name=name,
                     start=index_offset,
                     count=len(indices),
+                    vertexStart=vertex_offset,
+                    vertexCount=len(positions),
                     material=material,
+                    minimum=gltf["accessors"][primitive["attributes"]["POSITION"]]["min"],
+                    maximum=gltf["accessors"][primitive["attributes"]["POSITION"]]["max"],
                     assemblyPart=node.get("extras", {}).get("assemblyPart", "shell"),
                 )
             )
-            geometry.append(
-                dict(
-                    name=name,
-                    positions=[component for point in positions for component in point],
-                    normals=[component for point in normals for component in point],
-                    indices=[i[0] for i in indices],
-                    material=material,
-                    assemblyPart=node.get("extras", {}).get("assemblyPart", "shell"),
-                )
-            )
-    # 分别保存原生缓冲区和脚本侧几何，供同一场景使用。
+    # 原生绘制与拾取共用二进制坐标，不再生成脚本侧坐标副本。
     (output_directory / f"{asset}.bin").write_bytes(struct.pack("<" + "f" * len(vertices), *vertices))
     (output_directory / f"{asset}-indices.bin").write_bytes(
         struct.pack("<" + "I" * len(index_values), *index_values)
@@ -89,10 +82,8 @@ for asset in ["archive-cassette", "archive-assembly"]:
         ),
         encoding="utf-8",
     )
-    (output_directory / f"{asset}-geometry.json").write_text(
-        json.dumps(geometry, separators=(",", ":")), encoding="utf-8"
-    )
-for path in ["Resources/slots.json", "Resources/boot-lettering-art.json"]:
+
+for path in ["Resources/slots.json", "Resources/boot-lettering-art.json", "Resources/scene-fixture.json"]:
     (
         output_directory / ("slots.json" if path.endswith("slots.json") else pathlib.Path(path).name)
     ).write_bytes((root / path).read_bytes())

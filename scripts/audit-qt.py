@@ -24,8 +24,6 @@ assert not re.search(
     rb"cc\.[a-z]+\.rhine\.(?:native-panel|music)", executable.read_bytes()
 ), "Legacy runtime namespace"
 for name in [
-    "runtime.js",
-    "qt-logic.js",
     "slots.json",
     "scene-fixture.json",
     "room-pmrem.bin",
@@ -34,6 +32,14 @@ for name in [
     "NOTICE",
 ]:
     assert (resources / name).is_file(), name
+for name in (
+    "runtime.js",
+    "timeline.js",
+    "qt-logic.js",
+    "archive-cassette-geometry.json",
+    "archive-assembly-geometry.json",
+):
+    assert not (resources / name).exists(), "Retired script or geometry copy entered package: " + name
 fixture = json.loads((resources / "scene-fixture.json").read_text(encoding="utf-8"))
 assert (
     len(fixture["frame"]["view"]) == 16 and len(fixture["frame"]["projection"]) == 16 and fixture["rays"]

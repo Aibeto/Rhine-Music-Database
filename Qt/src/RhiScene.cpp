@@ -122,7 +122,7 @@ class Renderer {
     QHash<QString, QRhiShaderResourceBindings *> postBindings;
     QHash<QString, QString> labelRevisions;
     QHash<QString, qint64> coverRevisions;
-    SceneRuntime::DrawBuffers nativeBuffers;
+    SceneDrawBuffers nativeBuffers;
     quint64 generation = 0;
     quint64 bindingCreations = 0;
     quint64 coverUploads = 0;
@@ -1129,7 +1129,7 @@ class ItemRenderer : public QQuickRhiItemRenderer {
     Engine *backend = nullptr;
     std::unique_ptr<Renderer> renderer;
     QJsonObject frame, item;
-    SceneRuntime::DrawBuffers buffers;
+    SceneDrawBuffers buffers;
     Engine::MusicTextures musicTextures;
     QImage cover;
     QString root;
@@ -1199,8 +1199,7 @@ QQuickRhiItemRenderer *RhiScene::createRenderer() {
  * 使用同一份场景数据生成参考图，供离线渲染比较使用。
  */
 QImage renderReference(const QString &root, const QJsonObject &frame, const QJsonObject &item,
-                       const QImage &cover, QSize size, const SceneRuntime::DrawBuffers &buffers,
-                       quint64 *drawCalls) {
+                       const QImage &cover, QSize size, const SceneDrawBuffers &buffers, quint64 *drawCalls) {
     std::unique_ptr<QRhi> rhi;
 #ifdef Q_OS_MACOS
     QRhiMetalInitParams params;

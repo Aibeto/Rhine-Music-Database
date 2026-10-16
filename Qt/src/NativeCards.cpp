@@ -30,7 +30,7 @@ QMatrix4x4 localMatrix(const QJsonArray &values) {
  * 共享卡片模板与紧凑根状态
  * 每张卡片只传一份根矩阵；局部偏移仅对标签等非单位部件计算。
  */
-QString NativeCards::expand(QJsonObject &frame, const QByteArray &bytes, SceneRuntime::DrawBuffers &buffers) {
+QString NativeCards::expand(QJsonObject &frame, const QByteArray &bytes, SceneDrawBuffers &buffers) {
     if (frame.contains("actorTemplate")) {
         parts = frame["actorTemplate"].toArray();
     }

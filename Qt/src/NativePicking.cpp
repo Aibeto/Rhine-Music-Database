@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <numeric>
 #include <vector>
@@ -102,16 +103,27 @@ struct Mesh {
         nodes[index].right = right;
         return index;
     }
-    void load(const QJsonObject &part) {
-        const auto coordinates = part["positions"].toArray();
-        positions.reserve(coordinates.size() / 3);
-        for (qsizetype i = 0; i + 2 < coordinates.size(); i += 3) {
-            // 与原生 GLTF 适配器的 Float32 坐标一致；射线计算继续使用 double。
-            positions.push_back({float(coordinates[i].toDouble()), float(coordinates[i + 1].toDouble()),
-                                 float(coordinates[i + 2].toDouble())});
+    void load(const QJsonObject &part, const QByteArray &vertices, const QByteArray &indexBytes) {
+        const auto vertexStart = part["vertexStart"].toInt(-1);
+        const auto vertexCount = part["vertexCount"].toInt();
+        const auto firstIndex = part["start"].toInt(-1);
+        const auto indexCount = part["count"].toInt();
+        if (vertexStart < 0 || firstIndex < 0 || vertexCount <= 0 || indexCount < 0 ||
+            (qint64(vertexStart) + vertexCount) * 48 > vertices.size() ||
+            (qint64(firstIndex) + indexCount) * 4 > indexBytes.size()) {
+            return;
         }
-        for (const auto &value : part["indices"].toArray()) {
-            indices.push_back(value.toInt());
+        positions.reserve(vertexCount);
+        for (int index = 0; index < vertexCount; ++index) {
+            float point[3];
+            std::memcpy(point, vertices.constData() + (vertexStart + index) * 48, sizeof(point));
+            positions.push_back({point[0], point[1], point[2]});
+        }
+        indices.reserve(indexCount);
+        for (int index = 0; index < indexCount; ++index) {
+            quint32 value;
+            std::memcpy(&value, indexBytes.constData() + (firstIndex + index) * 4, sizeof(value));
+            indices.push_back(int(value) - vertexStart);
         }
         const int count = int(indices.size() / 3);
         triangles.resize(count);
@@ -190,20 +202,30 @@ NativePicking::NativePicking(QString root) : data(std::make_unique<Data>()) {
     data->root = std::move(root);
 }
 NativePicking::~NativePicking() = default;
+void NativePicking::trimMemory() {
+    data->meshes.clear();
+    data->meshes.shrink_to_fit();
+    data->prepared = false;
+}
 /** 一次构建不可变卡片模型的原生碰撞树；模型资料和账号协议相互独立。 */
 void NativePicking::prepare() {
     if (data->prepared) {
         return;
     }
     data->prepared = true;
-    QFile file(data->root + "/archive-cassette-geometry.json");
-    if (!file.open(QIODevice::ReadOnly)) {
+    QFile file(data->root + "/archive-cassette.json");
+    QFile vertices(data->root + "/archive-cassette.bin");
+    QFile indices(data->root + "/archive-cassette-indices.bin");
+    if (!file.open(QIODevice::ReadOnly) || !vertices.open(QIODevice::ReadOnly) ||
+        !indices.open(QIODevice::ReadOnly)) {
         return;
     }
-    const auto parts = QJsonDocument::fromJson(file.readAll()).array();
+    const auto parts = QJsonDocument::fromJson(file.readAll()).object()["meshes"].toArray();
+    const auto vertexBytes = vertices.readAll();
+    const auto indexBytes = indices.readAll();
     data->meshes.resize(parts.size());
     for (qsizetype i = 0; i < parts.size(); ++i) {
-        data->meshes[i].load(parts[i].toObject());
+        data->meshes[i].load(parts[i].toObject(), vertexBytes, indexBytes);
     }
 }
 QVariantMap NativePicking::raycast(int mesh, const QVariantList &originValues,
