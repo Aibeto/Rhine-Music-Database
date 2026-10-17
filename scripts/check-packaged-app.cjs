@@ -47,7 +47,9 @@ const env = {
 };
 for (const name of Object.keys(env)) {
     if (
-        /^(?:PATH|QT_PLUGIN_PATH|QT_QPA_PLATFORM_PLUGIN_PATH|QML_IMPORT_PATH|QML2_IMPORT_PATH|RHINE_RESOURCES|QT_MEDIA_BACKEND)$/i.test(
+        // LD_LIBRARY_PATH 的优先级高于 RUNPATH，CI 的 install-qt-action 会设置它，
+        // 不清理就会加载宿主 Qt，冒烟测试验证不到随包运行时。
+        /^(?:PATH|LD_LIBRARY_PATH|QT_PLUGIN_PATH|QT_QPA_PLATFORM_PLUGIN_PATH|QML_IMPORT_PATH|QML2_IMPORT_PATH|RHINE_RESOURCES|QT_MEDIA_BACKEND)$/i.test(
             name,
         )
     ) {

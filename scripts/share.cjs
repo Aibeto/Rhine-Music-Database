@@ -4,8 +4,10 @@ const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 process.chdir(path.resolve(__dirname, '..'));
 const mac = process.platform === 'darwin';
+const win = process.platform === 'win32';
 const linux = process.platform === 'linux';
-const python = process.env.PYTHON || (mac ? 'python3' : 'python');
+// 统一使用 python3：多数发行版不再提供 python 命令。
+const python = process.env.PYTHON || (win ? 'python' : 'python3');
 // 与构建脚本保持同一份部署目录；Linux 交付 AppImage 前缀目录。
 const appPaths = {
     darwin: 'output/RHINE MUSIC DATABASE.app',

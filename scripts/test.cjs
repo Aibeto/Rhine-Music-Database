@@ -2,8 +2,10 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 process.chdir(path.resolve(__dirname, '..'));
 const mac = process.platform === 'darwin';
+const win = process.platform === 'win32';
 const linux = process.platform === 'linux';
-const python = process.env.PYTHON || (mac ? 'python3' : 'python');
+// 统一使用 python3：多数发行版不再提供 python 命令。
+const python = process.env.PYTHON || (win ? 'python' : 'python3');
 function run(command, args, env = {}) {
     const result = spawnSync(command, args, {
         stdio: 'inherit',

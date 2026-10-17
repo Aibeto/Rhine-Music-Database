@@ -69,6 +69,10 @@ jobs:
             exit 1
           fi
 
+          # upload-artifact 与 download-artifact 之间以 zip 往返，可执行位会丢失；
+          # 恢复后才能让下载者直接双击运行。
+          chmod 0755 release/*.AppImage
+
           ls -lh release/
 
       - name: Publish GitHub Release

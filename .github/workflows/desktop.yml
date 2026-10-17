@@ -62,7 +62,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
             cmake ninja-build file libgl1-mesa-dev libxkbcommon-dev \
-            libxkbcommon-x11-0 libxcb-cursor0 libfuse2
+            libxkbcommon-x11-0 libxcb-cursor0
+          # 构建脚本用 --appimage-extract-and-run 打包与冒烟测试，不依赖 FUSE；
+          # 这里只为兼容手动验证，noble 已按 t64 改名，缺失不算失败。
+          sudo apt-get install --yes --no-install-recommends libfuse2t64 || \
+            sudo apt-get install --yes --no-install-recommends libfuse2 || true
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.3'
@@ -106,13 +110,13 @@ jobs:
         run: npm run build
         env:
           QT_ROOT: ${{ env.QT_ROOT_DIR }}
+      # 与 macOS、Windows 走同一套离线回归：ctest、打包桥接、包体审计和冒烟启动。
+      # audit-qt.py 由 test.cjs 内部调用；先验证再打包，失败时不必产出分发包。
+      - name: Run offline regressions
+        run: npm test
       - name: Create distribution ZIP
         if: runner.os != 'Linux'
         run: npm run share
-      # AppImage 已由 npm run build 生成，发布步骤只做静态审计。
-      - name: Audit AppImage directory
-        if: runner.os == 'Linux'
-        run: python3 scripts/audit-qt.py output/RhineMusicDatabase.AppDir
       - name: Upload distribution
         uses: actions/upload-artifact@v4
         with:
