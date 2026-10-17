@@ -470,6 +470,13 @@ function deployLinuxRuntime(qt, app, binary) {
             sources.push(destination);
         }
     }
+    // Wayland 是桌面 Linux 的主流会话；插件缺失时应用会退到 XWayland，
+    // 仍能运行但行为不原生。官方 Qt 包把它放在 linux_gcc_64 的附属归档里，
+    // 由 aqt 的 --autodesktop 安装，因此这里只提示，不阻断构建。
+    const platforms = fs.readdirSync(path.join(plugins, 'platforms'));
+    if (!platforms.some((name) => name.startsWith('libqwayland'))) {
+        console.warn('Qt Wayland platform plugin missing; Wayland sessions will fall back to XWayland');
+    }
     const qmlSource = linuxQtQmlDirectory(qt);
     const scanned = spawnSync(
         linuxQtTool(qt, 'qmlimportscanner'),

@@ -23,19 +23,16 @@ jobs:
           - name: macOS Apple Silicon
             os: macos-15
             qt-arch: clang_64
-            qt-modules: qtshadertools qtmultimedia
             node-platform: darwin-arm64
             artifact: macOS-arm64
           - name: Linux x86_64
             os: ubuntu-24.04
             qt-arch: linux_gcc_64
-            qt-modules: qtshadertools qtmultimedia qtwayland
             node-platform: linux-x64
             artifact: Linux-x64
           - name: Windows x64
             os: windows-2022
             qt-arch: win64_msvc2022_64
-            qt-modules: qtshadertools qtmultimedia
             node-platform: win-x64
             artifact: Windows-x64
     runs-on: ${{ matrix.os }}
@@ -74,9 +71,9 @@ jobs:
         with:
           version: '6.8.3'
           arch: ${{ matrix.qt-arch }}
-          # Wayland 客户端插件在官方包里是独立模块，Linux 桌面需要它才能原生运行；
-          # macOS 与 Windows 没有该模块，按平台追加。
-          modules: ${{ matrix.qt-modules }}
+          # Wayland 客户端插件 (libqwayland-*.so) 随 linux_gcc_64 基础包提供，
+          # 由 aqt 的 --autodesktop 一并安装，不能写进 --modules。
+          modules: qtshadertools qtmultimedia
           cache: true
       - name: Install build dependencies
         run: npm ci --ignore-scripts --no-audit --no-fund
