@@ -212,9 +212,9 @@ elseif(WIN32)
 elseif(UNIX)
     # Linux 复用同一份原生场景实现；凭据、协议交付和媒体集成由本平台文件补齐。
     target_sources(RhineCore PRIVATE Qt/src/PlatformLinux.cpp)
-    # AppImage 把 Qt 运行时放在程序上一级的 lib 目录；开发构建仍回落到系统 Qt。
-    set_target_properties(RhineMusicDatabase PROPERTIES INSTALL_RPATH "\$ORIGIN/../lib"
-                                                         BUILD_WITH_INSTALL_RPATH ON)
+    # 安装后的程序按 AppImage 前缀查找同级 Qt 运行时；构建树仍用 CMake 生成的 kit 路径，
+    # 否则 CI 中装在独立目录的 Qt 会在运行测试时找不到。
+    set_target_properties(RhineMusicDatabase PROPERTIES INSTALL_RPATH "\$ORIGIN/../lib")
     install(TARGETS RhineMusicDatabase RUNTIME DESTINATION bin)
 else()
     message(FATAL_ERROR "Supported desktop platforms are macOS, Linux and Windows")

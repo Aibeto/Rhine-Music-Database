@@ -56,13 +56,13 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
-      - name: Install Linux runtime packages
+      - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends \
-            cmake ninja-build libgl1-mesa-dev libxkbcommon-dev \
-            libxcb-cursor0 libxkbcommon-x11-0 libfuse2
+            cmake ninja-build file libgl1-mesa-dev libxkbcommon-dev \
+            libxkbcommon-x11-0 libxcb-cursor0 libfuse2
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.3'
@@ -101,6 +101,7 @@ jobs:
             echo "RHINE_NODE_BINARY=$RUNNER_TEMP/$distribution/bin/node" >> "$GITHUB_ENV"
             echo "RHINE_NODE_LICENSE=$RUNNER_TEMP/$distribution/LICENSE" >> "$GITHUB_ENV"
           fi
+      # appimagetool 由构建脚本按锁定版本自动下载并校验 SHA256，无需预装。
       - name: Build and deploy
         run: npm run build
         env:

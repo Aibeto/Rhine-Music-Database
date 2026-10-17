@@ -367,7 +367,13 @@ function linuxQtLibraryDirectory(binary) {
  * 系统 Qt 的前缀是 /usr，插件和 QML 模块在 /usr/lib/qt6 下，统一由 qmake 给出。
  */
 function linuxQtQuery(qt, key) {
-    for (const command of [path.join(qt, 'bin/qmake6'), 'qmake6', 'qmake']) {
+    // 官方 Qt 包通常只装 qmake 而没有 qmake6；只要 kit 自带 qmake 就只用它，
+    // 否则会把系统 Qt 的路径混进来，导致打包版本与编译版本不一致。
+    const kit = [path.join(qt, 'bin/qmake6'), path.join(qt, 'bin/qmake')].filter((file) =>
+        fs.existsSync(file),
+    );
+    const commands = kit.length ? kit : ['qmake6', 'qmake'];
+    for (const command of commands) {
         const result = spawnSync(command, ['-query', key], {
             encoding: 'utf8',
         });
@@ -380,6 +386,23 @@ function linuxQtQuery(qt, key) {
 
 function linuxQtQmlDirectory(qt) {
     return linuxQtQuery(qt, 'QT_INSTALL_QML');
+}
+
+/**
+ * 定位 Qt 自带工具
+ * 优先使用 kit 自己的 bin 目录，避免 PATH 中混入其他 Qt 版本或被裁剪掉的工具。
+ */
+function linuxQtTool(qt, name) {
+    for (const candidate of [path.join(linuxQtQuery(qt, 'QT_INSTALL_BINS'), name), name]) {
+        const probe = spawnSync(candidate, ['-help'], {
+            encoding: 'utf8',
+        });
+        // qmlimportscanner 的 -help 也会返回非零，能启动即视为可用。
+        if (!probe.error) {
+            return candidate;
+        }
+    }
+    throw new Error(`Cannot locate the Qt tool ${name}`);
 }
 /**
  * 复制插件、QML 模块与 ELF 依赖闭包
@@ -427,18 +450,32 @@ function deployLinuxRuntime(qt, app, binary) {
     }
     const qmlSource = linuxQtQmlDirectory(qt);
     const scanned = spawnSync(
-        'qmlimportscanner',
-        ['-rootPath', path.join(root, 'Qt/qml'), '-importPath', qmlSource],
+        linuxQtTool(qt, 'qmlimportscanner'),
+        [
+            '-rootPath',
+            path.join(root, 'Qt/qml'),
+            '-importPath',
+            qmlSource,
+            '-importPath',
+            path.join(root, 'Qt/qml'),
+        ],
         {
             encoding: 'utf8',
+            maxBuffer: 64 * 1024 * 1024,
         },
     );
     if (scanned.status !== 0) {
-        throw new Error('Cannot scan QML imports');
+        // 保留工具自身输出，构建机缺模块时能直接看出缺哪一个。
+        const detail = `${scanned.stderr || ''}${scanned.stdout || ''}`
+            .trim()
+            .split('\n')
+            .slice(-5)
+            .join('\n');
+        throw new Error(`Cannot scan QML imports${detail ? `: ${detail}` : ''}`);
     }
     const modules = new Set();
     for (const entry of JSON.parse(scanned.stdout.replace(/^[^{[]*/, ''))) {
-        if (entry.path && entry.path.startsWith(qmlSource + '/')) {
+        if (entry.path && entry.path.startsWith(qmlSource + path.sep)) {
             modules.add(path.relative(qmlSource, entry.path));
         }
     }
@@ -490,15 +527,65 @@ function deployLinuxRuntime(qt, app, binary) {
  * 生成 AppImage
  * 桌面条目、图标与 AppRun 位于 AppDir 根目录，运行库按前缀目录布局。
  */
+// 打包工具按官方发行版锁定，构建机不需要预装。
+const appImageToolVersion = '1.9.1';
+const appImageToolChecksums = {
+    x86_64: 'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0',
+    aarch64: '',
+};
+
+/**
+ * 取得可用的 appimagetool
+ * 优先使用 APPIMAGE_TOOL 指定的可执行文件，其次系统 PATH，最后下载锁定版本。
+ */
+function resolveAppImageTool(architecture) {
+    if (process.env.APPIMAGE_TOOL) {
+        return process.env.APPIMAGE_TOOL;
+    }
+    const system = spawnSync('appimagetool', ['--version'], {
+        encoding: 'utf8',
+    });
+    if (!system.error) {
+        return 'appimagetool';
+    }
+    const expected = appImageToolChecksums[architecture];
+    if (!expected) {
+        throw new Error(
+            `Install appimagetool or set APPIMAGE_TOOL for ${architecture}; no pinned checksum is recorded`,
+        );
+    }
+    const directory = path.join('output', 'appimagetool');
+    const tool = path.join(directory, `appimagetool-${architecture}.AppImage`);
+    if (!fs.existsSync(tool)) {
+        fs.mkdirSync(directory, {
+            recursive: true,
+        });
+        const url =
+            `https://github.com/AppImage/appimagetool/releases/download/${appImageToolVersion}` +
+            `/appimagetool-${architecture}.AppImage`;
+        run('curl', ['--fail', '--location', '--retry', '3', '--output', tool, url]);
+        const digest = spawnSync('sha256sum', [tool], {
+            encoding: 'utf8',
+        }).stdout.split(' ')[0];
+        if (digest !== expected) {
+            fs.rmSync(tool, {
+                force: true,
+            });
+            throw new Error(`appimagetool checksum mismatch: ${digest}`);
+        }
+        fs.chmodSync(tool, 0o755);
+    }
+    return tool;
+}
+
 function packageAppImage(app) {
-    const tool = process.env.APPIMAGE_TOOL || 'appimagetool';
     const architecture = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
     const image = path.resolve(`output/RhineMusicDatabase-Linux-${architecture}.AppImage`);
     fs.rmSync(image, {
         force: true,
     });
     // 无 FUSE 的机器（容器、CI）也能打包；有 FUSE 时行为一致。
-    run(tool, ['--appimage-extract-and-run', app, image], {
+    run(resolveAppImageTool(architecture), ['--appimage-extract-and-run', app, image], {
         ARCH: architecture,
     });
     return image;
@@ -570,10 +657,8 @@ function deployApp(qt, config, existingBundle = '') {
         });
     } else if (linux) {
         // AppImage 使用带前缀的 AppDir；程序与资源同目录，便于沿用现有资源查找顺序。
-        fs.mkdirSync(path.join(app, 'usr/bin'), {
-            recursive: true,
-        });
-        fs.copyFileSync('output/qt-build/RhineMusicDatabase', path.join(app, 'usr/bin/RhineMusicDatabase'));
+        // 走安装规则而非直接复制构建产物，才能带上相对 $ORIGIN 的 RPATH。
+        run('cmake', ['--install', 'output/qt-build', '--prefix', path.join(app, 'usr')]);
         fs.chmodSync(path.join(app, 'usr/bin/RhineMusicDatabase'), 0o755);
     } else if (!mac) {
         fs.mkdirSync(app, {
