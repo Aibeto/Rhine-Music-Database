@@ -25,6 +25,7 @@ for (const script of [
     'Qt/tests/api-contract.mjs',
     'Qt/tests/native-client.mjs',
     'Qt/tests/qq-state.mjs',
+    'Qt/tests/qq-upgrade.mjs',
     'Qt/tests/kugou-state.mjs',
     'Qt/tests/lyrics-format.mjs',
     'Qt/tests/kugou-device.cjs',

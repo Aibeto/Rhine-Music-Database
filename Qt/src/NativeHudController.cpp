@@ -337,6 +337,10 @@ void NativeHud::action(QString value) {
         } else if (name == "item") {
             discover.open(parts.value(2).toInt());
             closeModal();
+        } else if (name == "area" && music.provider == "qq") {
+            listOffset = 0;
+            discover.newSongArea = parts.value(2);
+            discover.load("new-songs");
         } else if (name == "category") {
             listOffset = 0;
             discover.category = decode(parts.value(2));
@@ -424,8 +428,11 @@ void NativeHud::action(QString value) {
         music.player.alternative = !music.player.alternative;
         m_host->setPreference("alternate-source", music.player.alternative ? "on" : "off");
     } else if (value == "quality") {
-        music.player.quality =
-            cycle({"standard", "higher", "exhigh", "lossless", "hires", "jymaster"}, music.player.quality);
+        const QStringList qualities =
+            music.provider == "qq"
+                ? QStringList{"best", "standard", "exhigh", "lossless", "ape"}
+                : QStringList{"standard", "higher", "exhigh", "lossless", "hires", "jymaster"};
+        music.player.quality = cycle(qualities, music.player.quality);
         m_host->setPreference("quality", music.player.quality);
     } else if (value == "theme") {
         themeMode = cycle({"light", "dark", "system"}, themeMode);

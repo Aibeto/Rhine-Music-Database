@@ -208,6 +208,7 @@ void MusicLibrary::showDirectoryInfo() {
     ++m_selectionGeneration;
     directoryInfo = true;
     current = directory->item;
+    loadSubscriptionStatus(current);
     detailLoading = false;
     tracks = directory->songs;
     trackIDs = directory->ids;

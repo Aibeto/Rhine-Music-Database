@@ -77,6 +77,7 @@ bool runNativeMusicChecks(const QString &root) {
     int nativeSearches = 0;
     int details = 0;
     int mutations = 0;
+    bool rejectQQWrite = false;
     host.fixture = [&](QString route, QJsonObject parameters) {
         const auto args = parameters["args"].toArray();
         QJsonValue value;
@@ -110,8 +111,17 @@ bool runNativeMusicChecks(const QString &root) {
             }
         } else if (route.endsWith("/wiki")) {
             value = "本地百科";
-        } else if (route.endsWith("/playback")) {
-            value = QJsonObject{{"url", audioURL}};
+        } else if (route.endsWith("/playback") || route.endsWith("/preview")) {
+            value = QJsonObject{{"url", audioURL}, {"preview", route.endsWith("/preview")}};
+        } else if (route.endsWith("/mutate")) {
+            ++mutations;
+            if (rejectQQWrite) {
+                return QJsonObject{{"body", QJsonObject{{"code", 502},
+                                                        {"message", "写入未确认"},
+                                                        {"writeAttempted", true},
+                                                        {"retryable", false}}}};
+            }
+            value = QJsonObject{{"liked", true}, {"subscribed", true}};
         } else if (route.endsWith("/account")) {
             value = QJsonArray{"42", "本地账号"};
         } else if (route.endsWith("/likedIDs")) {
@@ -250,6 +260,35 @@ bool runNativeMusicChecks(const QString &root) {
     library.switchProvider("qq");
     check(library.provider == "qq" && library.player.queue.isEmpty() && library.directory == nullptr,
           "provider switch clears old native state");
+    library.uid = "42";
+    auto qqSong = song("songMID");
+    qqSong["provider"] = "qq";
+    qqSong["key"] = "qq:song:songMID";
+    const auto qqBefore = mutations;
+    library.like(qqSong);
+    check(waitFor([&] { return !library.writeLoading; }), "QQ verified like completes");
+    check(MusicData::indexOfId(library.lists[1], "songMID") >= 0 && mutations == qqBefore + 1,
+          "QQ like accepts server result without fetching unsupported likedIDs");
+    rejectQQWrite = true;
+    library.like(qqSong);
+    check(waitFor([&] { return !library.writeLoading; }), "QQ uncertain write completes once");
+    check(MusicData::indexOfId(library.lists[1], "songMID") >= 0 && mutations == qqBefore + 2,
+          "QQ uncertain write does not retry or change local heart");
+    library.capabilities = {{"mutations", QJsonObject{{"likeSong", false}}}};
+    library.like(qqSong);
+    check(mutations == qqBefore + 2 && !library.writeLoading, "QQ closed capability blocks mutation");
+    library.capabilities = {};
+    auto ordinary = MusicData::item("playlist", "70001", "QQ 自建", "", "qq");
+    ordinary["creatorID"] = "42";
+    ordinary["owned"] = true;
+    ordinary["dirId"] = "1";
+    check(library.canEditPlaylist(ordinary), "QQ ordinary owned playlist editable");
+    ordinary["dirId"] = "201";
+    check(!library.canEditPlaylist(ordinary), "QQ system liked directory is not ordinary playlist");
+    library.player.play(qqSong, std::nullopt, std::nullopt, true);
+    check(waitFor([&] { return !library.player.loading; }) && library.player.trial,
+          "QQ explicit preview is marked as trial");
+    library.player.stop();
     library.switchProvider("kugou", "lite");
     check(library.kugouEdition == "lite" && library.accountKey() == "kugou-lite",
           "Kugou editions retain separate account keys");

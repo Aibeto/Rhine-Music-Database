@@ -1,6 +1,50 @@
 // 发布包测试使用本地 HTTP 响应，保持真实上游协议模块参与执行。
 const path = require('node:path');
 const bridge = process.env.RHINE_TEST_BRIDGE;
+const originalFetch = global.fetch;
+// 新的共用 QQ 接口使用 Fetch；本地桥接 HTTP 仍走真实回环服务。
+global.fetch = async (input, init) => {
+    const request = new Request(input, init);
+    if (new URL(request.url).hostname !== 'u.y.qq.com') {
+        return originalFetch(input, init);
+    }
+    const raw =
+        request.method === 'POST' ? await request.text() : new URL(request.url).searchParams.get('data');
+    const payload = JSON.parse(raw || '{}');
+    const response = { code: 0 };
+    for (const [key, rpc] of Object.entries(payload)) {
+        if (!rpc?.method) {
+            continue;
+        }
+        if (rpc.method === 'DoSearchForQQMusicLite') {
+            const keys = { 0: 'item_song', 1: 'singer', 2: 'item_album', 3: 'item_songlist' };
+            const type = rpc.param.search_type;
+            const entries = {
+                0: {
+                    mid: 'fixtureMID',
+                    id: 42,
+                    type: 0,
+                    name: 'QQ fixture',
+                    singer: [],
+                    album: { mid: 'albumMID' },
+                },
+                1: { singerMID: 'singerMID', singerName: 'QQ fixture artist' },
+                2: { albummid: 'albumMID', name: 'QQ fixture album' },
+                3: { dissid: '70001', dissname: 'QQ fixture playlist' },
+            };
+            response[key] = {
+                code: 0,
+                data: {
+                    meta: { sum: 1, curpage: 1, nextpage: -1, ret: 0 },
+                    body: { [keys[type]]: [entries[type]] },
+                },
+            };
+        } else {
+            throw new Error('Unexpected QQ Fetch operation: ' + rpc.method);
+        }
+    }
+    return Response.json(response);
+};
 const axios = require(
     require.resolve('axios', {
         paths: [bridge],

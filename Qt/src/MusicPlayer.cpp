@@ -13,7 +13,8 @@ MusicPlayer::MusicPlayer(Host *host, MusicApi *api, QObject *parent)
     : QObject(parent), lyrics(host), m_host(host), m_api(api) {
     state = {{"playing", false}, {"position", 0}, {"duration", 0}, {"volume", 0.7}, {"seekable", false}};
     quality = host->preference("quality");
-    if (!QStringList{"standard", "higher", "exhigh", "lossless", "hires", "jymaster"}.contains(quality)) {
+    if (!QStringList{"standard", "higher", "exhigh", "lossless", "hires", "jymaster", "best", "ape"}.contains(
+            quality)) {
         quality = "exhigh";
     }
     alternative = host->preference("alternate-source") == "on";
@@ -53,7 +54,8 @@ void MusicPlayer::enqueue(const QJsonObject &track, bool next) {
 }
 
 /** 停止旧音源并推进代数，先完成元数据再交付播放；迟到的地址不能恢复旧曲目。 */
-void MusicPlayer::play(QJsonObject track, std::optional<QJsonArray> source, std::optional<int> queueIndex) {
+void MusicPlayer::play(QJsonObject track, std::optional<QJsonArray> source, std::optional<int> queueIndex,
+                       bool preview) {
     if (track["kind"] != "song") {
         return;
     }
@@ -82,6 +84,7 @@ void MusicPlayer::play(QJsonObject track, std::optional<QJsonArray> source, std:
     }
     index = queueIndex.value_or(selected);
     const auto generation = ++m_generation;
+    previewRequested = preview && m_api->provider == "qq";
     m_host->mediaControl("stop");
     current = track;
     lyrics.clear();
@@ -124,8 +127,10 @@ void MusicPlayer::prepare(QJsonObject track, quint64 generation) {
     }
     emit trackSelected(track);
     lyrics.load(track);
+    const auto qqQuality = quality == "best" || quality == "ape";
+    const auto effectiveQuality = qqQuality && m_api->provider != "qq" ? "lossless" : quality;
     m_api->call(
-        "playback", {track, quality, alternative},
+        previewRequested ? "preview" : "playback", {track, effectiveQuality, alternative},
         [this, track](MusicReply result) {
             if (!result.ok()) {
                 fail(result.error);
@@ -157,11 +162,16 @@ void MusicPlayer::prepare(QJsonObject track, quint64 generation) {
             m_host->setPreference("play-history",
                                   QString::fromUtf8(QJsonDocument(history).toJson(QJsonDocument::Compact)));
             const auto preview = audio["freeTrialInfo"];
-            trial = preview.isObject() || preview.isArray() ||
+            trial = audio["preview"].toBool() || preview.isObject() || preview.isArray() ||
                     (preview.isString() && !preview.toString().isEmpty() && preview.toString() != "null") ||
                     (preview.isBool() && preview.toBool()) || (preview.isDouble() && preview.toDouble() != 0);
             status = trial ? QStringLiteral("当前音源为试听片段")
                            : QStringLiteral("正在播放：") + track["title"].toString();
+            const QHash<QString, QString> qualities{{"128", "标准"}, {"320", "高品质"}, {"flac", "无损"}};
+            if (!trial && qualities.contains(audio["quality"].toString())) {
+                status += QStringLiteral("（") + qualities.value(audio["quality"].toString()) +
+                          QStringLiteral("）");
+            }
             if (!audio["qualityFallback"].toString().isEmpty()) {
                 status += QStringLiteral("（已切换为") + audio["qualityFallback"].toString() +
                           QStringLiteral("音质）");

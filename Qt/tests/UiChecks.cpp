@@ -517,7 +517,23 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     hud.openModal("discover");
     music.discover->items = MusicData::slice(songs, 0, 6);
     refresh();
+    check(hasAction("discover:tab:daily") && hasAction("discover:tab:guess") &&
+              hasAction("discover:tab:new-songs"),
+          "QQ daily, guess and new songs are separate entries");
     capture("qq-discover");
+    hud.openModal("search");
+    refresh();
+    check(hasAction("music:kind:0") && hasAction("music:kind:1") && hasAction("music:kind:2") &&
+              hasAction("music:kind:3"),
+          "QQ supports all four search filters");
+    capture("qq-search");
+    hud.closeModal();
+    music.current = songs.first().toObject();
+    backend.scene.review("detail");
+    refresh();
+    check(hasAction("music:like") && hasAction("music:add-to-playlist") && hasAction("music:preview"),
+          "QQ heart, playlist and explicit preview controls are visible");
+    capture("qq-detail");
     hud.openModal("login");
     music.loginMethod = "wechat";
     refresh();

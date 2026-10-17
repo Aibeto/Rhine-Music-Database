@@ -83,7 +83,7 @@ function prepareResources() {
     });
     const bridgePackages = {
         '@neteasecloudmusicapienhanced/api': '4.41.1',
-        '@yakult-green-tea/qq-music-api': '3.1.5',
+        '@yakult-green-tea/qq-music-api': '3.3.1',
         kugoumusicapi: '1.6.2',
     };
     if (

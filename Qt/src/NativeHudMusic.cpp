@@ -145,6 +145,8 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         pageResults(name == "page-prev" ? -1 : 1);
     } else if (name == "play") {
         music.play();
+    } else if (name == "preview" && music.provider == "qq") {
+        music.player.play(music.current, std::nullopt, std::nullopt, true);
     } else if (name == "play-next" || name == "enqueue") {
         music.player.enqueue(music.current, name == "play-next");
     } else if (name == "play-loaded") {
@@ -200,6 +202,8 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         if (QStringList{"qr", "wechat"}.contains(music.loginMethod)) {
             music.startLogin();
         }
+    } else if (name == "refresh-personal") {
+        music.refreshPersonal(musicCollection);
     } else if (name == "like" || name == "like-current") {
         music.like(name == "like" ? QJsonObject() : music.player.current);
     } else if (name == "subscribe") {
@@ -209,7 +213,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         formPID.clear();
         openModal("playlist-form");
     } else if (name == "delete-playlist") {
-        if (!music.directory || music.uid.isEmpty() || music.directory->item["creatorID"] != music.uid) {
+        if (!music.directory || !music.canEditPlaylist(music.directory->item)) {
             return;
         }
         const auto item = music.directory->item;
@@ -237,7 +241,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         };
         openModal("confirm");
     } else if (name == "rename-playlist") {
-        if (music.directory && music.directory->item["creatorID"] == music.uid) {
+        if (music.directory && music.canEditPlaylist(music.directory->item)) {
             formKind = "rename";
             formPID = music.directory->item["id"].toString();
             openModal("playlist-form");

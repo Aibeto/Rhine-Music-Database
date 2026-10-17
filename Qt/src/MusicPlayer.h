@@ -8,7 +8,7 @@ class MusicPlayer : public QObject {
     MusicPlayer(Host *host, MusicApi *api, QObject *parent = nullptr);
     void enqueue(const QJsonObject &track, bool next = false);
     void play(QJsonObject track, std::optional<QJsonArray> source = std::nullopt,
-              std::optional<int> queueIndex = std::nullopt);
+              std::optional<int> queueIndex = std::nullopt, bool preview = false);
     void tick(double time, bool force = false);
     void toggle();
     void seek(double fraction);
@@ -32,6 +32,7 @@ class MusicPlayer : public QObject {
     QString status;
     QString quality;
     bool alternative = false;
+    bool previewRequested = false;
     std::function<void()> onEnd;
 
   signals:

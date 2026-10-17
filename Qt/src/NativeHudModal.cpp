@@ -11,7 +11,7 @@ struct Provider {
 };
 const QVector<Provider> providers{
     {"netease", "网易云音乐", "NETEASE", "搜索 · 个人音乐 · 推荐 · 播放 · 歌单编辑"},
-    {"qq", "QQ 音乐", "QQ MUSIC", "歌曲搜索 · 个人音乐 · 首页推荐 · 播放"},
+    {"qq", "QQ 音乐", "QQ MUSIC", "全类搜索 · 每日推荐 · 个人音乐 · 歌单编辑"},
     {"kugou", "酷狗音乐", "KUGOU", "标准版 / 概念版 · 个人歌单 · 推荐与榜单 · 播放"}};
 
 QString modalTitle(const QString &modal, const MusicLibrary &music) {
@@ -85,13 +85,21 @@ void NativeHud::modalDraw(double width) {
         platformPanel(x, y, usable);
     } else if (modal == "confirm") {
         limited(confirmTitle, x + 53, y + 260, 24, usable - 106, "demibold");
-        text("此操作将同步至网易云。", x + 53, y + 330, 16);
+        text("此操作将同步至" + music.providerName() + "。", x + 53, y + 330, 16);
         button("确认删除", x + 53, y + 450, 180, 45, "confirm:yes", 16);
         button("取消", x + 270, y + 450, 150, 45, "close-modal", 16);
     } else if (modal == "playlist-picker") {
         text("选择我的歌单", x + 53, y + 240, 18);
+        if (music.provider == "qq" &&
+            std::none_of(music.lists[2].begin(), music.lists[2].end(),
+                         [&music](QJsonValue value) { return music.canEditPlaylist(value.toObject()); })) {
+            text("暂无可编辑的自建普通歌单，请先创建歌单。", x + 53, y + 320, 16);
+        }
         for (int index = 0; index < 7 && listOffset + index < music.lists[2].size(); ++index) {
             const auto value = music.lists[2].at(listOffset + index).toObject();
+            if (music.provider == "qq" && !music.canEditPlaylist(value)) {
+                continue;
+            }
             button(fit(value["title"].toString(), 18, usable - 106), x + 53, y + 290 + index * 60,
                    usable - 106, 52, "music:playlist-pick:" + value["id"].toString(), 18);
         }
@@ -100,7 +108,7 @@ void NativeHud::modalDraw(double width) {
         limited(music.status, x + 53, y + 775, 12, usable - 420);
     } else if (modal == "playlist-form") {
         text(formKind == "create" ? "歌单名称" : "新歌单名称", x + 53, y + 240, 15);
-        text("按 ENTER 提交", x + 53, y + 420, 12);
+        text(music.provider == "qq" ? "1–20 字 / 按 ENTER 提交" : "按 ENTER 提交", x + 53, y + 420, 12);
         limited(music.status, x + 53, y + 775, 12, usable - 106);
     } else if (modal == "discover") {
         discoverPanel(x, y, usable);
@@ -149,7 +157,7 @@ void NativeHud::platformPanel(double x, double y, double width) {
     platformChoices(x + 53, y + 258, width - 106, true);
     rule(x + 53, y + 490, width - 106, 0.2);
     text("切换平台会停止当前播放，各平台账号与个人音乐独立保存。", x + 53, y + 520, 15);
-    text("网易云保留歌单编辑；QQ 与酷狗先提供读取和播放。", x + 53, y + 558, 15);
+    text("网易云与 QQ 支持歌单编辑；酷狗支持读取与播放。", x + 53, y + 558, 15);
     button("账号登录 / " + m_music->providerName(), x + 53, y + 660, 330, 48, "music:login", 16);
 }
 void NativeHud::settings(double x, double y, double width) {
@@ -163,11 +171,16 @@ void NativeHud::settings(double x, double y, double width) {
     button("切换平台 ▾", left + usable - 235, y + 225, 225, 36, "provider", 13);
     button(music.uid.isEmpty() ? "登录 / " + music.providerName() : "退出登录 / " + music.nickname, left,
            y + 290, 340, 38, music.uid.isEmpty() ? "music:login" : "music:logout", 13);
-    limited("各平台账号独立保存", left + 365, y + 301, 12, usable - 365);
+    const QHash<QString, QString> memberships{
+        {"free", "免费账号"}, {"green", "绿钻会员"}, {"super", "超级会员"}, {"unknown", "会员状态未知"}};
+    const auto accountNote = music.provider == "qq" && !music.uid.isEmpty()
+                                 ? memberships.value(music.vipLevel, "会员状态未知")
+                                 : QString("各平台账号独立保存");
+    limited(accountNote, left + 365, y + 301, 12, usable - 365);
     text("TERMINAL PREFERENCES / 终端偏好", left, y + 348, 12, "demibold");
-    static const QHash<QString, QString> qualities{{"standard", "标准"}, {"higher", "较高"},
-                                                   {"exhigh", "极高"},   {"lossless", "无损"},
-                                                   {"hires", "Hi-Res"},  {"jymaster", "母带"}};
+    static const QHash<QString, QString> qualities{
+        {"standard", "标准"}, {"higher", "较高"},   {"exhigh", "极高"},       {"lossless", "无损"},
+        {"hires", "Hi-Res"},  {"jymaster", "母带"}, {"best", "自动最高可用"}, {"ape", "APE 无损"}};
     QString theme = dark ? "暗色" : "亮色";
     if (themeMode == "system") {
         theme = "跟随系统";

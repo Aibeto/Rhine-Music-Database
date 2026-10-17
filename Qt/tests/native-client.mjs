@@ -7,6 +7,16 @@ const message = (provider, operation, args, cookies = {}) => ({
     cookies,
 });
 
+// 上游在失败请求期间续期的会话仍须交还私有 Host，不能因界面报错丢失新凭据。
+const renewed = [{ token: 'opaque-fixture', credential: { musickey: 'renewed-private' } }];
+const rejectedSearch = await dispatch(message('qq', 'search', ['本地', 'song', 0]), async () => ({
+    body: { code: 502, errorKey: 'search.rejected', message: '搜索被拒绝' },
+    qqSessions: renewed,
+}));
+assert.deepEqual(rejectedSearch.qqSessions, renewed);
+assert.equal(rejectedSearch.body.errorKey, 'search.rejected');
+assert.equal(JSON.stringify(rejectedSearch.body).includes('renewed-private'), false);
+
 const netease = await dispatch(message('netease', 'search', ['本地', 'song', 0]), async (request) => {
     assert.equal(request.route, '/search');
     assert.equal(request.params.type, 1);

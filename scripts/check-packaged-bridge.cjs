@@ -127,8 +127,8 @@ async function main() {
         const savedDevice = deviceContext.createAndroidDevice();
         const qq = await request(
             'qq',
-            '/qq/getSearchByKey',
-            { key: 'fixture' },
+            '/qq/search',
+            { keyword: 'fixture', type: 'song', page: 1, limit: 20 },
             {
                 qqmusic_session: 'fixture-session',
                 __qqSessions: [
@@ -137,12 +137,31 @@ async function main() {
                         token: 'fixture-session',
                         credential: { musicid: '42', musickey: 'fixture-key', loginType: 6 },
                         device: savedDevice,
-                        expiresAt: Date.now() + 3600000,
+                        expiresAt: Date.now() + 72 * 3600000,
                     },
                 ],
             },
         );
-        assert.equal(qq.body.response.data.song.list[0].mid, 'fixtureMID');
+        assert.equal(qq.body.items[0].mid, 'fixtureMID');
+        for (const [type, field, id] of [
+            ['album', 'albummid', 'albumMID'],
+            ['playlist', 'dissid', '70001'],
+            ['singer', 'singerMID', 'singerMID'],
+        ]) {
+            const result = await request('qq-search-' + type, '/qq/search', { keyword: 'fixture', type });
+            assert.equal(result.body.items[0][field], id);
+        }
+        const features = await request('qq-capabilities', '/qq/login/channels');
+        assert.equal(features.body.data.features.mutations.likeSong, true);
+        assert.equal(features.body.data.features.mutations.subscribeAlbum, true);
+        // 缺少必填正文应由 POST 的 schema 拒绝，而不是被错误地作为 GET 返回 405。
+        const invalidWrite = await request(
+            'qq-post',
+            '/qq/user/song/like',
+            { song: {} },
+            { qqmusic_session: 'fixture-session' },
+        );
+        assert.equal(invalidWrite.body.code, 400);
         const deviceRecord = JSON.parse(fs.readFileSync(path.join(temp, 'qq-device.json')));
         assert.deepEqual(deviceRecord.device, savedDevice);
         assert.equal(deviceRecord.device.musickey, undefined);

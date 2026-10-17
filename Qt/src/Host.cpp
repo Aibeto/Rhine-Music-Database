@@ -128,6 +128,12 @@ int Host::lifetime(const QString &route) {
         return route.startsWith("/kugou/user/") ? 60 : 900;
     }
     if (route.startsWith("/qq/")) {
+        if (QStringList{"/qq/user/song/like", "/qq/user/album/subscribe", "/qq/user/playlist/subscribe",
+                        "/qq/user/playlist/tracks", "/qq/user/playlist/create", "/qq/user/playlist/rename",
+                        "/qq/user/playlist/delete", "/qq/user/subscription-status"}
+                .contains(route)) {
+            return 0;
+        }
         if (route.startsWith("/qq/login/") || route == "/qq/logout" || route == "/qq/getMusicPlay") {
             return 0;
         }
@@ -182,7 +188,7 @@ void Host::requestJson(QString route, QJsonObject values, JsonReply callback) {
     const bool cached = lifetime(route) > 0;
     const auto key =
         cached
-            ? cacheKey("enhanced-4.41.1/qq-3.1.5/kugou-ba3645f2/" + scope + QString::number(metadataRevision),
+            ? cacheKey("enhanced-4.41.1/qq-3.3.1/kugou-ba3645f2/" + scope + QString::number(metadataRevision),
                        route, values)
             : QUuid::createUuid().toString();
     const bool disk = !offline && scope == "guest" &&

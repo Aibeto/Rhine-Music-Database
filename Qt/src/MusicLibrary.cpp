@@ -188,6 +188,7 @@ void MusicLibrary::choose(QJsonObject input, bool containerDetails, std::optiona
     }
     current = details.value(input["key"].toString(), input);
     loadCover(current);
+    loadSubscriptionStatus(current);
     detailLoading = true;
     if (input["kind"] != "song" && !containerDetails) {
         detailLoading = false;
@@ -309,10 +310,11 @@ void MusicLibrary::search(QString text, QString kind, bool more) {
         (!lists[0].isEmpty() || searchLoading)) {
         return;
     }
-    if (query.isEmpty() || query.toUcs4().size() > 100) {
+    const auto maximum = provider == "qq" ? 60 : 100;
+    if (query.isEmpty() || query.toUcs4().size() > maximum) {
         ++m_generation;
         searchLoading = false;
-        status = QStringLiteral("请输入 1–100 字关键词");
+        status = QStringLiteral("请输入 1–") + QString::number(maximum) + QStringLiteral(" 字关键词");
         changed();
         return;
     }
@@ -435,6 +437,32 @@ void MusicLibrary::showSource(int lane) {
         }
     }
     changed();
+}
+
+/** 串行读回当前 QQ 个人库，清理旧缓存与分页游标。 */
+void MusicLibrary::refreshPersonal(int lane) {
+    if (provider != "qq" || uid.isEmpty() || lane < 1 || lane > 4 || personalLoading || writeLoading ||
+        accountLoading) {
+        return;
+    }
+    host->invalidateMetadata();
+    const auto reset = [this](int source) {
+        lists[source] = {};
+        totals[source] = 0;
+        hasMore[source] = true;
+    };
+    reset(lane);
+    if (lane == 1) {
+        likedCursor = 0;
+        likedIDs.reset();
+    } else if (lane == 4) {
+        albumCursor = 0;
+    } else {
+        reset(2);
+        reset(3);
+        playlistCursor = 0;
+    }
+    loadMoreSource(lane);
 }
 
 void MusicLibrary::selectResult(int index, int lane, bool open) {
@@ -632,6 +660,10 @@ void MusicLibrary::loadMoreSource(int lane) {
                 }
             }
             completePersonal(lane);
+            if (page["incomplete"].toBool()) {
+                status = QStringLiteral("已读取部分歌单，上游未提供可靠的后续页，请稍后刷新");
+                changed();
+            }
         },
         valid(token, &m_accountGeneration));
 }

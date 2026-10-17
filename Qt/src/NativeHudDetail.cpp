@@ -79,10 +79,19 @@ void NativeHud::detail(double width, double opacity) {
         limited(line, x, 305 + index * 40, 32, usable, "bold");
     }
     limited(item["artist"].toString(), x, 394, 19, usable, "demibold");
-    if (music.editable()) {
-        const bool liked = (music.likedIDs && MusicData::indexOf(*music.likedIDs, item["id"]) >= 0) ||
-                           MusicData::indexOfId(music.lists[1], item["id"].toString()) >= 0;
-        actionButton(liked ? "♥ 已喜欢" : "♡ 喜欢", x, 436, buttonWidth, "music:like");
+    if (music.canMutate("/like")) {
+        bool liked = (music.likedIDs && MusicData::indexOf(*music.likedIDs, item["id"]) >= 0) ||
+                     MusicData::indexOfId(music.lists[1], item["id"].toString()) >= 0;
+        QString label = liked ? "♥ 已喜欢" : "♡ 喜欢";
+        if (music.provider == "qq") {
+            const auto state = music.subscriptionStates.value(item["key"].toString(), "unknown");
+            liked = state == "subscribed";
+            label = liked ? "♥ 已喜欢" : "♡ 喜欢";
+            if (state == "unknown") {
+                label = "红心 / 核实后切换";
+            }
+        }
+        actionButton(label, x, 436, buttonWidth, "music:like");
         actionButton("加入歌单", x + buttonWidth + gap, 436, buttonWidth, "music:add-to-playlist");
     }
     if (!item["artists"].toArray().isEmpty()) {
@@ -139,8 +148,10 @@ void NativeHud::detail(double width, double opacity) {
     }
     actionButton(music.provider != "netease" ? music.providerName() + " ↗" : "官方客户端 ↗", x, 910,
                  buttonWidth, "music:official");
-    if (music.editable() && music.directory && !music.uid.isEmpty() &&
-        music.directory->item["creatorID"] == music.uid) {
+    if (music.provider == "qq") {
+        actionButton("试听片段", x + buttonWidth + gap, 910, buttonWidth, "music:preview");
+    }
+    if (music.directory && music.canEditPlaylist(music.directory->item)) {
         actionButton("从歌单移除", x + (buttonWidth + gap) * 2, 910, buttonWidth, "music:remove-track");
     }
     restore();
@@ -315,13 +326,24 @@ void NativeHud::container(double width, double opacity) {
     for (int index = 0; index < std::min(3, int(lines.size())); ++index) {
         text(lines.at(index), sx, coverSize + 550 + index * 22, 12);
     }
-    if (music.editable() && item["kind"] == "playlist" && item["creatorID"] == music.uid &&
-        !music.uid.isEmpty()) {
+    if (music.canEditPlaylist(item)) {
         button("修改名称", sx, 866, sideWidth / 2, 30, "music:rename-playlist", 12);
         button("删除歌单", sx + sideWidth / 2, 866, sideWidth / 2, 30, "music:delete-playlist", 12);
     }
-    if (music.editable()) {
-        button("收藏 / 取消", sx, 913, sideWidth / 2, 32, "music:subscribe", 12);
+    const auto subscribeRoute =
+        item["kind"] == "playlist" ? "/playlist/subscribe" : "/" + item["kind"].toString() + "/sub";
+    if (music.canMutate(subscribeRoute)) {
+        QString label = "收藏 / 取消";
+        if (music.provider == "qq") {
+            const auto state = music.subscriptionStates.value(item["key"].toString(), "unknown");
+            label = "收藏 / 核实";
+            if (state == "subscribed") {
+                label = "已收藏 / 取消";
+            } else if (state == "not-subscribed") {
+                label = "收藏";
+            }
+        }
+        button(label, sx, 913, sideWidth / 2, 32, "music:subscribe", 12);
     }
     button(music.providerName() + " ↗", sx + sideWidth / 2, 913, sideWidth / 2, 32, "music:source", 12);
     limited(item["title"].toString(), x, 279, 30, usable - 155, "bold");
