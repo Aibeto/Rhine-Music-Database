@@ -497,9 +497,13 @@ function deployLinuxRuntime(qt, app, binary) {
         }
     }
     for (const module of modules) {
-        fs.cpSync(path.join(qmlSource, module), path.join(app, 'usr/qml', module), {
+        const destination = path.join(app, 'usr/qml', module);
+        fs.cpSync(path.join(qmlSource, module), destination, {
             recursive: true,
         });
+        // QML 模块自带的插件同样引用 Qt 库（如 QuickControls2、QuickTemplates2），
+        // 只复制文件而不纳入依赖闭包，会留下启动后才暴露的缺库。
+        sources.push(...sharedObjects(destination));
     }
     // 插件自身也引用 Qt 与音视频库；与程序一起进入同一个依赖闭包。
     const deployed = new Set();
@@ -606,6 +610,23 @@ function packageAppImage(app) {
         ARCH: architecture,
     });
     return image;
+}
+
+/**
+ * 递归列出目录下的共享库
+ * 显式递归而不依赖 readdirSync 的 recursive 选项，兼容旧版 Node。
+ */
+function sharedObjects(directory) {
+    const found = [];
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+            found.push(...sharedObjects(full));
+        } else if (entry.name.endsWith('.so')) {
+            found.push(full);
+        }
+    }
+    return found;
 }
 
 /**
