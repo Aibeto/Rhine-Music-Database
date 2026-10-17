@@ -25,6 +25,11 @@ jobs:
             qt-arch: clang_64
             node-platform: darwin-arm64
             artifact: macOS-arm64
+          - name: Linux x86_64
+            os: ubuntu-24.04
+            qt-arch: linux_gcc_64
+            node-platform: linux-x64
+            artifact: Linux-x64
           - name: Windows x64
             os: windows-2022
             qt-arch: win64_msvc2022_64
@@ -51,6 +56,13 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+      - name: Install Linux runtime packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            cmake ninja-build libgl1-mesa-dev libxkbcommon-dev \
+            libxcb-cursor0 libxkbcommon-x11-0 libfuse2
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.8.3'
@@ -94,10 +106,17 @@ jobs:
         env:
           QT_ROOT: ${{ env.QT_ROOT_DIR }}
       - name: Create distribution ZIP
+        if: runner.os != 'Linux'
         run: npm run share
+      # AppImage 已由 npm run build 生成，发布步骤只做静态审计。
+      - name: Audit AppImage directory
+        if: runner.os == 'Linux'
+        run: python3 scripts/audit-qt.py output/RhineMusicDatabase.AppDir
       - name: Upload distribution
         uses: actions/upload-artifact@v4
         with:
           name: RHINE-MUSIC-DATABASE-${{ matrix.artifact }}
-          path: output/RhineMusicDatabase-*.zip
+          path: |
+            output/RhineMusicDatabase-*.zip
+            output/RhineMusicDatabase-*.AppImage
           if-no-files-found: error

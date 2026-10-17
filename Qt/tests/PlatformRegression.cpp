@@ -6,16 +6,21 @@
 #include <QGuiApplication>
 #include <QTemporaryDir>
 #include <QtMultimedia/private/qaudiodevice_p.h>
+#include <cstdio>
 #include <memory>
 #include <type_traits>
-#ifdef Q_OS_WIN
+#ifdef Q_OS_LINUX
+#include <sys/stat.h>
+#endif
+#if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
 #include "Host.h"
 #endif
 
 namespace {
 bool check(bool result, const char *message) {
     if (!result) {
-        qCritical() << message;
+        // 部分发行版默认过滤 Qt 日志类别，CTest 只看得到标准错误，因此直接写入。
+        std::fprintf(stderr, "%s\n", message);
     }
     return result;
 }
@@ -66,6 +71,19 @@ bool storageRegression(const QString &directory) {
     ok &= check(platformCredential() == credential, "DPAPI credential round trip");
     platformDeleteCredential();
     ok &= check(!QFile::exists(first + "/data/account.dpapi"), "Credential logout removes local file");
+#elif defined(Q_OS_LINUX)
+    const QByteArray credential("offline-credential-fixture");
+    ok &= check(platformSaveCredential(credential).isEmpty(), "Linux credential saved locally");
+    ok &= check(QFile::exists(first + "/data/account.credential"), "Credential file stays portable");
+    // 登录态只允许当前用户读写，命令行与备份工具不会意外外泄。
+    struct stat status {};
+    ok &= check(::stat(QFile::encodeName(first + "/data/account.credential").constData(), &status) == 0 &&
+                    (status.st_mode & 0777) == 0600,
+                "Linux credential file is owner-only");
+    ok &= check(platformCredential() == credential, "Linux credential round trip");
+    platformDeleteCredential();
+    ok &= check(!QFile::exists(first + "/data/account.credential"),
+                "Credential logout removes local file");
 #endif
     const auto second = directory + "/独立应用 B";
     ok &= check(AppStorage::initializePortable(second).isEmpty(), "Second portable application initialized");

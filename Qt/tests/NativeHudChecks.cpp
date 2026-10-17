@@ -117,7 +117,8 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs, const QString &fixt
                 hud.motion.set(true, 0, true);
                 const auto key = provider + ":" + panel + (dark ? ":dark" : ":light");
                 auto expected = references.value(key);
-#ifdef Q_OS_WIN
+#ifndef Q_OS_MACOS
+                // 固定帧以 macOS 的修饰键录制，其他平台渲染同一份动作时换成 Ctrl。
                 auto commands = expected["commands"].toArray();
                 for (int index = 0; index < commands.size(); ++index) {
                     auto command = commands.at(index).toArray();

@@ -1200,6 +1200,8 @@ QQuickRhiItemRenderer *RhiScene::createRenderer() {
  */
 QImage renderReference(const QString &root, const QJsonObject &frame, const QJsonObject &item,
                        const QImage &cover, QSize size, const SceneDrawBuffers &buffers, quint64 *drawCalls) {
+    // 离屏表面先声明，析构顺序才能晚于 QRhi：GL 后端在析构时会切回上下文。
+    std::unique_ptr<QOffscreenSurface> surface;
     std::unique_ptr<QRhi> rhi;
 #ifdef Q_OS_MACOS
     QRhiMetalInitParams params;
@@ -1211,8 +1213,16 @@ QImage renderReference(const QString &root, const QJsonObject &frame, const QJso
                                ? QRhi::PreferSoftwareRenderer
                                : QRhi::Flags{}));
 #else
-    std::unique_ptr<QOffscreenSurface> surface(QRhiGles2InitParams::newFallbackSurface());
+    // 着色器按 GLSL 150 打包（GL 3.2 核心档）；默认格式会退到 2.1 并找不到可用版本。
+    QSurfaceFormat format;
+    format.setRenderableType(QSurfaceFormat::OpenGL);
+    format.setVersion(3, 3);
+    format.setProfile(QSurfaceFormat::CoreProfile);
+    format.setDepthBufferSize(24);
+    format.setStencilBufferSize(8);
+    surface.reset(QRhiGles2InitParams::newFallbackSurface(format));
     QRhiGles2InitParams params;
+    params.format = format;
     params.fallbackSurface = surface.get();
     rhi.reset(QRhi::create(QRhi::OpenGLES2, &params));
 #endif

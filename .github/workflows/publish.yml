@@ -51,19 +51,21 @@ jobs:
           github-token: ${{ github.token }}
           path: artifacts
 
-      - name: Collect ZIP files
+      - name: Collect release files
         run: |
           set -euo pipefail
 
           mkdir -p release
 
-          find artifacts -type f -name '*.zip' \
+          # macOS 与 Windows 交付 ZIP，Linux 交付 AppImage；三端各取一份打包产物。
+          find artifacts -type f \( -name '*.zip' -o -name '*.AppImage' \) \
             -exec cp -n {} release/ \;
 
-          count=$(find release -maxdepth 1 -type f -name '*.zip' | wc -l)
+          zips=$(find release -maxdepth 1 -type f -name '*.zip' | wc -l)
+          images=$(find release -maxdepth 1 -type f -name '*.AppImage' | wc -l)
 
-          if [ "$count" -ne 2 ]; then
-            echo "Expected exactly 2 ZIP files, found $count"
+          if [ "$zips" -ne 2 ] || [ "$images" -ne 1 ]; then
+            echo "Expected 2 ZIP and 1 AppImage files, found $zips ZIP and $images AppImage"
             exit 1
           fi
 
@@ -75,6 +77,8 @@ jobs:
           tag_name: ${{ inputs.tag }}
           name: ${{ inputs.tag }}
           target_commitish: ${{ steps.build.outputs.sha }}
-          files: release/*.zip
+          files: |
+            release/*.zip
+            release/*.AppImage
           generate_release_notes: true
           fail_on_unmatched_files: true

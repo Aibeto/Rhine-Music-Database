@@ -10,8 +10,17 @@ import sys
 app = pathlib.Path(sys.argv[1]).resolve()
 # 根据产物类型选择静态审计规则，允许在构建主机检查另一平台的部署目录。
 mac = app.suffix.lower() == ".app"
-resources = app / ("Contents/Resources" if mac else "resources")
-executable = app / ("Contents/MacOS/RhineMusicDatabase" if mac else "RHINE MUSIC DATABASE.exe")
+# AppDir 是 AppImage 的前缀目录布局，程序与运行时都按 usr/ 前缀存放。
+linux = (app / "usr/bin/RhineMusicDatabase").is_file()
+if mac:
+    resources = app / "Contents/Resources"
+    executable = app / "Contents/MacOS/RhineMusicDatabase"
+elif linux:
+    resources = app / "usr/bin/resources"
+    executable = app / "usr/bin/RhineMusicDatabase"
+else:
+    resources = app / "resources"
+    executable = app / "RHINE MUSIC DATABASE.exe"
 assert executable.is_file()
 for pattern in (
     "diagnose-windows-audio*",
@@ -78,6 +87,37 @@ if mac:
             for line in dependencies.splitlines()
             if line.startswith("\t")
         ), str(binary)
+elif linux:
+    libraries = subprocess.check_output(["ldd", str(executable)], text=True)
+    assert "libQt6Core" in libraries and "libQt6Quick" in libraries, "Missing Qt runtime"
+    assert "not found" not in libraries, "Undeployed library dependency"
+    # 只允许引用随包 Qt 与系统图形栈，不得回落到构建机安装前缀。
+    bundled = app / "usr/lib"
+    assert (bundled / "libQt6Core.so.6").is_file(), "Qt runtime is not bundled"
+    for pattern in ("libQt6Gui.so.6", "libQt6Quick.so.6", "libQt6Qml.so.6", "libQt6Multimedia.so.6"):
+        assert (bundled / pattern).is_file(), "Missing bundled Qt module: " + pattern
+    for line in libraries.splitlines():
+        if "=> /" in line:
+            # ldd 保留 RUNPATH 里的 $ORIGIN，比较前先归一化到真实路径。
+            target = pathlib.Path(line.split("=> ")[1].split(" (")[0]).resolve()
+            name = target.name
+            if name.startswith("libQt6"):
+                assert target.parent == bundled.resolve(), "Qt library resolved outside package: " + name
+    assert not list(bundled.rglob("libQt6WebEngine*")), "Unused Qt module entered the package"
+    assert (app / "usr/plugins/platforms/libqxcb.so").is_file(), "Missing X11 platform plugin"
+    assert (app / "usr/plugins/platforms/libqwayland.so").is_file(), "Missing Wayland platform plugin"
+    assert (
+        app / "usr/plugins/platforms/libqoffscreen.so"
+    ).is_file(), "Missing offscreen test platform plugin"
+    assert (app / "usr/plugins/multimedia/libffmpegmediaplugin.so").is_file(), "Missing FFmpeg audio backend"
+    assert (app / "usr/plugins/tls/libqopensslbackend.so").is_file(), "Missing TLS backend"
+    assert (app / "usr/qml/QtQuick").is_dir(), "Missing QtQuick QML module"
+    assert (resources / "MusicBridge/node").is_file(), "Missing bundled Node runtime"
+    conf = (app / "usr/bin/qt.conf").read_text(encoding="utf-8")
+    assert "/Users/" not in conf and "/opt/" not in conf, "Local QML search path"
+    assert (app / "AppRun").is_file() and (app / "rhine-music-database.desktop").is_file()
+    assert not list(app.rglob("*.swift"))
+    assert not list(app.rglob("sqldrivers"))
 else:
     debug = (app / "Qt6Cored.dll").is_file()
     suffix = "d.dll" if debug else ".dll"
