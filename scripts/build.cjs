@@ -393,16 +393,33 @@ function linuxQtQmlDirectory(qt) {
  * 优先使用 kit 自己的 bin 目录，避免 PATH 中混入其他 Qt 版本或被裁剪掉的工具。
  */
 function linuxQtTool(qt, name) {
-    for (const candidate of [path.join(linuxQtQuery(qt, 'QT_INSTALL_BINS'), name), name]) {
+    // Qt 6 的工具按发行版不同分散在 libexec 与 bin：官方二进制包放在 libexec，
+    // 部分发行版重打包到 /usr/bin。逐个探活，任何可执行的候选都接受。
+    const searched = [];
+    for (const key of ['QT_INSTALL_LIBEXECS', 'QT_INSTALL_BINS']) {
+        let directory;
+        try {
+            directory = linuxQtQuery(qt, key);
+        } catch {
+            continue;
+        }
+        searched.push(path.join(directory, name));
+    }
+    searched.push(name);
+    for (const candidate of searched) {
+        // 相对名交给 PATH 解析；绝对路径先确认存在，避免把 qmake 的错误当作成功。
+        if (path.isAbsolute(candidate) && !fs.existsSync(candidate)) {
+            continue;
+        }
         const probe = spawnSync(candidate, ['-help'], {
             encoding: 'utf8',
         });
-        // qmlimportscanner 的 -help 也会返回非零，能启动即视为可用。
+        // qmlimportscanner 的 -help 也返回非零，能启动即视为可用。
         if (!probe.error) {
             return candidate;
         }
     }
-    throw new Error(`Cannot locate the Qt tool ${name}`);
+    throw new Error(`Cannot locate the Qt tool ${name}; searched ${searched.join(', ')}`);
 }
 /**
  * 复制插件、QML 模块与 ELF 依赖闭包
