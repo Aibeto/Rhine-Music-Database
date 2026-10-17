@@ -144,7 +144,11 @@ elif linux:
         missing = [line.split("=>")[0].strip() for line in output.splitlines() if "not found" in line]
         assert not missing, f"{binary.relative_to(app)} has unresolved libraries: {', '.join(missing)}"
     assert (app / "usr/plugins/platforms/libqxcb.so").is_file(), "Missing X11 platform plugin"
-    assert (app / "usr/plugins/platforms/libqwayland.so").is_file(), "Missing Wayland platform plugin"
+    # Wayland 插件名随打包方式不同：发行版是 libqwayland.so，
+    # 官方 Qt 包拆成 libqwayland-egl.so 与 libqwayland-generic.so，两者都接受。
+    assert list(
+        (app / "usr/plugins/platforms").glob("libqwayland*.so")
+    ), "Missing Wayland platform plugin"
     assert (
         app / "usr/plugins/platforms/libqoffscreen.so"
     ).is_file(), "Missing offscreen test platform plugin"

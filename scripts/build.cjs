@@ -454,7 +454,12 @@ function deployLinuxRuntime(qt, app, binary) {
             if (!file.endsWith('.so')) {
                 continue;
             }
-            if (folder === 'platforms' && !/^libq(?:xcb|wayland|offscreen|minimal)\.so$/.test(file)) {
+            // 平台插件名随打包方式变化：发行版是 libqwayland.so，
+            // 官方 Qt 包拆成 libqwayland-egl.so 与 libqwayland-generic.so。
+            if (
+                folder === 'platforms' &&
+                !/^libq(?:xcb|wayland(?:-\w+)?|offscreen|minimal)\.so$/.test(file)
+            ) {
                 continue;
             }
             const destination = path.join(plugins, folder, file);
