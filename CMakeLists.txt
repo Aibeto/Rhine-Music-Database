@@ -283,7 +283,7 @@ endif()
 add_test(NAME qt_ui_motion_regression COMMAND RhineUiMotionRegression
                                               "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/ui-motion.qz")
 qt_add_executable(RhinePlatformRegression Qt/tests/PlatformRegression.cpp Qt/src/AppStorage.cpp
-                  Qt/src/AudioPlayer.cpp)
+                  Qt/src/AudioPlayer.cpp Qt/src/ProcessMetrics.cpp)
 target_include_directories(RhinePlatformRegression PRIVATE Qt/src)
 target_link_libraries(RhinePlatformRegression PRIVATE Qt6::Core Qt6::Gui Qt6::Multimedia
                                                       Qt6::MultimediaPrivate)

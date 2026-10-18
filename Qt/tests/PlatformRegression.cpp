@@ -1,5 +1,6 @@
 #include "AppStorage.h"
 #include "AudioPlayer.h"
+#include "ProcessMetrics.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -23,6 +24,16 @@ bool check(bool result, const char *message) {
         std::fprintf(stderr, "%s\n", message);
     }
     return result;
+}
+
+bool processMetricsRegression() {
+    const auto first = readProcessMetrics();
+    const auto second = readProcessMetrics();
+    bool ok = check(first.residentBytes > 0 && second.residentBytes > 0,
+                    "Current process resident memory is available");
+    ok &= check(first.cpuNanoseconds >= 0 && second.cpuNanoseconds >= first.cpuNanoseconds,
+                "Cumulative process CPU time is available and monotonic");
+    return ok;
 }
 
 // 测试只生成设备描述符，不创建硬件音频流；覆盖 Qt 6.8 和新版私有描述符结构。
@@ -76,14 +87,13 @@ bool storageRegression(const QString &directory) {
     ok &= check(platformSaveCredential(credential).isEmpty(), "Linux credential saved locally");
     ok &= check(QFile::exists(first + "/data/account.credential"), "Credential file stays portable");
     // 登录态只允许当前用户读写，命令行与备份工具不会意外外泄。
-    struct stat status {};
+    struct stat status{};
     ok &= check(::stat(QFile::encodeName(first + "/data/account.credential").constData(), &status) == 0 &&
                     (status.st_mode & 0777) == 0600,
                 "Linux credential file is owner-only");
     ok &= check(platformCredential() == credential, "Linux credential round trip");
     platformDeleteCredential();
-    ok &= check(!QFile::exists(first + "/data/account.credential"),
-                "Credential logout removes local file");
+    ok &= check(!QFile::exists(first + "/data/account.credential"), "Credential logout removes local file");
 #endif
     const auto second = directory + "/独立应用 B";
     ok &= check(AppStorage::initializePortable(second).isEmpty(), "Second portable application initialized");
@@ -250,9 +260,10 @@ int main(int argc, char **argv) {
         return 1;
     }
     const bool storage = storageRegression(fixture.path());
+    const bool metrics = processMetricsRegression();
     const bool audio = AudioPlayerRegression::run() && AudioPlayerRegression::layoutRegression() &&
                        AudioPlayerRegression::sourceRegression();
-    qInfo() << "Portable storage and default audio output regressions:"
-            << (storage && audio ? "PASS" : "FAIL");
-    return storage && audio ? 0 : 1;
+    qInfo() << "Portable storage, process metrics and default audio output regressions:"
+            << (storage && metrics && audio ? "PASS" : "FAIL");
+    return storage && metrics && audio ? 0 : 1;
 }
