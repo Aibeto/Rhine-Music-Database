@@ -68,9 +68,14 @@ int main(int argc, char **argv) {
     }
     QString root = qEnvironmentVariable("RHINE_RESOURCES");
     if (root.isEmpty()) {
-        // AppImage 把资源放在 bin 同级或上一级目录，开发构建仍在 output/resources。
+        // macOS 使用 Resources ；其他平台使用 resources
         const auto base = QCoreApplication::applicationDirPath();
-        for (const auto &candidate : {base + "/resources", base + "/../resources"}) {
+#ifdef Q_OS_MACOS
+        const QStringList candidates{base + "/../Resources"};
+#else
+        const QStringList candidates{base + "/resources", base + "/../resources"};
+#endif
+        for (const auto &candidate : candidates) {
             if (QFileInfo(candidate + "/slots.json").exists()) {
                 root = QDir(candidate).absolutePath();
                 break;
