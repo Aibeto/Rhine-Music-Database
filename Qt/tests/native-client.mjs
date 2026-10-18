@@ -33,6 +33,29 @@ assert.equal(netease.body.value.items[0].artist, '测试');
 assert.equal(netease.body.value.total, 1);
 assert.deepEqual(netease.cookies, ['MUSIC_U=fixture-native; Path=/']);
 
+// 官方音源保留实际返回等级；替代音源的请求等级回填不得冒充母带。
+for (const alternative of [false, true]) {
+    const playback = await dispatch(
+        message('netease', 'playback', [{ id: '42' }, 'jymaster', alternative]),
+        async (request) => {
+            assert.equal(request.params.level, 'jymaster');
+            assert.equal(request.params.unblock, alternative);
+            return {
+                body: {
+                    code: 200,
+                    msg: alternative
+                        ? 'Warning: Customizing unblock sources is not supported on this endpoint.'
+                        : '',
+                    data: [{ id: 42, url: 'https://example.com/audio', level: 'jymaster', type: 'flac' }],
+                },
+            };
+        },
+    );
+    assert.equal(playback.body.code, 200);
+    assert.equal(playback.body.value.level, alternative ? undefined : 'jymaster');
+    assert.equal(playback.body.value.type, alternative ? undefined : 'flac');
+}
+
 const sessions = [{ token: 'private-fixture', credential: { musickey: 'private-key' } }];
 const qq = await dispatch(message('qq', 'request', ['/user/detail', {}]), async (request) => {
     assert.equal(request.route, '/qq/user/detail');

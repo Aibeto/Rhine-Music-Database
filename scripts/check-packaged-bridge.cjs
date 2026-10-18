@@ -102,8 +102,9 @@ async function main() {
         });
         assert.equal(standard.body.code, 200);
         assert(standard.body.data[0].url);
-        assert.equal(audio.body.data[0].requestedBr, 999000);
-        assert.equal(standard.body.data[0].requestedBr, 128000);
+        assert.equal(audio.body.data[0].level, 'lossless');
+        assert.equal(audio.body.data[0].keyRegistrations, 1);
+        assert.equal(standard.body.data[0].level, 'standard');
         const authenticated = await request(
             'authenticated',
             '/song/url/v1',
@@ -117,7 +118,10 @@ async function main() {
             },
         );
         assert.equal(authenticated.body.data[0].authenticated, true);
-        assert.equal(authenticated.body.data[0].requestedBr, 320000);
+        assert.equal(authenticated.body.data[0].level, 'exhigh');
+        const master = await request('master', '/song/url/v1', { id: '1', level: 'jymaster' });
+        assert.equal(master.body.data[0].level, 'jymaster');
+        assert.equal(master.body.data[0].keyRegistrations, 1);
         const denied = await request('denied', '/song/url/v1', {
             id: '2',
             level: 'standard',
@@ -142,6 +146,7 @@ async function main() {
                 ],
             },
         );
+        assert.equal(qq.body.code, 200, JSON.stringify(qq.body));
         assert.equal(qq.body.items[0].mid, 'fixtureMID');
         for (const [type, field, id] of [
             ['album', 'albummid', 'albumMID'],
