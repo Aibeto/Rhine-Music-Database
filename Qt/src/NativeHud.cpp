@@ -147,6 +147,14 @@ NativeHud::Layout NativeHud::containerLayout(double width) const {
     layout.width = width - layout.x - 40;
     return layout;
 }
+QRectF NativeHud::detailBounds(double width) const {
+    if (m_music->current["kind"] == "song") {
+        const auto left = width * 0.56 - 24;
+        return {left, 260, width - left - 35, 696};
+    }
+    const auto layout = containerLayout(width);
+    return {layout.left, layout.top, width - layout.left * 2, layout.bottom - layout.top};
+}
 QJsonObject NativeHud::state() const {
     const auto bounds = modalBounds(width);
     const auto rect = [](const std::optional<QRectF> &value) -> QJsonValue {
@@ -287,7 +295,7 @@ void NativeHud::archive(double width) {
         const auto x = width * 0.50520833;
         if (music.directory) {
             control("← 返回上一级", 59, 211, 280, "music:parent");
-            control("查看音乐详情 ↗", 59, 347, 310, "music:directory-info");
+            control("查看音乐详情 ↗", 59, 265, 310, "music:directory-info");
         }
         roll("music-source", "MUSIC DATABASE / " + music.libraryName(), x, 471, 12, width - x - 59);
         roll("music-title", item["title"].toString(), x, 509, 28, width - x - 59, "bold");

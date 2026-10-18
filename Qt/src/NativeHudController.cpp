@@ -264,7 +264,11 @@ void NativeHud::playerAction(const QStringList &parts) {
             m_lyricsBrowse.reset();
         }
     } else if (name == "open") {
-        openModal("player");
+        if (modal == "player" && !closing) {
+            closeModal();
+        } else {
+            openModal("player");
+        }
     } else if (name == "toggle") {
         player.toggle();
     } else if (name == "prev" || name == "next") {

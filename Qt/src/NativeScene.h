@@ -25,6 +25,9 @@ class NativeScene {
     void select(int index, QJsonObject navigation = {});
     void navigate(QString axis, int direction);
     int selection() const;
+    bool isSelectedCell(SceneMotion::Cell cell) const {
+        return cell == m_actor.cell;
+    }
     void resize(double width, double height);
     void theme(bool dark);
     void reduced(bool value);

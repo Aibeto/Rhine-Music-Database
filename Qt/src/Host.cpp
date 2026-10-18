@@ -568,7 +568,7 @@ void Host::loadCover(QString input, TextReply callback) {
     }
     QUrlQuery query(url);
     query.removeAllQueryItems("param");
-    query.addQueryItem("param", "512y512");
+    query.addQueryItem("param", "1024y1024");
     url.setQuery(query);
     auto key = url.toString();
     if (images.contains(key)) {
@@ -640,7 +640,10 @@ void Host::loadCover(QString input, TextReply callback) {
             if (!size.isValid() || size.width() > 8192 || size.height() > 8192) {
                 return QImage();
             }
-            reader.setScaledSize(size.scaled(512, 512, Qt::KeepAspectRatio));
+            // 保留大封面的细节；小图不在解码阶段放大，避免重复插值。
+            if (size.width() > 1024 || size.height() > 1024) {
+                reader.setScaledSize(size.scaled(1024, 1024, Qt::KeepAspectRatio));
+            }
             return reader.read();
         }));
     });
@@ -679,7 +682,12 @@ void Host::trimMemory(const QStringList &retainedImages) {
     // 请求结果仍可从磁盘按需读取；保留当前 HUD 图片，避免恢复后二维码或封面空白。
     cache.clear();
     images.clear();
-    images.setMaxCost(4 * 1024);
+    int retainedCost = 0;
+    for (const auto &pixels : retained) {
+        retainedCost += qMax(1, int(pixels.sizeInBytes() / 1024));
+    }
+    // 渲染预算
+    images.setMaxCost(qMax(4 * 1024, retainedCost));
     for (auto it = retained.begin(); it != retained.end(); ++it) {
         images.insert(it.key(), new QImage(it.value()), qMax(1, int(it->sizeInBytes() / 1024)));
     }

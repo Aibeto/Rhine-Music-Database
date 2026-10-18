@@ -56,7 +56,8 @@ void NativeHud::detail(double width, double opacity) {
     save();
     alpha(opacity);
     if (!lyricsMode) {
-        fill(x - 24, 260, usable + 48, 696,
+        const auto bounds = detailBounds(width);
+        fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(),
              dark ? QJsonArray{0.08, 0.095, 0.09, 0.96} : QJsonArray{0.929, 0.922, 0.894, 0.96});
     }
     button("← 返回资料库   ESC", 59, 211, 360, 54, "back", 20, "demibold");
@@ -298,7 +299,8 @@ void NativeHud::container(double width, double opacity) {
     trackOffset = std::min(trackOffset, std::max(0, int(songs.size()) - rowCount));
     save();
     alpha(opacity);
-    fill(left, layout.top, width - left * 2, layout.bottom - layout.top,
+    const auto bounds = detailBounds(width);
+    fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(),
          dark ? QJsonArray{0.08, 0.095, 0.09, 1} : QJsonArray{0.929, 0.922, 0.894, 1});
     rule(x - 18, 278, 1, 0.12);
     button("← 返回曲目资料库   ESC", sx, 211, sideWidth, 54, "music:directory", 20, "demibold");

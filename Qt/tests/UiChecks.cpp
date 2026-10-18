@@ -201,6 +201,43 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
         }
         return std::nullopt;
     };
+    const auto clickBlank = [&](QPointF from, QPointF to) {
+        const auto send = [&](QEvent::Type type, QPointF stagePosition) {
+            const auto position = stagePosition * scale;
+            QMouseEvent event(type, position, position, window->mapToGlobal(position),
+                              type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                              type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+                              Qt::NoModifier);
+            QCoreApplication::sendEvent(window, &event);
+        };
+        send(QEvent::MouseButtonPress, from);
+        if (from != to) {
+            send(QEvent::MouseMove, to);
+        }
+        send(QEvent::MouseButtonRelease, to);
+        refresh();
+    };
+    // 使用真实窗口输入检查面板内留白、背景拖动和背景点击，避免关闭后穿透到场景。
+    for (const auto &kind : QStringList{"search", "saved", "settings", "player", "discover", "provider"}) {
+        hud.openModal(kind);
+        refresh();
+        const auto panel = hud.modalBounds(width);
+        const QPointF inside(panel.x() + 10, panel.y() + 400);
+        clickBlank(inside, inside);
+        check(hud.modal == kind, "modal inner whitespace stays open");
+        clickBlank({10, 400}, {10, 450});
+        check(hud.modal == kind, "modal background drag stays open");
+        const auto selected = backend.scene.selection();
+        clickBlank({10, 400}, {10, 400});
+        check(hud.modal.isEmpty() && backend.scene.selection() == selected,
+              "modal background click closes without scene selection");
+    }
+    clickBlank({60, 1030}, {60, 1030});
+    check(hud.modal == "player", "player cover opens queue");
+    clickBlank({60, 1030}, {60, 1030});
+    check(hud.modal.isEmpty(), "player cover toggles queue closed");
+    hud.openModal("search");
+    refresh();
     wheel(width * 0.7, 500, false);
     check(hud.listOffset == 1, "search row wheel routing");
     wheel(width * 0.7, 500, true);
@@ -218,9 +255,10 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     refresh();
     wheel(width / 2, 500, false);
     check(hud.listOffset == 1, "saved music row scrolling");
-    QImage cover(512, 512, QImage::Format_RGBA8888_Premultiplied);
+    QImage cover(1024, 1024, QImage::Format_RGBA8888_Premultiplied);
     cover.fill(QColor(78, 153, 197));
     QPainter painter(&cover);
+    painter.scale(2, 2);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setPen(QPen(QColor(213, 233, 231), 7));
     painter.drawEllipse(QRectF(52, 52, 408, 408));
@@ -253,6 +291,28 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     hud.tab = "overview";
     refresh();
     capture("disc-case");
+    // 同一张封面在揭示开始和结束时应同样清晰，验证真实 GPU 材质而非仅检查状态值。
+    const auto detailFrame = [&](double clarity) {
+        auto frame = backend.frame();
+        frame["reference"] = false;
+        QJsonArray draws;
+        for (const auto &value : frame["draws"].toArray()) {
+            auto draw = value.toObject();
+            if (draw["name"] == "Frosted_Polymer" && draw["musicSelected"].toBool()) {
+                draw["clarity"] = clarity;
+            }
+            draws.append(draw);
+        }
+        frame["draws"] = draws;
+        return frame;
+    };
+    const auto initialCover = renderReference(backend.root(), detailFrame(0), backend.current(),
+                                              backend.cover(), window->size(), backend.drawBuffers());
+    const auto revealedCover = renderReference(backend.root(), detailFrame(1), backend.current(),
+                                               backend.cover(), window->size(), backend.drawBuffers());
+    int coverDifference = 0;
+    check(equivalentGpuPixels(initialCover, revealedCover, coverDifference, 10000),
+          "detail cover stays clear throughout material reveal");
     backend.scene.openViewer();
     backend.scene.coverFront();
     refresh();
@@ -340,6 +400,35 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
         backend.step(55.01 + index / 60.0);
     }
     capture("song-switch");
+    backend.scene.setMode("archive");
+    refresh();
+    std::optional<double> parentY;
+    std::optional<double> infoY;
+    for (const auto &value : hud.hits) {
+        const auto hit = value.toObject();
+        if (hit["action"] == "music:parent") {
+            parentY = hit["y"].toDouble();
+        } else if (hit["action"] == "music:directory-info") {
+            infoY = hit["y"].toDouble();
+        }
+    }
+    check(parentY && infoY && *infoY == *parentY + 54,
+          "directory info sits immediately below parent navigation");
+    capture("directory-navigation");
+    const auto folder = music.directory;
+    const auto directoryIndex = folder->index;
+    check(click("music:directory-info") && music.directoryInfo, "directory info opens");
+    clickBlank({50, 600}, {50, 600});
+    check(music.directoryInfo && hud.frame["mode"] == "detail", "directory panel whitespace stays open");
+    clickBlank({width - 10, 200}, {width - 10, 250});
+    check(music.directoryInfo && hud.frame["mode"] == "detail", "directory background drag stays open");
+    clickBlank({width - 10, 200}, {width - 10, 200});
+    check(!music.directoryInfo && hud.frame["mode"] == "archive" && music.directory == folder &&
+              music.directory->index == directoryIndex,
+          "directory background click returns to same track and folder");
+    check(click("open"), "song detail opens from directory");
+    clickBlank({width - 10, 200}, {width - 10, 200});
+    check(hud.frame["mode"] == "archive", "song detail background click returns");
     music.directory.reset();
     player.current = {};
     backend.scene.reduced(true);
@@ -492,7 +581,8 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     const auto afterScroll = textY("我们听见远处的回声");
     check(beforeScroll && afterScroll && *beforeScroll > *afterScroll && *beforeScroll - *afterScroll < 10,
           "sub-row pixels scroll lyrics continuously");
-    backend.action("player:lyrics-close");
+    clickBlank({width - 10, 200}, {width - 10, 200});
+    check(!hud.lyricsMode && hud.frame["mode"] == "archive", "lyrics background click returns");
     backend.host.mediaControl("stop");
     player.stop();
     hud.openModal("discover");

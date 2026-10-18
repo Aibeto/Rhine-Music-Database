@@ -119,9 +119,11 @@ vec4 surface(Out o, bool front) {
         float clearLod = log2(float(textureSize(capture, 0).x)) * .025 * clamp(m.optics.x * 2 - 2, 0.0, 1.0);
         float bounded = log2(max(exp2(clearLod), projected * .016 * pow(strength, 1.15)));
         float lod = m.flags.x == 3 ? mix(nativeLod, min(nativeLod, bounded), o.quality) : nativeLod;
+        // 详情封面使用原始采样
+        vec3 transmissionColor =
+            m.optics.w > .5 ? textureLod(capture, rtUV(uv), 0).rgb : transmissionSample(capture, uv, lod).rgb;
         vec3 atten = exp(log(max(m.attenuation.xyz, vec3(.00001))) * length(ray) / max(m.optics.y, .0001));
-        vec3 refracted =
-            (1 - envBRDF(f0, nv, r, lut)) * base * atten * transmissionSample(capture, uv, lod).rgb;
+        vec3 refracted = (1 - envBRDF(f0, nv, r, lut)) * base * atten * transmissionColor;
         diffuse = mix(diffuse, refracted, trans);
     }
     vec3 color = diffuse + directS + indirectS;

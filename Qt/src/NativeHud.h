@@ -54,6 +54,7 @@ class NativeHud : public QObject {
     bool animating(double time) const;
     QVector<Row> rows(int lane);
     QRectF modalBounds(double width) const;
+    QRectF detailBounds(double width) const;
     Layout containerLayout(double width) const;
     QJsonArray commands;
     QJsonArray hits;
