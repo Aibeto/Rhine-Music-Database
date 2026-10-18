@@ -7,11 +7,18 @@ const root = path.resolve(__dirname, '..');
 process.chdir(root);
 const win = process.platform === 'win32';
 const mac = process.platform === 'darwin';
-if (!win && !mac) {
-    throw Error('Supported platforms: macOS and Windows');
+const linux = process.platform === 'linux';
+if (!win && !mac && !linux) {
+    throw Error('Supported platforms: macOS, Linux and Windows');
 }
 const python = process.env.PYTHON || (win ? 'python' : 'python3');
 const nodeName = win ? 'node.exe' : 'node';
+// 部署目录按平台区分；Linux 使用 AppImage 标准前缀布局。
+const appPaths = new Map([
+    [true, 'output/RHINE MUSIC DATABASE.app'],
+    [false, linux ? 'output/RhineMusicDatabase.AppDir' : 'output/windows/RHINE MUSIC DATABASE'],
+]);
+const defaultAppPath = appPaths.get(mac);
 /**
  * 串行执行构建或部署命令，失败立即终止。
  * 命令和参数分开传递，不经过 Shell 解释。
@@ -118,6 +125,29 @@ function prepareResources() {
             throw Error('Node must be an official standalone distribution');
         }
     }
+    if (linux) {
+        // 发行版自带的 node 链接了系统 ICU 与 absl，只有官方静态包能随 AppImage 分发。
+        const deps = spawnSync('ldd', [binary], {
+            encoding: 'utf8',
+        });
+        if (deps.status !== 0) {
+            throw Error('Node must be an official standalone distribution');
+        }
+        // 官方静态包只依赖 glibc 运行库；出现其他动态依赖说明用的是发行版构建。
+        const exposed = deps.stdout
+            .split('\n')
+            .filter((line) => line.includes('=>'))
+            .map((line) => path.basename(line.split('=>')[0].trim()))
+            .filter(
+                (name) =>
+                    !/^(?:ld-linux[\w.-]*|libc|libm|libmvec|libdl|libpthread|librt|libgcc_s|libstdc\+\+)\.so/.test(
+                        name,
+                    ),
+            );
+        if (exposed.length) {
+            throw Error(`Node must be an official standalone distribution: ${exposed.join(', ')}`);
+        }
+    }
     fs.copyFileSync(binary, path.join(bridge, nodeName));
     fs.copyFileSync(license, path.join(bridge, 'NODE-LICENSE'));
     fs.chmodSync(path.join(bridge, nodeName), 0o755);
@@ -140,7 +170,12 @@ function prepareResources() {
  * 验证 Qt kit 后串行配置和编译，返回部署所需的路径与构建类型。
  */
 function buildQt() {
-    const qt = process.env.QT_ROOT || (mac ? path.join(os.homedir(), 'Qt/6.12.0/macos') : '');
+    // Linux 的 Qt 通常由发行版装在 /usr，其余平台从 kit 目录读取。
+    const qtRoots = new Map([
+        [true, path.join(os.homedir(), 'Qt/6.12.0/macos')],
+        [false, linux ? '/usr' : ''],
+    ]);
+    const qt = process.env.QT_ROOT || qtRoots.get(mac);
     if (!qt || !fs.existsSync(path.join(qt, 'lib/cmake/Qt6/Qt6Config.cmake'))) {
         throw Error('Set QT_ROOT to a Qt desktop kit with Shader Tools and private headers');
     }
@@ -234,21 +269,447 @@ function deployMacAudioLibraries(qt, app) {
     run('install_name_tool', ['-add_rpath', '@loader_path/../../Frameworks', plugin]);
 }
 
+// AppImage 只随包分发 Qt 与音视频运行时；系统图形栈、glibc 与桌面服务留给发行版。
+const linuxExcludedLibraries = new Set([
+    'ld-linux-x86-64.so.2',
+    'libc.so.6',
+    'libm.so.6',
+    'libmvec.so.1',
+    'libdl.so.2',
+    'libpthread.so.0',
+    'librt.so.1',
+    'libresolv.so.2',
+    'libutil.so.1',
+    'libnsl.so.1',
+    'libgcc_s.so.1',
+    'libstdc++.so.6',
+    'libz.so.1',
+    'libbz2.so.1.0',
+    'liblzma.so.5',
+    'libzstd.so.1',
+    'libexpat.so.1',
+    'libffi.so.8',
+    'libpcre2-8.so.0',
+    'libglib-2.0.so.0',
+    'libgobject-2.0.so.0',
+    'libgio-2.0.so.0',
+    'libgmodule-2.0.so.0',
+    'libmount.so.1',
+    'libblkid.so.1',
+    'libselinux.so.1',
+    'libsystemd.so.0',
+    'libudev.so.1',
+    'libdbus-1.so.3',
+    'libfontconfig.so.1',
+    'libfreetype.so.6',
+    'libharfbuzz.so.0',
+    'libgraphite2.so.3',
+    'libpng16.so.16',
+    'libGL.so.1',
+    'libGLX.so.0',
+    'libGLdispatch.so.0',
+    'libOpenGL.so.0',
+    'libEGL.so.1',
+    'libGLESv2.so.2',
+    'libgbm.so.1',
+    'libdrm.so.2',
+    'libX11.so.6',
+    'libX11-xcb.so.1',
+    'libXau.so.6',
+    'libXdmcp.so.6',
+    'libXext.so.6',
+    'libXrender.so.1',
+    'libXi.so.6',
+    'libXfixes.so.3',
+    'libXcursor.so.1',
+    'libXrandr.so.2',
+    'libXinerama.so.1',
+    'libXcomposite.so.1',
+    'libXdamage.so.1',
+    'libxcb.so.1',
+    'libxkbcommon.so.0',
+    'libxkbcommon-x11.so.0',
+    'libwayland-client.so.0',
+    'libwayland-cursor.so.0',
+    'libwayland-egl.so.1',
+    'libvulkan.so.1',
+    'libpulse.so.0',
+    'libasound.so.2',
+]);
+// xcb 扩展、Wayland 后端与音频服务跟随发行版，版本差异由用户系统统一升级。
+const linuxExcludedPattern =
+    /^lib(?:xcb-|wayland-|drm[_-]|vulkan|GLESv|GLX|X11|Xext|Xrender|Xi\.|Xfixes|Xcursor|Xrandr|Xinerama|Xcomposite|Xdamage|Xau|Xdmcp|pulse|asound|nss|nspr|smime|softokn|freebl|plc|plds)/;
+
+function isExcludedLinuxLibrary(name) {
+    return linuxExcludedLibraries.has(name) || linuxExcludedPattern.test(name);
+}
+
+/**
+ * 解析 Qt 运行时的实际位置
+ * 不假设 kit 目录结构，直接读取已构建程序解析到的 Qt 库目录。
+ */
+function linuxQtLibraryDirectory(binary) {
+    const result = spawnSync('ldd', [binary], {
+        encoding: 'utf8',
+    });
+    if (result.status !== 0) {
+        throw new Error('Cannot inspect Qt runtime dependencies');
+    }
+    const match = /^\s*libQt6Core\.so\.6 => (\S+) \(0x/m.exec(result.stdout);
+    if (!match) {
+        throw new Error('Qt6Core is not linked into the executable');
+    }
+    return path.dirname(match[1]);
+}
+
+/**
+ * 读取 Qt 安装布局
+ * 系统 Qt 的前缀是 /usr，插件和 QML 模块在 /usr/lib/qt6 下，统一由 qmake 给出。
+ */
+function linuxQtQuery(qt, key) {
+    // 官方 Qt 包通常只装 qmake 而没有 qmake6；只要 kit 自带 qmake 就只用它，
+    // 否则会把系统 Qt 的路径混进来，导致打包版本与编译版本不一致。
+    const kit = [path.join(qt, 'bin/qmake6'), path.join(qt, 'bin/qmake')].filter((file) =>
+        fs.existsSync(file),
+    );
+    const commands = kit.length ? kit : ['qmake6', 'qmake'];
+    for (const command of commands) {
+        const result = spawnSync(command, ['-query', key], {
+            encoding: 'utf8',
+        });
+        if (result.status === 0 && result.stdout.trim()) {
+            return result.stdout.trim();
+        }
+    }
+    throw new Error(`Cannot locate the Qt ${key} directory`);
+}
+
+function linuxQtQmlDirectory(qt) {
+    return linuxQtQuery(qt, 'QT_INSTALL_QML');
+}
+
+/**
+ * 定位 Qt 自带工具
+ * 优先使用 kit 自己的 bin 目录，避免 PATH 中混入其他 Qt 版本或被裁剪掉的工具。
+ */
+function linuxQtTool(qt, name) {
+    // Qt 6 的工具按发行版不同分散在 libexec 与 bin：官方二进制包放在 libexec，
+    // 部分发行版重打包到 /usr/bin。逐个探活，任何可执行的候选都接受。
+    const searched = [];
+    for (const key of ['QT_INSTALL_LIBEXECS', 'QT_INSTALL_BINS']) {
+        let directory;
+        try {
+            directory = linuxQtQuery(qt, key);
+        } catch {
+            continue;
+        }
+        searched.push(path.join(directory, name));
+    }
+    searched.push(name);
+    for (const candidate of searched) {
+        // 相对名交给 PATH 解析；绝对路径先确认存在，避免把 qmake 的错误当作成功。
+        if (path.isAbsolute(candidate) && !fs.existsSync(candidate)) {
+            continue;
+        }
+        const probe = spawnSync(candidate, ['-help'], {
+            encoding: 'utf8',
+        });
+        // qmlimportscanner 的 -help 也返回非零，能启动即视为可用。
+        if (!probe.error) {
+            return candidate;
+        }
+    }
+    throw new Error(`Cannot locate the Qt tool ${name}; searched ${searched.join(', ')}`);
+}
+/**
+ * 复制插件、QML 模块与 ELF 依赖闭包
+ * 依赖按 ldd 结果递归收集，只跳过系统图形栈与 glibc，避免与用户驱动冲突。
+ */
+function deployLinuxRuntime(qt, app, binary) {
+    const libraries = path.join(app, 'usr/lib');
+    const plugins = path.join(app, 'usr/plugins');
+    fs.mkdirSync(libraries, {
+        recursive: true,
+    });
+    const qtLibraries = linuxQtLibraryDirectory(binary);
+    // 只按依赖闭包收集 Qt 库；系统 Qt 目录里的 WebEngine、Widgets 等与面板无关。
+    const sources = [binary];
+    const pluginSource = linuxQtQuery(qt, 'QT_INSTALL_PLUGINS');
+    // Wayland 平台插件依赖 shell 集成与装饰插件，必须整组跟随部署。
+    for (const folder of [
+        'platforms',
+        'imageformats',
+        'tls',
+        'multimedia',
+        'platforminputcontexts',
+        'wayland-shell-integration',
+        'wayland-decoration-client',
+        'wayland-graphics-integration-client',
+    ]) {
+        const directory = path.join(pluginSource, folder);
+        if (!fs.existsSync(directory)) {
+            continue;
+        }
+        for (const file of fs.readdirSync(directory)) {
+            if (!file.endsWith('.so')) {
+                continue;
+            }
+            // 平台插件名随打包方式变化：发行版是 libqwayland.so，
+            // 官方 Qt 包拆成 libqwayland-egl.so 与 libqwayland-generic.so。
+            if (
+                folder === 'platforms' &&
+                !/^libq(?:xcb|wayland(?:-\w+)?|offscreen|minimal)\.so$/.test(file)
+            ) {
+                continue;
+            }
+            const destination = path.join(plugins, folder, file);
+            fs.mkdirSync(path.dirname(destination), {
+                recursive: true,
+            });
+            fs.copyFileSync(path.join(directory, file), destination);
+            sources.push(destination);
+        }
+    }
+    // Wayland 是桌面 Linux 的主流会话；插件缺失时应用会退到 XWayland，
+    // 仍能运行但行为不原生。官方 Qt 包把它放在 linux_gcc_64 的附属归档里，
+    // 由 aqt 的 --autodesktop 安装，因此这里只提示，不阻断构建。
+    const platforms = fs.readdirSync(path.join(plugins, 'platforms'));
+    if (!platforms.some((name) => name.startsWith('libqwayland'))) {
+        console.warn('Qt Wayland platform plugin missing; Wayland sessions will fall back to XWayland');
+    }
+    const qmlSource = linuxQtQmlDirectory(qt);
+    const scanned = spawnSync(
+        linuxQtTool(qt, 'qmlimportscanner'),
+        [
+            '-rootPath',
+            path.join(root, 'Qt/qml'),
+            '-importPath',
+            qmlSource,
+            '-importPath',
+            path.join(root, 'Qt/qml'),
+        ],
+        {
+            encoding: 'utf8',
+            maxBuffer: 64 * 1024 * 1024,
+        },
+    );
+    if (scanned.status !== 0) {
+        // 保留工具自身输出，构建机缺模块时能直接看出缺哪一个。
+        const detail = `${scanned.stderr || ''}${scanned.stdout || ''}`
+            .trim()
+            .split('\n')
+            .slice(-5)
+            .join('\n');
+        throw new Error(`Cannot scan QML imports${detail ? `: ${detail}` : ''}`);
+    }
+    const modules = new Set();
+    for (const entry of JSON.parse(scanned.stdout.replace(/^[^{[]*/, ''))) {
+        if (entry.path && entry.path.startsWith(qmlSource + path.sep)) {
+            modules.add(path.relative(qmlSource, entry.path));
+        }
+    }
+    for (const module of modules) {
+        const destination = path.join(app, 'usr/qml', module);
+        fs.cpSync(path.join(qmlSource, module), destination, {
+            recursive: true,
+        });
+        // QML 模块自带的插件同样引用 Qt 库（如 QuickControls2、QuickTemplates2），
+        // 只复制文件而不纳入依赖闭包，会留下启动后才暴露的缺库。
+        sources.push(...sharedObjects(destination));
+    }
+    // 插件自身也引用 Qt 与音视频库；与程序一起进入同一个依赖闭包。
+    const deployed = new Set();
+    while (sources.length) {
+        const source = sources.pop();
+        const result = spawnSync('ldd', [source], {
+            encoding: 'utf8',
+        });
+        if (result.status !== 0) {
+            continue;
+        }
+        for (const line of result.stdout.split('\n')) {
+            const match = /^\s*(\S+) => (\S+) \(0x[0-9a-f]+\)$/.exec(line);
+            if (!match) {
+                continue;
+            }
+            let [, name, location] = match;
+            // ldd 对解释器给出的是路径而不是 SONAME，这类条目始终由系统提供。
+            if (name.includes('/')) {
+                continue;
+            }
+            name = path.basename(name);
+            if (deployed.has(name) || isExcludedLinuxLibrary(name) || !fs.existsSync(location)) {
+                continue;
+            }
+            deployed.add(name);
+            const destination = path.join(libraries, name);
+            if (!fs.existsSync(destination)) {
+                fs.copyFileSync(location, destination);
+                fs.chmodSync(destination, 0o755);
+            }
+            sources.push(location);
+        }
+    }
+    fs.writeFileSync(
+        path.join(app, 'usr/bin/qt.conf'),
+        '[Paths]\nPrefix=..\nPlugins=plugins\nQmlImports=qml\n',
+    );
+}
+
+/**
+ * 生成 AppImage
+ * 桌面条目、图标与 AppRun 位于 AppDir 根目录，运行库按前缀目录布局。
+ */
+// 打包工具按官方发行版锁定，构建机不需要预装。
+const appImageToolVersion = '1.9.1';
+const appImageToolChecksums = {
+    x86_64: 'ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0',
+    aarch64: '',
+};
+
+/**
+ * 取得可用的 appimagetool
+ * 优先使用 APPIMAGE_TOOL 指定的可执行文件，其次系统 PATH，最后下载锁定版本。
+ */
+function resolveAppImageTool(architecture) {
+    if (process.env.APPIMAGE_TOOL) {
+        return process.env.APPIMAGE_TOOL;
+    }
+    const system = spawnSync('appimagetool', ['--version'], {
+        encoding: 'utf8',
+    });
+    if (!system.error) {
+        return 'appimagetool';
+    }
+    const expected = appImageToolChecksums[architecture];
+    if (!expected) {
+        throw new Error(
+            `Install appimagetool or set APPIMAGE_TOOL for ${architecture}; no pinned checksum is recorded`,
+        );
+    }
+    const directory = path.join('output', 'appimagetool');
+    const tool = path.join(directory, `appimagetool-${architecture}.AppImage`);
+    if (!fs.existsSync(tool)) {
+        fs.mkdirSync(directory, {
+            recursive: true,
+        });
+        const url =
+            `https://github.com/AppImage/appimagetool/releases/download/${appImageToolVersion}` +
+            `/appimagetool-${architecture}.AppImage`;
+        run('curl', ['--fail', '--location', '--retry', '3', '--output', tool, url]);
+        const digest = spawnSync('sha256sum', [tool], {
+            encoding: 'utf8',
+        }).stdout.split(' ')[0];
+        if (digest !== expected) {
+            fs.rmSync(tool, {
+                force: true,
+            });
+            throw new Error(`appimagetool checksum mismatch: ${digest}`);
+        }
+        fs.chmodSync(tool, 0o755);
+    }
+    return tool;
+}
+
+function packageAppImage(app) {
+    const architecture = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
+    const image = path.resolve(`output/RhineMusicDatabase-Linux-${architecture}.AppImage`);
+    fs.rmSync(image, {
+        force: true,
+    });
+    // 无 FUSE 的机器（容器、CI）也能打包；有 FUSE 时行为一致。
+    run(resolveAppImageTool(architecture), ['--appimage-extract-and-run', app, image], {
+        ARCH: architecture,
+    });
+    return image;
+}
+
+/**
+ * 递归列出目录下的共享库
+ * 显式递归而不依赖 readdirSync 的 recursive 选项，兼容旧版 Node。
+ */
+function sharedObjects(directory) {
+    const found = [];
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+            found.push(...sharedObjects(full));
+        } else if (entry.name.endsWith('.so')) {
+            found.push(full);
+        }
+    }
+    return found;
+}
+
+/**
+ * 写入 AppImage 根目录的入口文件
+ * AppRun 只补运行环境变量并转交参数，程序自身仍按 AppDir 前缀查找资源。
+ */
+function prepareLinuxAppDir(app) {
+    const desktop = 'rhine-music-database.desktop';
+    fs.writeFileSync(
+        path.join(app, desktop),
+        [
+            '[Desktop Entry]',
+            'Type=Application',
+            'Name=RHINE MUSIC DATABASE',
+            'GenericName=Music Library',
+            'Comment=原生音乐资料库',
+            'Exec=RhineMusicDatabase %U',
+            'Icon=rhine-music-database',
+            'Terminal=false',
+            'Categories=AudioVideo;Audio;Player;',
+            'StartupWMClass=RhineMusicDatabase',
+            'X-AppImage-Name=RhineMusicDatabase',
+            '',
+        ].join('\n'),
+    );
+    fs.copyFileSync('Assets/icons/icon-256.png', path.join(app, 'rhine-music-database.png'));
+    fs.copyFileSync('Assets/icons/icon-256.png', path.join(app, '.DirIcon'));
+    const appRun = path.join(app, 'AppRun');
+    fs.writeFileSync(
+        appRun,
+        [
+            '#!/bin/sh',
+            '# AppImage 入口：只补运行环境，参数原样转交。',
+            'set -eu',
+            'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)',
+            'export LD_LIBRARY_PATH="$here/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
+            'export QT_PLUGIN_PATH="$here/usr/plugins"',
+            'export QML_IMPORT_PATH="$here/usr/qml"',
+            'export QT_QPA_PLATFORM_PLUGIN_PATH="$here/usr/plugins/platforms"',
+            'exit_code=0',
+            '"$here/usr/bin/RhineMusicDatabase" "$@" || exit_code=$?',
+            'exit "$exit_code"',
+            '',
+        ].join('\n'),
+    );
+    fs.chmodSync(appRun, 0o755);
+}
+
 /**
  * 组装独立应用并执行平台部署和签名，所有文件沿用原资源清单。
  */
 function deployApp(qt, config, existingBundle = '') {
-    const app = path.resolve(
-        existingBundle || (mac ? 'output/RHINE MUSIC DATABASE.app' : 'output/windows/RHINE MUSIC DATABASE'),
-    );
+    const app = path.resolve(existingBundle || defaultAppPath);
     if (!existingBundle && fs.existsSync(app)) {
         fs.renameSync(app, app + '.previous-' + Date.now());
     }
-    const resources = mac ? path.join(app, 'Contents/Resources') : path.join(app, 'resources');
+    // 各平台资源目录：macOS 在 bundle 内，Linux 与程序同目录，Windows 在其下一级。
+    const resourcePaths = new Map([
+        [true, 'Contents/Resources'],
+        [false, linux ? 'usr/bin/resources' : 'resources'],
+    ]);
+    const resources = path.join(app, resourcePaths.get(mac));
     if (mac && !existingBundle) {
         fs.cpSync('output/qt-build/RhineMusicDatabase.app', app, {
             recursive: true,
         });
+    } else if (linux) {
+        // AppImage 使用带前缀的 AppDir；程序与资源同目录，便于沿用现有资源查找顺序。
+        // 走安装规则而非直接复制构建产物，才能带上相对 $ORIGIN 的 RPATH。
+        run('cmake', ['--install', 'output/qt-build', '--prefix', path.join(app, 'usr')]);
+        fs.chmodSync(path.join(app, 'usr/bin/RhineMusicDatabase'), 0o755);
     } else if (!mac) {
         fs.mkdirSync(app, {
             recursive: true,
@@ -305,7 +766,7 @@ function deployApp(qt, config, existingBundle = '') {
             recursive: true,
             force: true,
         });
-    } else {
+    } else if (win) {
         run(path.join(qt, 'bin/windeployqt.exe'), [
             '--' + config.toLowerCase(),
             '--qmldir',
@@ -331,6 +792,10 @@ function deployApp(qt, config, existingBundle = '') {
             force: true,
         });
     }
+    if (linux) {
+        prepareLinuxAppDir(app);
+        deployLinuxRuntime(qt, app, path.join(app, 'usr/bin/RhineMusicDatabase'));
+    }
     // 先部署 Qt，再装入大量 SDK 文件，避免部署工具逐个扫描非原生依赖。
     run(process.execPath, ['scripts/package-resources.cjs', resources]);
     fs.copyFileSync('LICENSE', path.join(resources, 'LICENSE'));
@@ -338,8 +803,9 @@ function deployApp(qt, config, existingBundle = '') {
     fs.cpSync('licenses/Qt', path.join(resources, 'Qt-Licenses'), {
         recursive: true,
     });
-    const qtLicenses = path.resolve(qt, '../../Licenses');
-    if (fs.existsSync(qtLicenses)) {
+    // Linux 的 Qt 由发行版安装，许可文件位置不固定，沿用仓库内的清单。
+    const qtLicenses = linux ? '' : path.resolve(qt, '../../Licenses');
+    if (qtLicenses && fs.existsSync(qtLicenses)) {
         fs.cpSync(qtLicenses, path.join(resources, 'Qt-Licenses'), {
             recursive: true,
         });
@@ -347,6 +813,9 @@ function deployApp(qt, config, existingBundle = '') {
     if (mac) {
         run('codesign', ['--force', '--sign', '-', path.join(resources, 'MusicBridge/node')]);
         run('codesign', ['--force', '--deep', '--sign', '-', app]);
+    }
+    if (linux) {
+        return packageAppImage(app);
     }
     return app;
 }

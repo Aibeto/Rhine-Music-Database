@@ -68,14 +68,17 @@ int main(int argc, char **argv) {
     }
     QString root = qEnvironmentVariable("RHINE_RESOURCES");
     if (root.isEmpty()) {
-        auto bundled = QCoreApplication::applicationDirPath() +
-#ifdef Q_OS_MACOS
-                       "/../Resources";
-#else
-                       "/resources";
-#endif
-        root = QFileInfo(bundled + "/slots.json").exists() ? QDir(bundled).absolutePath()
-                                                           : QDir::currentPath() + "/output/resources";
+        // AppImage 把资源放在 bin 同级或上一级目录，开发构建仍在 output/resources。
+        const auto base = QCoreApplication::applicationDirPath();
+        for (const auto &candidate : {base + "/resources", base + "/../resources"}) {
+            if (QFileInfo(candidate + "/slots.json").exists()) {
+                root = QDir(candidate).absolutePath();
+                break;
+            }
+        }
+        if (root.isEmpty()) {
+            root = QDir::currentPath() + "/output/resources";
+        }
     }
     const bool test = args.contains("--self-test");
     const bool visual = args.contains("--visual-fixtures");

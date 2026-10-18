@@ -212,8 +212,15 @@ elseif(WIN32)
                                             Qt6::MultimediaPrivate)
     target_compile_options(RhineMusicDatabase PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
     target_compile_options(RhineCore PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+elseif(UNIX)
+    # Linux 复用同一份原生场景实现；凭据、协议交付和媒体集成由本平台文件补齐。
+    target_sources(RhineCore PRIVATE Qt/src/PlatformLinux.cpp)
+    # 安装后的程序按 AppImage 前缀查找同级 Qt 运行时；构建树仍用 CMake 生成的 kit 路径，
+    # 否则 CI 中装在独立目录的 Qt 会在运行测试时找不到。
+    set_target_properties(RhineMusicDatabase PROPERTIES INSTALL_RPATH "\$ORIGIN/../lib")
+    install(TARGETS RhineMusicDatabase RUNTIME DESTINATION bin)
 else()
-    message(FATAL_ERROR "Supported desktop platforms are macOS and Windows")
+    message(FATAL_ERROR "Supported desktop platforms are macOS, Linux and Windows")
 endif()
 # Qt Creator 的普通构建也交付完整应用，不能依赖运行目录里的 output/resources。
 option(RHINE_PACKAGE_APP "Package resources and Qt libraries after a macOS CMake build" ON)
@@ -293,6 +300,9 @@ if(WIN32)
                 runtimeobject)
     target_compile_definitions(RhinePlatformRegression PRIVATE RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}")
     target_compile_options(RhinePlatformRegression PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
+elseif(UNIX)
+    # 凭据文件的位置和权限随平台不同，回归测试直接使用真实实现而不是桩。
+    target_sources(RhinePlatformRegression PRIVATE Qt/src/PlatformLinux.cpp)
 endif()
 add_test(NAME qt_platform_regression COMMAND RhinePlatformRegression
                                              "${CMAKE_CURRENT_BINARY_DIR}/platform-regression")
