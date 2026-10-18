@@ -2,7 +2,10 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 process.chdir(path.resolve(__dirname, '..'));
 const mac = process.platform === 'darwin';
-const python = process.env.PYTHON || (mac ? 'python3' : 'python');
+const win = process.platform === 'win32';
+const linux = process.platform === 'linux';
+// 统一使用 python3：多数发行版不再提供 python 命令。
+const python = process.env.PYTHON || (win ? 'python' : 'python3');
 function run(command, args, env = {}) {
     const result = spawnSync(command, args, {
         stdio: 'inherit',
@@ -34,8 +37,14 @@ for (const script of [
     run(process.execPath, [script]);
 }
 run('ctest', ['--test-dir', 'output/qt-build', '--output-on-failure']);
-const app = mac ? 'output/RHINE MUSIC DATABASE.app' : 'output/windows/RHINE MUSIC DATABASE';
-const resources = mac ? app + '/Contents/Resources' : app + '/resources';
+// 与构建脚本保持同一份部署目录；资源位置随平台布局不同。
+const deployments = {
+    darwin: ['output/RHINE MUSIC DATABASE.app', 'Contents/Resources'],
+    linux: ['output/RhineMusicDatabase.AppDir', 'usr/bin/resources'],
+    win32: ['output/windows/RHINE MUSIC DATABASE', 'resources'],
+};
+const [app, resourceDirectory] = deployments[process.platform];
+const resources = app + '/' + resourceDirectory;
 run(process.execPath, ['scripts/check-packaged-bridge.cjs', resources + '/MusicBridge']);
 run(process.execPath, ['Qt/tests/kugou-device.cjs', resources + '/MusicBridge']);
 if (mac) {
