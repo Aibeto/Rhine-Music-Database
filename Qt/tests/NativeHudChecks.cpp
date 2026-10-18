@@ -131,8 +131,29 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs, const QString &fixt
                 hud.draw(frame, 1920, 50);
                 const auto expectedCommands = expected["commands"].toArray();
                 const auto expectedHits = expected["hits"].toArray();
-                const bool sameHits = hud.hits == expectedHits;
-                const bool samePixels = paint(glyphs, hud.commands) == paint(glyphs, expectedCommands);
+                auto actualHits = hud.hits;
+                auto actualPixels = paint(glyphs, hud.commands);
+                auto expectedPixels = paint(glyphs, expectedCommands);
+                if (panel == "settings") {
+                    // 新增滚动轨道位于原留白处；其余设置行继续对照迁移前的尺寸、位置和像素。
+                    actualHits = {};
+                    for (const auto &value : hud.hits) {
+                        if (!value.toObject()["action"].toString().startsWith("settings:scroll-")) {
+                            actualHits.append(value);
+                        }
+                    }
+                    const auto bounds = hud.modalBounds(1920);
+                    const QRect rail(int(bounds.right() - 35),
+                                     int(bounds.top() + NativeHud::SettingsViewportTop), 28,
+                                     int(NativeHud::SettingsViewportBottom - NativeHud::SettingsViewportTop));
+                    for (auto *image : {&actualPixels, &expectedPixels}) {
+                        QPainter painter(image);
+                        painter.setCompositionMode(QPainter::CompositionMode_Source);
+                        painter.fillRect(rail, Qt::transparent);
+                    }
+                }
+                const bool sameHits = actualHits == expectedHits;
+                const bool samePixels = actualPixels == expectedPixels;
                 if (!sameHits || !samePixels) {
                     ok = false;
                     const auto name = provider + ":" + panel + (dark ? ":dark" : ":light");
@@ -154,6 +175,37 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs, const QString &fixt
                         }
                         paint(glyphs, hud.commands).save(prefix + "-actual.png");
                         paint(glyphs, expectedCommands).save(prefix + "-expected.png");
+                    }
+                }
+                if (panel == "settings") {
+                    const auto bounds = hud.modalBounds(1920);
+                    hud.wheel(bounds.center().x(), bounds.top() + 500, -120, 1, 10000.);
+                    hud.draw(frame, 1920, 50);
+                    bool performanceVisible = false;
+                    bool headerFixed = false;
+                    bool clipped = true;
+                    for (const auto &value : hud.hits) {
+                        const auto hit = value.toObject();
+                        const auto action = hit["action"].toString();
+                        if (action == "close-modal") {
+                            headerFixed = hit["y"].toDouble() == bounds.top() + 18;
+                        } else if (!action.startsWith("settings:scroll-") && !action.startsWith("player:")) {
+                            clipped &= hit["y"].toDouble() >= bounds.top() + NativeHud::SettingsViewportTop;
+                            clipped &= hit["y"].toDouble() + hit["height"].toDouble() <=
+                                       bounds.top() + NativeHud::SettingsViewportBottom;
+                        }
+                        performanceVisible |= action == "performance:toggle";
+                    }
+                    const bool atEnd = hud.settingsScroll == hud.settingsScrollMaximum();
+                    hud.wheel(bounds.center().x(), bounds.top() + 500, 120, -1, -10000.);
+                    const bool atStart = hud.settingsScroll == 0;
+                    hud.action("settings:scroll-down");
+                    hud.openModal("settings");
+                    const bool reset = hud.settingsScroll == 0;
+                    if (!performanceVisible || !headerFixed || !clipped || !atEnd || !atStart || !reset) {
+                        qCritical() << "Settings scroll regression" << provider << performanceVisible
+                                    << headerFixed << clipped << atEnd << atStart << reset;
+                        ok = false;
                     }
                 }
                 ++count;

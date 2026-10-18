@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "FrameProfiler.h"
 #include "MusicData.h"
 #include "MusicDiscover.h"
 #include "RhiScene.h"
@@ -14,6 +15,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QTemporaryDir>
+#include <QStandardPaths>
 #include <QThread>
 #include <QUrl>
 #include <QWheelEvent>
@@ -78,7 +80,7 @@ bool runGpuReferenceCheck(const QImage &expected, const QImage &actual) {
 }
 
 /** 用真实 QML 输入和 QRhi 窗口验证原生业务，全部数据来自本地夹具。 */
-int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
+int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, FrameProfiler &profiler) {
     if (!window || !backend.ready() || !backend.scene.review("archive")) {
         return 1;
     }
@@ -86,9 +88,11 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
     auto &hud = backend.app->hud;
     auto &player = music.player;
     bool ok = true;
+    int failures = 0;
     const auto check = [&](bool value, const char *name) {
         if (!value) {
             qCritical() << "UI regression:" << name;
+            ++failures;
         }
         ok &= value;
     };
@@ -803,6 +807,90 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output) {
         if (metrics.open(QIODevice::WriteOnly)) {
             metrics.write(QJsonDocument::fromVariant(backend.performance()).toJson());
         }
+    }
+    // 用户侧性能诊断覆盖实际窗口、停止采样、文件导出和业务内容隔离。
+    const auto failuresBeforePerformance = failures;
+    QTemporaryDir diagnostics;
+    profiler.setReportDirectory(diagnostics.path());
+    check(!profiler.visible() && !profiler.recording() && !backend.scene.isProfiling(),
+          "performance sampling is opt-in");
+    backend.action("settings");
+    refresh();
+    capture("performance-settings-top");
+    check(!hasAction("performance:toggle"), "offscreen performance entry has no input hit");
+    const auto settingsBounds = hud.modalBounds(width);
+    for (int index = 0; index < 24 && hud.settingsScroll < hud.settingsScrollMaximum(); ++index) {
+        wheel(settingsBounds.center().x(), settingsBounds.top() + 500, index % 2 == 0);
+    }
+    check(hud.settingsScroll > 0 && hasAction("performance:toggle"),
+          "settings native wheel exposes performance entry");
+    capture("performance-settings-scrolled");
+    check(click("performance:toggle") && profiler.visible(),
+          "settings performance button opens native monitor");
+    backend.action("close-modal");
+    refresh();
+    check(profiler.startRecording(), "performance recording starts");
+    wait.restart();
+    while (wait.elapsed() < 650) {
+        settle();
+    }
+    const auto sampledMetrics = profiler.metrics();
+    check(sampledMetrics.value("mainProcessResidentBytes").toLongLong() > 0,
+          "performance reports actual main-process memory");
+    check(sampledMetrics.value("qtFps").toDouble() >= 0 && sampledMetrics.contains("gapP95Ms"),
+          "performance reports actual present counters");
+    check(sampledMetrics.value("gpuTimeMs").isNull(), "CPU timing is never presented as GPU timing");
+    if (!output.isEmpty()) {
+        window->grabWindow().save(output + "/performance-panel.png");
+    }
+    check(profiler.saveRecording(), "performance recording exports atomically");
+    const auto reports = QDir(diagnostics.path()).entryList({"*.json"}, QDir::Files);
+    check(reports.size() == 1, "one manual performance diagnostic exported");
+    if (!reports.isEmpty()) {
+        QFile report(diagnostics.filePath(reports.first()));
+        check(report.open(QIODevice::ReadOnly), "performance diagnostic opens");
+        const auto bytes = report.readAll();
+        const auto document = QJsonDocument::fromJson(bytes).object();
+        const auto samples = document["samples"].toArray();
+        check(document["schema"].toInt() == 1 && !samples.isEmpty(), "diagnostic has samples and schema");
+        check(!document["environment"].toObject()["graphicsApi"].toString().isEmpty(),
+              "diagnostic identifies graphics backend");
+        for (const auto &entry : samples) {
+            check(!entry.toObject().contains("query") && !entry.toObject().contains("current") &&
+                      !entry.toObject().contains("cookies"),
+                  "diagnostic excludes business state");
+        }
+        if (!output.isEmpty()) {
+            QFile savedReport(output + "/performance-report.json");
+            if (savedReport.open(QIODevice::WriteOnly)) {
+                savedReport.write(bytes);
+            }
+        }
+    }
+    window->hide();
+    settle();
+    check(!backend.scene.isProfiling(), "hidden performance panel stops live sampling");
+    window->show();
+    settle();
+    check(backend.scene.isProfiling(), "visible performance panel resumes live sampling");
+    profiler.toggleVisible();
+    settle();
+    check(!backend.scene.isProfiling(), "closing performance panel disables native timing");
+    // 少于半秒的录制也必须写入最终一次采样。
+    check(profiler.startRecording() && profiler.saveRecording(), "short performance recording retained");
+    // 模拟录制期间目录被移走，保留待导出的记录。
+    const auto missingDirectory = diagnostics.filePath("removed");
+    QDir().mkpath(missingDirectory);
+    profiler.setReportDirectory(missingDirectory);
+    check(profiler.startRecording(), "performance error-path recording starts");
+    QDir(missingDirectory).removeRecursively();
+    check(!profiler.saveRecording() && !profiler.recording(), "failed export retains pending diagnostic");
+    profiler.setReportDirectory(diagnostics.path());
+    check(profiler.saveRecording(), "failed performance export can be retried");
+    profiler.setReportDirectory(QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) +
+                                "/RHINE Diagnostics");
+    if (failures == failuresBeforePerformance) {
+        qInfo() << "Native performance settings, sampling, export and retry checks passed";
     }
     if (ok) {
         qInfo() << "Native QML scrolling, paging and search input checks passed";

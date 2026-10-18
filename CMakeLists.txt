@@ -35,6 +35,8 @@ set(RHINE_APP_SOURCES
     Qt/src/DiscGeometry.h
     Qt/src/FrameProfiler.cpp
     Qt/src/FrameProfiler.h
+    Qt/src/ProcessMetrics.cpp
+    Qt/src/ProcessMetrics.h
     Qt/src/NativeCards.cpp
     Qt/src/NativeCards.h
     Qt/src/NativePicking.cpp
@@ -204,6 +206,7 @@ if(APPLE)
 elseif(WIN32)
     configure_file(Qt/WindowsIcon.rc.in "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc" @ONLY)
     target_sources(RhineMusicDatabase PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc")
+    target_link_libraries(RhineCore PRIVATE psapi)
     target_sources(RhineCore PRIVATE Qt/src/PlatformWindows.cpp)
     target_link_libraries(RhineCore PRIVATE crypt32 shell32 user32 windowsapp runtimeobject
                                             Qt6::MultimediaPrivate)

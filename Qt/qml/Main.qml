@@ -280,4 +280,11 @@ Window {
             color: "#777777"
         }
     }
+    Shortcut {
+        sequence: "F10"
+        onActivated: profiler.toggleVisible()
+    }
+    PerformancePanel {
+        z: 1000
+    }
 }

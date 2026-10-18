@@ -18,7 +18,7 @@
 #include <cstdio>
 #include <cstring>
 int makeIcon(const QString &directory);
-int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output);
+int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, FrameProfiler &profiler);
 /**
  * 建立应用身份、Qt 引擎和原生窗口。
  * 离线测试与正式播放沿用同一入口，资源只从独立应用读取。
@@ -89,6 +89,16 @@ int main(int argc, char **argv) {
         const int i = args.indexOf("--visual-fixtures");
         return backend.renderFixtures(args.value(i + 1), args.value(i + 2));
     }
+    QString profilePath;
+    if (args.contains("--frame-profile")) {
+        profilePath = args.value(args.indexOf("--frame-profile") + 1);
+        if (profilePath.isEmpty() || profilePath.startsWith("--")) {
+            qWarning() << "--frame-profile requires an output CSV path";
+            return 1;
+        }
+    }
+    FrameProfiler profiler(&backend, profilePath);
+    QObject::connect(&backend, &Engine::performanceRequested, &profiler, &FrameProfiler::toggleVisible);
     backend.start();
     qmlRegisterType<RhiScene>("Rhine.Native", 1, 0, "RhiScene");
     qmlRegisterType<Hud>("Rhine.Native", 1, 0, "Hud");
@@ -103,6 +113,7 @@ int main(int argc, char **argv) {
     engine.rootContext()->setContextProperty("rhineFontFamily",
                                              families.isEmpty() ? QString("sans-serif") : families.first());
     engine.rootContext()->setContextProperty("rhine", &backend);
+    engine.rootContext()->setContextProperty("profiler", &profiler);
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
         [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
@@ -124,14 +135,7 @@ int main(int argc, char **argv) {
 #endif
     backend.setWindow(window);
     window->installEventFilter(&backend);
-    if (args.contains("--frame-profile")) {
-        const auto path = args.value(args.indexOf("--frame-profile") + 1);
-        if (path.isEmpty() || path.startsWith("--")) {
-            qWarning() << "--frame-profile requires an output CSV path";
-            return 1;
-        }
-        new FrameProfiler(&backend, window, path);
-    }
+    profiler.attach(window);
     // 短暂切换窗口继续复用 GPU；隐藏或最小化超过两秒才释放图形设备和可重建缓存。
     auto backgroundRelease = new QTimer(window);
     backgroundRelease->setSingleShot(true);
@@ -160,7 +164,7 @@ int main(int argc, char **argv) {
         [&backend] { backend.recordResourceRelease(); }, Qt::DirectConnection);
     if (args.contains("--ui-self-test")) {
         return runUiChecks(backend, qobject_cast<QQuickWindow *>(engine.rootObjects().first()),
-                           args.value(args.indexOf("--ui-self-test") + 1));
+                           args.value(args.indexOf("--ui-self-test") + 1), profiler);
     }
     if (args.contains("--capture")) {
         const auto index = args.indexOf("--capture");

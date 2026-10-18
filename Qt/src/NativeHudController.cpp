@@ -44,6 +44,7 @@ void NativeHud::openModal(QString kind) {
     motion.set(true, lastTime, reduced);
     query.clear();
     listOffset = 0;
+    settingsScroll = 0;
     activeGroup.clear();
     artistTab = "songs";
     if (kind == "saved") {
@@ -294,6 +295,13 @@ void NativeHud::playerAction(const QStringList &parts) {
 
 /** 动作字符串保持原有输入协议，控制器直接更新原生音乐状态和场景。 */
 void NativeHud::action(QString value) {
+    if (modal == "settings" && !closing &&
+        (value == "settings:scroll-up" || value == "settings:scroll-down")) {
+        const auto movement = value == "settings:scroll-down" ? 120. : -120.;
+        settingsScroll = std::clamp(settingsScroll + movement, 0., settingsScrollMaximum());
+        return;
+    }
+
     auto &music = *m_music;
     const auto parts = value.split(':');
     if (value.startsWith("tab:")) {
@@ -452,6 +460,11 @@ void NativeHud::action(QString value) {
 
 void NativeHud::key(QString value, bool command) {
     if (frame.isEmpty()) {
+        return;
+    }
+    if (modal == "settings" && !closing && (value == "ArrowDown" || value == "ArrowUp")) {
+        const auto movement = value == "ArrowDown" ? 50. : -50.;
+        settingsScroll = std::clamp(settingsScroll + movement, 0., settingsScrollMaximum());
         return;
     }
     if (value == "Enter" && command) {

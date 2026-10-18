@@ -97,6 +97,7 @@ class Engine : public QObject {
     void stateChanged();
     void hitsChanged();
     void clearCredentials();
+    void performanceRequested();
 
   protected:
     bool eventFilter(QObject *watched, QEvent *event) override;

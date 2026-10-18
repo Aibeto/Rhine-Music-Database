@@ -261,6 +261,10 @@ void Engine::resize(double width, double height) {
     wake();
 }
 void Engine::action(QString value) {
+    if (value == "performance:toggle") {
+        emit performanceRequested();
+        return;
+    }
     // 窗口模式由 Qt 原生窗口处理，不进入音乐状态或场景动画。
     if (value == "window:fullscreen") {
         toggleFullscreen();

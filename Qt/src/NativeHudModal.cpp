@@ -161,6 +161,14 @@ void NativeHud::platformPanel(double x, double y, double width) {
     button("账号登录 / " + m_music->providerName(), x + 53, y + 660, 330, 48, "music:login", 16);
 }
 void NativeHud::settings(double x, double y, double width) {
+    const auto viewport =
+        QRectF(x + 40, y + SettingsViewportTop, width - 80, SettingsViewportBottom - SettingsViewportTop);
+    settingsScroll = std::clamp(settingsScroll, 0., settingsScrollMaximum());
+    const auto firstHit = hits.size();
+    const auto originalY = y;
+    save();
+    clip(viewport.x(), viewport.y(), viewport.width(), viewport.height());
+    y -= settingsScroll;
     const auto &music = *m_music;
     const auto left = x + 53;
     const auto usable = width - 106;
@@ -219,4 +227,39 @@ void NativeHud::settings(double x, double y, double width) {
     }
     button("切换全屏 / F11", left + usable - 260, y + 725, 260, 36, "window:fullscreen", 13);
     button("REINITIALIZE SYSTEM ↻", left + usable - 260, y + 769, 260, 36, "replay", 13);
+    rule(left, y + 861, usable, 0.2);
+    text("PERFORMANCE / 性能与诊断", left, y + 878, 12, "demibold");
+    fill(left, y + 910, usable, 44, tint);
+    text("帧数显示 / 性能面板", left + 12, y + 922, 15, "demibold");
+    button("显示 / 隐藏 · F10", left + usable - 235, y + 914, 225, 36, "performance:toggle", 13);
+    text("在性能面板内手动收集、导出诊断文件。", left, y + 971, 12);
+    restore();
+    // QML 的透明输入层不会继承绘制裁切，必须同步裁剪命中区域，避免隐藏按钮拦截点击。
+    QJsonArray clippedHits;
+    for (qsizetype index = 0; index < hits.size(); ++index) {
+        auto entry = hits.at(index).toObject();
+        if (index >= firstHit) {
+            const QRectF area(entry["x"].toDouble(), entry["y"].toDouble(), entry["width"].toDouble(),
+                              entry["height"].toDouble());
+            const auto visible = area.intersected(viewport);
+            if (visible.isEmpty()) {
+                continue;
+            }
+            entry["x"] = visible.x();
+            entry["y"] = visible.y();
+            entry["width"] = visible.width();
+            entry["height"] = visible.height();
+        }
+        clippedHits.append(entry);
+    }
+    hits = clippedHits;
+    const auto railX = x + width - 24;
+    const auto railTop = originalY + SettingsViewportTop + 30;
+    const auto railHeight = viewport.height() - 60;
+    const auto thumbHeight = railHeight * viewport.height() / (SettingsContentBottom - SettingsViewportTop);
+    fill(railX, railTop, 3, railHeight, dark ? QJsonArray{1, 1, 1, 0.1} : QJsonArray{0, 0, 0, 0.1});
+    fill(railX, railTop + settingsScroll / settingsScrollMaximum() * (railHeight - thumbHeight), 3,
+         thumbHeight, dark ? QJsonArray{1, 1, 1, 0.45} : QJsonArray{0, 0, 0, 0.4});
+    button("↑", railX - 10, originalY + SettingsViewportTop, 23, 25, "settings:scroll-up", 14);
+    button("↓", railX - 10, originalY + SettingsViewportBottom - 25, 23, 25, "settings:scroll-down", 14);
 }
