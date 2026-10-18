@@ -163,6 +163,7 @@ class MusicLibrary : public QObject {
 
   signals:
     void invalidated();
+    void playbackInvalidated();
     void selectionRequested(int index, QJsonObject navigation);
     void modeRequested(QString mode);
     void navigationRequested(QString axis, int direction);

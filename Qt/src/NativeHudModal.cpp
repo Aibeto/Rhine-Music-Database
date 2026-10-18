@@ -17,6 +17,7 @@ const QVector<Provider> providers{
 QString modalTitle(const QString &modal, const MusicLibrary &music) {
     static const QHash<QString, QString> titles{{"provider", "MUSIC PLATFORM"},
                                                 {"settings", "SYSTEM SETTINGS"},
+                                                {"disc-rotation-warning", "DISC ROTATION"},
                                                 {"saved", "MY MUSIC"},
                                                 {"player", "NOW PLAYING"},
                                                 {"discover", "DISCOVER MUSIC"},
@@ -37,6 +38,7 @@ QString modalTitle(const QString &modal, const MusicLibrary &music) {
 QString modalSubtitle(const QString &modal, const MusicLibrary &music) {
     static const QHash<QString, QString> subtitles{{"provider", "直接选择音乐平台 / 各平台账号独立保存"},
                                                    {"settings", "终端偏好设置"},
+                                                   {"disc-rotation-warning", "开启前请确认资源与功耗风险"},
                                                    {"player", "播放队列 / QUEUE"},
                                                    {"discover", "推荐 / 排行榜 / 新专辑"},
                                                    {"playlist-form", "编辑我的歌单"},
@@ -81,7 +83,15 @@ void NativeHud::modalDraw(double width) {
     button("← 返回", x + usable - 220, y + 18, 167, 54, "close-modal", 20, "demibold");
     text(modalTitle(modal, music), x + 53, y + 91, 38, "demibold");
     text(modalSubtitle(modal, music), x + 53, y + 147, 15);
-    if (modal == "provider") {
+    if (modal == "disc-rotation-warning") {
+        text("唱片旋转需要持续刷新画面。", x + 53, y + 250, 22, "demibold");
+        text("开启后会增加 CPU / GPU 占用、耗电和发热，可能缩短电池续航。", x + 53, y + 310, 16);
+        text("仅当前歌曲的详情页和歌词页旋转；资源库、暂停和后台均不旋转。", x + 53, y + 352, 16);
+        text("该功能默认关闭，减少动态效果开启时也不会旋转。", x + 53, y + 394, 16);
+        button("了解风险，仍然开启", x + 53, y + 480, 260, 48, "disc-rotation:enable", 16);
+        button("保持关闭", x + 340, y + 480, 180, 48, "disc-rotation:cancel", 16);
+
+    } else if (modal == "provider") {
         platformPanel(x, y, usable);
     } else if (modal == "confirm") {
         limited(confirmTitle, x + 53, y + 260, 24, usable - 106, "demibold");
@@ -233,6 +243,11 @@ void NativeHud::settings(double x, double y, double width) {
     text("帧数显示 / 性能面板", left + 12, y + 922, 15, "demibold");
     button("显示 / 隐藏 · F10", left + usable - 235, y + 914, 225, 36, "performance:toggle", 13);
     text("在性能面板内手动收集、导出诊断文件。", left, y + 971, 12);
+    fill(left, y + 1014, usable, 44, tint);
+    text("DISC ROTATION / 唱片旋转", left + 12, y + 1026, 15, "demibold");
+    button(discRotation ? "开启 / 点击关闭" : "关闭 / 点击了解风险", left + usable - 235, y + 1018, 225, 36,
+           "disc-rotation", 13);
+    text("默认关闭；开启会增加持续渲染、耗电和发热。", left, y + 1075, 12);
     restore();
     // QML 的透明输入层不会继承绘制裁切，必须同步裁剪命中区域，避免隐藏按钮拦截点击。
     QJsonArray clippedHits;

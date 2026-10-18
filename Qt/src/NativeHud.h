@@ -77,13 +77,14 @@ class NativeHud : public QObject {
     // 设置沿用原舞台坐标与行高，只在固定标题下滚动内容。
     static constexpr double SettingsViewportTop = 176;
     static constexpr double SettingsViewportBottom = 836;
-    static constexpr double SettingsContentBottom = 1000;
+    static constexpr double SettingsContentBottom = 1110;
     double settingsScroll = 0;
     double settingsScrollMaximum() const {
         return SettingsContentBottom - SettingsViewportBottom;
     }
     bool dark = false;
     bool reduced = false;
+    bool discRotation = false;
     bool closing = false;
     bool lyricsMode = false;
     double width = 1920;

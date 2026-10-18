@@ -19,6 +19,7 @@
 #include <QThread>
 #include <QUrl>
 #include <QWheelEvent>
+#include <QtEndian>
 #include <functional>
 #include <algorithm>
 #include <cmath>
@@ -523,6 +524,131 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     player.current = songs.first().toObject();
     player.queue = MusicData::slice(songs, 0, 10);
     player.index = 0;
+    hud.modal.clear();
+    hud.lyricsMode = false;
+    hud.reduced = false;
+    music.current = player.current;
+    player.loading = false;
+    player.failed = false;
+    backend.scene.musicIdentity(music.current["key"].toString());
+    backend.scene.review("detail");
+    backend.host.mediaControl("seek", 500);
+    backend.host.mediaControl("resume");
+    refresh();
+    check(!hud.discRotation, "disc rotation is disabled by default");
+    const auto disabledAngle = backend.frame()["discAngle"].toDouble();
+    settle();
+    refresh();
+    check(backend.frame()["discAngle"].toDouble() == disabledAngle, "default playback never rotates");
+    hud.reduced = true;
+    backend.action("disc-rotation");
+    refresh();
+    check(hud.modal == "disc-rotation-warning" && !hud.discRotation, "enabling requires a risk prompt");
+    capture("disc-rotation-warning");
+    check(click("disc-rotation:cancel") && !hud.discRotation, "cancel leaves rotation disabled");
+    backend.action("disc-rotation");
+    refresh();
+    check(click("disc-rotation:enable") && hud.discRotation, "risk acceptance enables rotation");
+    hud.modal.clear();
+    hud.motion.set(false, 50, true);
+    hud.reduced = false;
+    refresh();
+    const auto discAngle = backend.frame()["discAngle"].toDouble();
+    const auto discUploads = backend.performance()["coverUploads"].toULongLong();
+    settle();
+    refresh();
+    check(backend.frame()["discAngle"].toDouble() > discAngle, "playing selected disc rotates");
+    check(backend.performance()["coverUploads"].toULongLong() == discUploads,
+          "rotation reuses the uploaded cover texture");
+    capture("playing-disc-rotation");
+    hud.lyricsMode = true;
+    refresh();
+    const auto lyricsDiscAngle = backend.frame()["discAngle"].toDouble();
+    settle();
+    refresh();
+    check(backend.frame()["discAngle"].toDouble() > lyricsDiscAngle,
+          "lyrics page keeps selected disc rotating");
+    hud.lyricsMode = false;
+    backend.host.mediaControl("pause");
+    refresh();
+    const auto pausedAngle = backend.frame()["discAngle"].toDouble();
+    settle();
+    refresh();
+    check(backend.frame()["discAngle"].toDouble() == pausedAngle, "paused disc preserves its angle");
+    music.current = songs.at(1).toObject();
+    refresh();
+    check(backend.frame()["discAngle"].toDouble() == 0, "another song has no playing disc rotation");
+    // 使用更长的本地 PCM，确保休眠观察期间持续播放并触发真实进度通知。
+    QFile shortAudio(audioFile.fileName());
+    check(shortAudio.open(QIODevice::ReadOnly), "read long playback fixture source");
+    auto longWave = shortAudio.readAll();
+    const auto samples = longWave.mid(44);
+    for (int repeat = 0; repeat < 4; ++repeat) {
+        longWave.append(samples);
+    }
+    qToLittleEndian<quint32>(quint32(longWave.size() - 8), longWave.data() + 4);
+    qToLittleEndian<quint32>(quint32(longWave.size() - 44), longWave.data() + 40);
+    QFile longAudio(audioFixture.filePath("rotation-idle.wav"));
+    check(longAudio.open(QIODevice::WriteOnly), "write long playback fixture");
+    longAudio.write(longWave);
+    longAudio.close();
+    backend.host.mediaLoad(QUrl::fromLocalFile(longAudio.fileName()).toString());
+    backend.scene.review("archive");
+    hud.reduced = true;
+    backend.wake();
+    wait.restart();
+    while (!backend.performance()["idle"].toBool() && wait.elapsed() < 5000) {
+        settle();
+    }
+    check(backend.performance()["idle"].toBool(), "playing archive enters demand sleep");
+    const auto archiveSceneUpdates = backend.performance()["sceneUpdates"].toULongLong();
+    const auto archivePosition = backend.host.mediaState()["position"].toLongLong();
+    bool stayedAsleep = true;
+    for (int sample = 0; sample < 12; ++sample) {
+        settle();
+        stayedAsleep &=
+            backend.performance()["idle"].toBool() && !backend.performance()["timerActive"].toBool();
+    }
+    check(stayedAsleep && backend.performance()["sceneUpdates"].toULongLong() == archiveSceneUpdates &&
+              backend.host.mediaState()["position"].toLongLong() > archivePosition,
+          "playing archive remains asleep through progress updates without 3D redraws");
+    {
+        // 独立时钟避免固定展示夹具的 50 秒时间污染正常动效与媒体通知回归。
+        Engine playingArchive(backend.root(), true);
+        playingArchive.scene.review("archive");
+        auto &archiveMusic = playingArchive.app->music;
+        archiveMusic.selectedPhysical = playingArchive.scene.selection();
+        archiveMusic.current = player.current;
+        archiveMusic.player.current = player.current;
+        playingArchive.app->hud.discRotation = true;
+        playingArchive.app->hud.reduced = false;
+        playingArchive.host.mediaControl("volume", 0);
+        playingArchive.host.mediaLoad(QUrl::fromLocalFile(longAudio.fileName()).toString());
+        playingArchive.start();
+        wait.restart();
+        while (!playingArchive.performance()["idle"].toBool() && wait.elapsed() < 5000) {
+            settle();
+        }
+        check(playingArchive.performance()["idle"].toBool(),
+              "full-motion playing archive enters demand sleep");
+        const auto sceneUpdates = playingArchive.performance()["sceneUpdates"].toULongLong();
+        bool idleDuringPlayback = true;
+        for (int sample = 0; sample < 12; ++sample) {
+            archiveMusic.player.lyrics.changed();
+            settle();
+            idleDuringPlayback &= playingArchive.performance()["idle"].toBool() &&
+                                  !playingArchive.performance()["timerActive"].toBool();
+        }
+        check(idleDuringPlayback &&
+                  playingArchive.performance()["sceneUpdates"].toULongLong() == sceneUpdates,
+              "full-motion archive ignores progress and lyrics wakeups while rotation is enabled");
+    }
+    backend.host.mediaLoad(QUrl::fromLocalFile(audioFile.fileName()).toString());
+    backend.host.mediaControl("pause");
+    hud.discRotation = false;
+    music.current = player.current;
+    backend.scene.review("detail");
+    hud.reduced = true;
     hud.openModal("player");
     refresh();
     check(click("player:mode") && player.mode == "one", "native playback mode click");

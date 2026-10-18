@@ -30,6 +30,7 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     }
     dark = themeMode == "system" ? host->systemDark() : themeMode == "dark";
     reduced = host->preference("motion") == "reduced";
+    discRotation = host->preference("disc-rotation") == "on";
     connect(music, &MusicLibrary::invalidated, this, &NativeHud::finishPage);
 }
 
@@ -446,6 +447,19 @@ void NativeHud::action(QString value) {
                 : QStringList{"standard", "higher", "exhigh", "lossless", "hires", "jymaster"};
         music.player.quality = cycle(qualities, music.player.quality);
         m_host->setPreference("quality", music.player.quality);
+    } else if (value == "disc-rotation") {
+        if (discRotation) {
+            discRotation = false;
+            m_host->setPreference("disc-rotation", "off");
+        } else {
+            openModal("disc-rotation-warning");
+        }
+    } else if (value == "disc-rotation:enable") {
+        discRotation = true;
+        m_host->setPreference("disc-rotation", "on");
+        openModal("settings");
+    } else if (value == "disc-rotation:cancel") {
+        openModal("settings");
     } else if (value == "theme") {
         themeMode = cycle({"light", "dark", "system"}, themeMode);
         dark = themeMode == "system" ? m_host->systemDark() : themeMode == "dark";

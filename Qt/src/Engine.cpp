@@ -21,6 +21,7 @@ Engine::Engine(QString path, bool offline, QObject *parent)
     : QObject(parent), host(path, offline), scene(path), m_glyphs(path) {
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
     app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
+    connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
     app->initialize();
     connect(&host, &Host::invalidated, this, [this] { wake(false); });
     connect(&host, &Host::mediaChanged, this, &Engine::pollMedia, Qt::QueuedConnection);
@@ -205,6 +206,21 @@ void Engine::trimMemory() {
     host.trimMemory(retainedImages);
     scene.trimMemory();
 }
+/** 播放栏按需重绘时保持资源库休眠；只有可见的旋转或歌词动画需要连续调度。 */
+void Engine::refreshPlayback() {
+    if (!m_visible) {
+        return;
+    }
+    if (!m_sleeping || !m_sceneSleeping || scene.changed()) {
+        wake(false);
+        return;
+    }
+    step(m_animationTime);
+    if (m_discRotating || app->hud.animating(m_animationTime)) {
+        wake(false);
+    }
+}
+
 void Engine::pollMedia() {
     app->poll(clock.elapsed() / 1000.0, true);
     const auto &player = app->music.player;
@@ -244,8 +260,13 @@ void Engine::tick() {
         scene.energyIdle(true);
     }
     step(m_animationTime);
+    // 只有盘面在运动时以 30Hz 刷新；交互和原有动画仍使用原频率。
+    timer.setInterval(m_discRotating && m_sceneSleeping && !app->hud.animating(m_animationTime) &&
+                              now - m_lastInput >= 750 && !m_pressed
+                          ? 33
+                          : 16);
     if (now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
-        !app->hud.animating(m_animationTime) && m_frame["mode"] != "boot") {
+        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot") {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();
@@ -420,6 +441,7 @@ void Engine::step(double time) {
     if (object.isEmpty()) {
         return;
     }
+    const auto previousDiscAngle = m_frame["discAngle"].toDouble();
     m_frame = scene.frame;
     auto signature = m_frame;
     for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor"}) {
@@ -444,8 +466,29 @@ void Engine::step(double time) {
     const auto current = object["current"].toObject();
     const auto cover = object["cover"].toString();
     const auto coverRevision = host.image(cover).cacheKey();
-    const bool visualChanged =
-        !stable || current != m_current || cover != m_cover || coverRevision != m_coverRevision;
+    const auto &player = app->music.player;
+    const auto identity = MusicPlayer::identity(player.current);
+    if (identity != m_discIdentity) {
+        m_discIdentity = identity;
+        m_discAngle = 0;
+    }
+    const bool wasRotating = m_discRotating;
+    m_discRotating = m_visible && app->hud.discRotation && !app->hud.reduced && app->hud.modal.isEmpty() &&
+                     m_frame["mode"] == "detail" && !m_frame["viewer"].toBool() &&
+                     current["kind"] == "song" && MusicPlayer::identity(current) == identity &&
+                     !player.loading && !player.failed && player.state["playing"].toBool();
+    if (wasRotating && m_discRotating) {
+        // 20 秒一圈；接续可见视觉时钟，暂停或隐藏期间不补转。
+        m_discAngle = std::fmod(m_discAngle + std::clamp(time - m_discTime, 0., .05) *
+                                                  (2 * 3.14159265358979323846 / 20),
+                                2 * 3.14159265358979323846);
+    }
+    m_discTime = time;
+    const bool showDiscAngle = current["kind"] == "song" && MusicPlayer::identity(current) == identity;
+    m_frame["discAngle"] = showDiscAngle ? m_discAngle : 0;
+    const bool discChanged = m_discRotating || previousDiscAngle != m_frame["discAngle"].toDouble();
+    const bool visualChanged = discChanged || !stable || current != m_current || cover != m_cover ||
+                               coverRevision != m_coverRevision;
     m_coverRevision = coverRevision;
     m_current = current;
     m_cover = object["cover"].toString();

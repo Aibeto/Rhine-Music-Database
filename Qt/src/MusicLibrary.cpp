@@ -43,7 +43,11 @@ MusicLibrary::MusicLibrary(Host *host, const QJsonObject &content, QObject *pare
         }
     }
     discover = std::make_unique<MusicDiscover>(this);
-    connect(&player, &MusicPlayer::changed, this, &MusicLibrary::changed);
+    // 播放进度与歌词通知只刷新可见播放界面，不作废资源库场景。
+    connect(&player, &MusicPlayer::changed, this, [this] {
+        ++revision;
+        emit playbackInvalidated();
+    });
     connect(&player, &MusicPlayer::trackSelected, this, &MusicLibrary::followPlayback);
 }
 

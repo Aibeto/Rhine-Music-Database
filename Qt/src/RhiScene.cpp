@@ -11,6 +11,7 @@
 #include <rhi/qrhi.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <map>
 #include <vector>
@@ -414,7 +415,9 @@ class Renderer {
                 {n(d, "ior"), n(d, "attenuationDistance"), name == "Index_Inlay" ? 1.f : 0.f,
                  d["sharpCover"].toBool() ? 1.f : 0.f},
                 v4(vector(d["attenuation"])),
-                {n(d, "clearcoat"), n(d, "clearcoatRoughness"), optical ? 1.f : 0.f, 0},
+                {n(d, "clearcoat"), n(d, "clearcoatRoughness"),
+                 type == 6 ? float(std::cos(n(d, "discAngle"))) : (optical ? 1.f : 0.f),
+                 type == 6 ? float(std::sin(n(d, "discAngle"))) : 0.f},
                 {type, n(d, "side"), n(d, "subdued"), d["floor"].toBool() ? 1.f : 0.f},
                 v4(dark(name), d["instanced"].toBool() ? 1.f : 0.f)};
     }
@@ -475,6 +478,7 @@ class Renderer {
             part["order"] = 0;
             part["side"] = 2;
             part["castShadow"] = false;
+            part["discAngle"] = d["musicSelected"].toBool() ? f["discAngle"].toDouble() : 0;
             part["name"] = "Music_Disc_Print";
             part["mesh"] = -2;
             result << part;

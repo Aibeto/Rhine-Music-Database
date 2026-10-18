@@ -50,7 +50,13 @@ vec4 surface(Out o, bool front) {
         return vec4(rgb, v.a * o.quality);
     }
     if (m.flags.x == 6) {
-        base = linearColor(texture(cover, vec2(o.uv.x, 1 - o.uv.y)).rgb);
+        // 只旋转盘面采样坐标；圆环几何、外壳、法线和缓存阴影保持不动。
+        vec2 discUV = vec2(o.uv.x, 1 - o.uv.y);
+        if (m.extra.z != 1 || m.extra.w != 0) {
+            vec2 centered = discUV - vec2(.5);
+            discUV = mat2(m.extra.z, -m.extra.w, m.extra.w, m.extra.z) * centered + vec2(.5);
+        }
+        base = linearColor(texture(cover, discUV).rgb);
     }
     if (m.flags.x == 2.0) {
         float coverage =
@@ -136,7 +142,7 @@ vec4 surface(Out o, bool front) {
                     envSample(env, reflect(-V, N), cr) * intensity * envBRDF(vec3(.04), nv, cr, lut);
         color = color * (1 - cc * f) + coat * cc;
     }
-    if (m.extra.z > 0) {
+    if (m.flags.x != 6 && m.extra.z > 0) {
         alpha = min(.86, alpha + .42 * pow(1 - abs(dot(N, V)), 3.0));
     }
     color = mix(color, g.fogColor.xyz, smoothstep(g.fog.x, g.fog.y, o.viewZ));

@@ -127,6 +127,10 @@ class Engine : public QObject {
     double m_wheelDistance = 0;
     qint64 m_lastTick = 0, m_lastInput = 0;
     double m_animationTime = 0;
+    double m_discAngle = 0;
+    double m_discTime = 0;
+    bool m_discRotating = false;
+    QString m_discIdentity;
     quint64 m_steps = 0, m_sceneUpdates = 0, m_hudUpdates = 0;
     int m_stableFrames = 0;
     QJsonObject m_sceneSignature;
@@ -134,6 +138,7 @@ class Engine : public QObject {
     void tick();
     void flushPointer();
     void pollMedia();
+    void refreshPlayback();
     QElapsedTimer clock;
     double m_width = 1280;
     double m_height = 720;
