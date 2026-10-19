@@ -4,13 +4,14 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const bridge = path.resolve(process.argv[2] || 'MusicBridge');
+const bridge = path.resolve(process.argv[2] || 'output/resources/MusicBridge');
+const runtime = path.join(bridge, process.platform === 'win32' ? 'node.exe' : 'node');
 const hook = path.resolve(__dirname, 'fixtures/bridge-http.cjs');
 
 /** 在独立临时目录执行一组真实 IPC 请求，并始终清理本测试的桥接进程和文件。 */
 async function scenario(environment, verify) {
     const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'rhine-xeapi-check-'));
-    const child = spawn(process.execPath, ['--require', hook, path.join(bridge, 'worker.cjs')], {
+    const child = spawn(runtime, ['--require', hook, path.join(bridge, 'worker.cjs')], {
         cwd: bridge,
         env: {
             ...process.env,
@@ -28,7 +29,22 @@ async function scenario(environment, verify) {
     let errors = '';
     let sequence = 0;
     const pending = new Map();
-    const exit = new Promise((resolve) => child.once('exit', resolve));
+    const rejectPending = (error) => {
+        for (const request of pending.values()) {
+            clearTimeout(request.timer);
+            request.reject(error);
+        }
+        pending.clear();
+    };
+    // 启动失败直接报告原始原因
+    child.on('error', (error) => rejectPending(error));
+    child.stdin.on('error', (error) => rejectPending(error));
+    const exit = new Promise((resolve) => {
+        child.once('close', (code, signal) => {
+            rejectPending(new Error(`XEAPI worker exited (${code ?? signal}): ${errors}`));
+            resolve(code);
+        });
+    });
     child.stderr.on('data', (chunk) => {
         errors += chunk;
     });
@@ -50,7 +66,7 @@ async function scenario(environment, verify) {
         return new Promise((resolve, reject) => {
             const requestId = String(++sequence);
             const timer = setTimeout(() => reject(new Error('XEAPI IPC timeout: ' + errors)), 15000);
-            pending.set(requestId, { resolve, timer });
+            pending.set(requestId, { resolve, reject, timer });
             child.stdin.write(
                 JSON.stringify({
                     id: requestId,
