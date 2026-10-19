@@ -118,6 +118,7 @@ bool runNativeMusicChecks(const QString &root) {
     int details = 0;
     int mutations = 0;
     bool rejectQQWrite = false;
+    bool rejectLibrary = false;
     host.fixture = [&](QString route, QJsonObject parameters) {
         const auto args = parameters["args"].toArray();
         QJsonValue value;
@@ -168,6 +169,9 @@ bool runNativeMusicChecks(const QString &root) {
         } else if (route.endsWith("/likedIDs")) {
             value = QJsonArray{"1", "missing", "2"};
         } else if (route.endsWith("/userPlaylists")) {
+            if (rejectLibrary) {
+                return QJsonObject{{"body", QJsonObject{{"code", 502}, {"message", "本地模拟读取失败"}}}};
+            }
             auto owned = MusicData::item("playlist", "8", "本人歌单");
             owned["creatorID"] = "42";
             const auto collected = MusicData::item("playlist", "9", "收藏歌单");
@@ -385,6 +389,49 @@ bool runNativeMusicChecks(const QString &root) {
     library.switchProvider("kugou", "lite");
     check(library.kugouEdition == "lite" && library.accountKey() == "kugou-lite",
           "Kugou editions retain separate account keys");
+    // 恢复与串行加载流程
+    for (const auto &provider : {QString("netease"), QString("qq"), QString("kugou")}) {
+        library.switchProvider(provider);
+        host.cookies["MUSIC_U"] = "fixture-loading";
+        host.cookies["qqmusic_session"] = "fixture-loading";
+        host.cookies["__kugou"] =
+            QJsonObject{{library.kugouEdition, QJsonObject{{"token", "fixture-loading"}, {"userid", "42"}}}};
+        library.restoreAccount();
+        library.showSource(2);
+        library.showSource(3);
+        check(library.restoringAccount && library.sourceMessage(3).contains("正在恢复"),
+              "shared restore hint appears before account response");
+        check(waitFor([&] { return !library.sourceLoading(); }) && !library.lists[3].isEmpty(),
+              "last requested collection loads after account restoration");
+        library.lists[1] = {};
+        library.hasMore[1] = true;
+        library.loadMoreSource(1);
+        library.lists[2] = {};
+        library.lists[3] = {};
+        library.hasMore[2] = true;
+        library.hasMore[3] = true;
+        library.loadMoreSource(3);
+        check(library.sourceMessage(3).contains("正在读取"), "shared collection waiting hint");
+        check(waitFor([&] { return !library.sourceLoading(); }) && !library.lists[3].isEmpty(),
+              "collection switch during a serial request is not dropped");
+        library.lists[3] = {};
+        library.hasMore[3] = true;
+        host.invalidateMetadata();
+        rejectLibrary = true;
+        library.loadMoreSource(3);
+        check(waitFor([&] { return !library.sourceLoading(); }) && library.sourceMessage(3).contains("重试"),
+              "failure replaces loading with a retry hint");
+        rejectLibrary = false;
+        host.invalidateMetadata();
+        library.loadMoreSource(3);
+        check(waitFor([&] { return !library.sourceLoading(); }) && !library.lists[3].isEmpty(),
+              "explicit retry recovers the collection");
+        library.restoreAccount();
+        library.logout();
+        check(waitFor([&] { return !library.sourceLoading(); }) && library.uid.isEmpty() &&
+                  library.sourceMessage(3).contains("登录后"),
+              "logout clears restore state and isolates its old callback");
+    }
     check(nativeSearches > 0 && details > 0 && mutations >= 2,
           "native business exercises the real callback boundary");
     host.shutdown();

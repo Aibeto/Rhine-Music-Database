@@ -93,14 +93,8 @@ void NativeHud::libraryPanel(double x, double y, double width) {
         restore();
     }
     if (values.isEmpty()) {
-        auto message = music.status;
-        if (music.sourceLoading()) {
-            message = "正在读取音乐…";
-        } else if (lane > 0 && music.uid.isEmpty()) {
-            message = "登录后查看个人音乐";
-        }
-        limited(message, x + 53, y + 501, 22, width - 106);
-        if (lane > 0 && music.uid.isEmpty()) {
+        limited(music.sourceMessage(lane), x + 53, y + 501, 22, width - 106);
+        if (lane > 0 && music.uid.isEmpty() && !music.restoringAccount) {
             button("登录" + music.providerName() + " →", x + 53, y + 561, 300, 40, "music:login", 16);
         }
     }

@@ -284,21 +284,25 @@ void NativeHud::empty(double width) {
         label = "查看歌单详情 →";
         action = "music:directory-info";
     } else if (music.selectedLane > 0) {
-        if (music.uid.isEmpty()) {
+        title = music.sourceLoading() ? QStringLiteral("正在同步音乐资料…") : music.libraryName();
+        label = "查看我的音乐 →";
+        action = "saved";
+        if (music.uid.isEmpty() && !music.restoringAccount) {
             title = "登录后查看";
+            label = "登录" + music.providerName() + " →";
+            action = "music:login";
         }
-        label = "登录" + music.providerName() + " →";
-        action = "music:login";
     }
     limited(title, x, 509, 28, width - x - 59, "bold");
     rule(x, 601, width - x - 59);
-    limited(music.status, x, 624, 16, width - x - 117);
+    limited(music.directory ? music.status : music.sourceMessage(music.selectedLane), x, 624, 16,
+            width - x - 117);
     button(label, x, 703, 300, 32, action, 14);
 }
 void NativeHud::archive(double width) {
     auto &music = *m_music;
     const auto item = music.current;
-    if (!item.isEmpty()) {
+    if (!item.isEmpty() && !item["id"].toString().isEmpty()) {
         const auto x = width * 0.50520833;
         if (music.directory) {
             control("← 返回上一级", 59, 211, 280, "music:parent");

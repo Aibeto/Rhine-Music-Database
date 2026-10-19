@@ -63,8 +63,10 @@ class MusicLibrary : public QObject {
         return provider == "netease" || provider == "qq";
     }
     bool sourceLoading() const {
-        return searchLoading || personalLoading;
+        return restoringAccount || searchLoading || personalLoading;
     }
+    QString sourceMessage(int lane) const;
+    bool restoringAccount = false;
     quint64 accountGeneration() const {
         return m_accountGeneration;
     }
@@ -194,7 +196,10 @@ class MusicLibrary : public QObject {
     MusicApi::Valid valid(quint64 token, const quint64 *counter);
     void loadCover(const QJsonObject &value);
     void loadLikedIDs(int lane, quint64 token, QString user);
-    void completePersonal(int lane);
+    void completePersonal(int lane, QString error = {});
+    int m_pendingLane = -1;
+    QString m_accountError;
+    std::array<QString, 5> m_sourceErrors;
     void restoreCachedAccount();
     void rememberIdentityName(QString provider, QString name);
     void reportLoginFailure(const QJsonObject &details, QString message = {});

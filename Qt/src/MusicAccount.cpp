@@ -131,9 +131,13 @@ void MusicLibrary::restoreAccount(Completion done) {
         }
         return;
     }
+    restoringAccount = true;
+    m_accountError.clear();
+    changed();
     api.call(
         "account", {},
         [this, done](MusicReply result) {
+            restoringAccount = false;
             if (result.ok()) {
                 const auto values = result.value.toArray();
                 uid = values.at(0).toString();
@@ -147,6 +151,12 @@ void MusicLibrary::restoreAccount(Completion done) {
                 status = QStringLiteral("登录已失效，请重新登录");
             } else {
                 status = QStringLiteral("账号验证暂不可用，已保留本机登录记录");
+            }
+            m_accountError = result.ok() ? QString() : status;
+            const auto pending = m_pendingLane;
+            m_pendingLane = -1;
+            if (result.ok() && pending > 0) {
+                loadMoreSource(pending);
             }
             changed();
             if (done) {
@@ -187,6 +197,10 @@ void MusicLibrary::switchProvider(QString source, QString edition, Completion do
     host->setPreference("provider", source);
     api.provider = source;
     restoreCachedAccount();
+    restoringAccount = false;
+    m_pendingLane = -1;
+    m_accountError.clear();
+    m_sourceErrors.fill({});
     loginStatus.clear();
     loginDiagnostics = {};
     current = {};
@@ -382,6 +396,8 @@ void MusicLibrary::confirmLogin(quint64 token, bool password) {
                 return;
             }
             ++m_accountGeneration;
+            restoringAccount = false;
+            m_accountError.clear();
             uid = result.value.toArray().at(0).toString();
             nickname = result.value.toArray().at(1).toString();
             rememberIdentityName(provider, nickname);
@@ -561,6 +577,10 @@ void MusicLibrary::logout() {
     groupIndices.clear();
     cancelLogin();
     ++m_accountGeneration;
+    restoringAccount = false;
+    m_pendingLane = -1;
+    m_accountError.clear();
+    m_sourceErrors.fill({});
     host->logout();
     host->setPreference("account-id-" + accountKey(), "");
     uid.clear();
