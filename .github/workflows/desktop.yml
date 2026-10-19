@@ -4,12 +4,20 @@ on:
   push:
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      source_sha:
+        required: true
+        type: string
+      release_version:
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  group: desktop-${{ github.workflow }}-${{ github.ref }}-${{ inputs.release_version || 'development' }}
   cancel-in-progress: true
 
 jobs:
@@ -39,8 +47,15 @@ jobs:
     env:
       NODE_VERSION: '22.14.0'
       RHINE_BUILD_TYPE: Release
+      RHINE_VERSION: ${{ inputs.release_version || '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - name: Validate release build support
+        if: inputs.release_version != ''
+        shell: bash
+        run: node -e "require('./scripts/release-version.cjs').buildVersion()"
       - uses: actions/setup-node@v4
         with:
           node-version: '22.14.0'
@@ -124,6 +139,6 @@ jobs:
         with:
           name: RHINE-MUSIC-DATABASE-${{ matrix.artifact }}
           path: |
-            output/RhineMusicDatabase-*.zip
-            output/RhineMusicDatabase-*.AppImage
+            output/RhineMusicDatabase-${{ inputs.release_version || '*' }}-*.zip
+            output/RhineMusicDatabase-${{ inputs.release_version || '*' }}-*.AppImage
           if-no-files-found: error

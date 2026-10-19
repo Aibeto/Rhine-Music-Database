@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { buildVersion } = require('./release-version.cjs');
 const { spawnSync } = require('node:child_process');
 process.chdir(path.resolve(__dirname, '..'));
 const mac = process.platform === 'darwin';
@@ -41,7 +42,12 @@ if (linux) {
     console.log(image);
     process.exit(0);
 }
-const archive = path.resolve(`output/RhineMusicDatabase-${mac ? 'macOS' : 'Windows'}-${Date.now()}.zip`);
+const version = buildVersion();
+const platform = mac ? 'macOS-arm64' : 'Windows-x64';
+const name = version.release
+    ? `RhineMusicDatabase-v${version.version}-${platform}`
+    : `RhineMusicDatabase-${mac ? 'macOS' : 'Windows'}-${Date.now()}`;
+const archive = path.resolve(`output/${name}.zip`);
 if (mac) {
     run('codesign', ['--verify', '--deep', '--strict', app]);
     run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, archive]);

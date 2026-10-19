@@ -388,6 +388,23 @@ void NativeHud::settings(double x, double y, double width) {
     button(discRotation ? "开启 / 点击关闭" : "关闭 / 点击了解风险", left + usable - 235, y + 1018, 225, 36,
            "disc-rotation", 13);
     text("默认关闭；开启会增加持续渲染、耗电和发热。", left, y + 1075, 12);
+    rule(left, y + 1120, usable, 0.2);
+    text("SOFTWARE UPDATE / 软件更新", left, y + 1138, 12, "demibold");
+    const auto &updater = m_host->updater;
+    const auto buildLabel = RHINE_RELEASE_BUILD ? QString() : QString(" · 开发版");
+    text("当前版本 / " + AppUpdater::currentVersion() + buildLabel, left, y + 1170, 15, "demibold");
+    button(m_host->preference("auto-update") == "off" ? "启动检查 / 关闭" : "启动检查 / 开启",
+           left + usable - 235, y + 1158, 225, 36, "update:auto", 13);
+    limited(updater.status(), left, y + 1210, 13, usable);
+    button(updater.busy() ? "取消" : "检查更新", left, y + 1243, 160, 36,
+           updater.busy() ? "update:cancel" : "update:check", 13);
+    if (!updater.busy() && updater.available()) {
+        const bool downloaded = !updater.downloadedPath().isEmpty();
+        button(downloaded ? "打开下载目录" : "下载新版本", left + 175, y + 1243, 200, 36,
+               downloaded ? "update:open" : "update:download", 13);
+    }
+    button("发布说明 ↗", left + usable - 200, y + 1243, 200, 36, "update:release", 13);
+    text("下载校验后退出并替换完整应用；Windows 请保留原 data 文件夹。", left, y + 1305, 12);
     restore();
     // QML 的透明输入层不会继承绘制裁切，必须同步裁剪命中区域，避免隐藏按钮拦截点击。
     QJsonArray clippedHits;

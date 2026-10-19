@@ -39,7 +39,9 @@ static QString routeProvider(const QString &route) {
     }
     return "netease";
 }
-Host::Host(QString path, bool test, QObject *parent) : QObject(parent), root(path), offline(test) {
+Host::Host(QString path, bool test, QObject *parent)
+    : QObject(parent), updater(test), root(path), offline(test) {
+    connect(&updater, &AppUpdater::changed, this, &Host::invalidate);
     if (preference("kugou-edition") == "lite") {
         kugouEdition = "lite";
     }
@@ -784,6 +786,7 @@ QString Host::preference(QString key) const {
                                 "theme",
                                 "motion",
                                 "disc-rotation",
+                                "auto-update",
                                 "volume",
                                 "quality",
                                 "alternate-source",
@@ -812,6 +815,7 @@ void Host::setPreference(QString key, QString value) {
                     "theme",
                     "motion",
                     "disc-rotation",
+                    "auto-update",
                     "volume",
                     "quality",
                     "alternate-source",

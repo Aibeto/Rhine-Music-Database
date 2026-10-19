@@ -1,14 +1,14 @@
-name: Publish Existing Build
+name: Publish Versioned Release
 
 on:
   workflow_dispatch:
     inputs:
       run_id:
-        description: 'Existing build Run ID'
+        description: 'Successful desktop build Run ID (its commit will be rebuilt with the release version)'
         required: true
         type: string
       tag:
-        description: 'Release tag (e.g. v1.0.0)'
+        description: 'Release tag (vMAJOR.MINOR.PATCH, e.g. v1.0.0)'
         required: true
         type: string
 
@@ -16,73 +16,109 @@ permissions:
   actions: read
   contents: write
 
-jobs:
-  release:
-    runs-on: ubuntu-latest
+concurrency:
+  group: publish-${{ inputs.tag }}
+  cancel-in-progress: false
 
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.build.outputs.sha }}
+      tag: ${{ steps.build.outputs.tag }}
     steps:
-      - name: Validate build run
+      - name: Validate source build and version
         id: build
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ inputs.run_id }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        shell: bash
         run: |
           set -euo pipefail
-
-          STATUS=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" \
-            --jq '.conclusion')
-
-          SHA=$(gh api \
-            "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" \
-            --jq '.head_sha')
-
-          if [ "$STATUS" != "success" ]; then
-            echo "Build run is not successful: $STATUS"
-            exit 1
+          [[ "$RUN_ID" =~ ^[0-9]+$ ]] || { echo 'Invalid run ID'; exit 1; }
+          [[ "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || {
+            echo 'Use a stable release tag such as v1.0.0'; exit 1;
+          }
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID" > run.json
+          python3 - <<'PY'
+          import json, os
+          run = json.load(open('run.json'))
+          assert run['conclusion'] == 'success', 'Source build must have succeeded'
+          assert run['path'] == '.github/workflows/desktop.yml', 'Choose a Desktop build run'
+          assert run['event'] != 'pull_request', 'Choose a build of a repository commit'
+          assert run['head_repository']['full_name'] == os.environ['GITHUB_REPOSITORY'], 'Foreign source'
+          assert all(int(part) <= 65535 for part in os.environ['RELEASE_TAG'][1:].split('.'))
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('sha=' + run['head_sha'] + '\n')
+              output.write('tag=' + os.environ['RELEASE_TAG'] + '\n')
+          PY
+          # 已使用的 tag 不覆盖；包内版本和下载地址在发布后应保持稳定。
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" > /dev/null 2>&1; then
+            echo 'Tag already exists; choose a new version'; exit 1
           fi
 
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+  build:
+    needs: prepare
+    uses: ./.github/workflows/desktop.yml
+    with:
+      source_sha: ${{ needs.prepare.outputs.sha }}
+      release_version: ${{ needs.prepare.outputs.tag }}
 
-      - name: Download existing artifacts
+  release:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
+      - name: Download versioned builds from this run
         uses: actions/download-artifact@v4
         with:
-          run-id: ${{ inputs.run_id }}
-          github-token: ${{ github.token }}
+          pattern: RHINE-MUSIC-DATABASE-*
           path: artifacts
-
-      - name: Collect release files
+      - name: Collect exact release packages
+        env:
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
-
-          mkdir -p release
-
-          # macOS 与 Windows 交付 ZIP，Linux 交付 AppImage；三端各取一份打包产物。
-          find artifacts -type f \( -name '*.zip' -o -name '*.AppImage' \) \
-            -exec cp -n {} release/ \;
-
-          zips=$(find release -maxdepth 1 -type f -name '*.zip' | wc -l)
-          images=$(find release -maxdepth 1 -type f -name '*.AppImage' | wc -l)
-
-          if [ "$zips" -ne 2 ] || [ "$images" -ne 1 ]; then
-            echo "Expected 2 ZIP and 1 AppImage files, found $zips ZIP and $images AppImage"
-            exit 1
-          fi
-
-          # upload-artifact 与 download-artifact 之间以 zip 往返，可执行位会丢失；
-          # 恢复后才能让下载者直接双击运行。
+          mkdir release
+          for platform in macOS-arm64.zip Windows-x64.zip Linux-x86_64.AppImage; do
+            name="RhineMusicDatabase-${RELEASE_TAG}-${platform}"
+            mapfile -t files < <(find artifacts -type f -name "$name")
+            [[ "${#files[@]}" -eq 1 ]] || { echo "Missing or ambiguous package: $name"; exit 1; }
+            cp "${files[0]}" "release/$name"
+          done
           chmod 0755 release/*.AppImage
-
-          ls -lh release/
-
-      - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ inputs.tag }}
-          name: ${{ inputs.tag }}
-          target_commitish: ${{ steps.build.outputs.sha }}
-          files: |
-            release/*.zip
-            release/*.AppImage
-          generate_release_notes: true
-          fail_on_unmatched_files: true
+          node scripts/create-update-feed.cjs release "$RELEASE_TAG"
+      # 先上传为草稿；三平台附件齐全且 GitHub 已返回 SHA-256 后才对用户可见。
+      - name: Upload draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          set -euo pipefail
+          gh release create "$RELEASE_TAG" release/* \
+            --repo "$GITHUB_REPOSITORY" --target "$SOURCE_SHA" \
+            --title "$RELEASE_TAG" --generate-notes --draft
+      - name: Verify assets and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" > release.json
+          python3 - <<'PY'
+          import hashlib, json, pathlib
+          release = json.load(open('release.json'))
+          assets = {asset['name']: asset for asset in release['assets']}
+          files = list(pathlib.Path('release').iterdir())
+          assert len(assets) == len(files) == 4
+          for file in files:
+              asset = assets[file.name]
+              digest = 'sha256:' + hashlib.file_digest(file.open('rb'), 'sha256').hexdigest()
+              assert asset.get('digest') == digest, 'GitHub asset checksum mismatch'
+              assert asset['size'] == file.stat().st_size
+          PY
+          gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

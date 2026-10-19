@@ -103,9 +103,7 @@ elif linux:
         ldd 在包内缺少某个库时会静默回落到构建机的系统目录，
         那样审计永远发现不了漏部署。这里显式记录解析结果并与包内目录比对。
         """
-        output = subprocess.run(
-            ["ldd", str(binary)], text=True, capture_output=True, env=probe
-        ).stdout
+        output = subprocess.run(["ldd", str(binary)], text=True, capture_output=True, env=probe).stdout
         missing, outside = [], []
         for line in output.splitlines():
             if "not found" in line:
@@ -146,9 +144,7 @@ elif linux:
     assert (app / "usr/plugins/platforms/libqxcb.so").is_file(), "Missing X11 platform plugin"
     # Wayland 插件名随打包方式不同：发行版是 libqwayland.so，
     # 官方 Qt 包拆成 libqwayland-egl.so 与 libqwayland-generic.so，两者都接受。
-    assert list(
-        (app / "usr/plugins/platforms").glob("libqwayland*.so")
-    ), "Missing Wayland platform plugin"
+    assert list((app / "usr/plugins/platforms").glob("libqwayland*.so")), "Missing Wayland platform plugin"
     assert (
         app / "usr/plugins/platforms/libqoffscreen.so"
     ).is_file(), "Missing offscreen test platform plugin"

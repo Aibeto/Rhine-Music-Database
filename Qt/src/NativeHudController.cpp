@@ -31,6 +31,9 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     dark = themeMode == "system" ? host->systemDark() : themeMode == "dark";
     reduced = host->preference("motion") == "reduced";
     discRotation = host->preference("disc-rotation") == "on";
+    connect(&host->updater, &AppUpdater::updateAvailable, this, [this] {
+        m_music->status = "发现新版本 " + m_host->updater.latestVersion() + "，可在设置中下载更新";
+    });
     connect(music, &MusicLibrary::invalidated, this, &NativeHud::finishPage);
 }
 
@@ -303,6 +306,24 @@ void NativeHud::action(QString value) {
         return;
     }
 
+    if (value.startsWith("update:")) {
+        auto &updater = m_host->updater;
+        if (value == "update:check") {
+            updater.check();
+        } else if (value == "update:download") {
+            updater.download();
+        } else if (value == "update:cancel") {
+            updater.cancel();
+        } else if (value == "update:open") {
+            updater.openDownload();
+        } else if (value == "update:release") {
+            updater.openRelease();
+        } else if (value == "update:auto") {
+            const bool enabled = m_host->preference("auto-update") != "off";
+            m_host->setPreference("auto-update", enabled ? "off" : "on");
+        }
+        return;
+    }
     auto &music = *m_music;
     const auto parts = value.split(':');
     if (value.startsWith("tab:")) {

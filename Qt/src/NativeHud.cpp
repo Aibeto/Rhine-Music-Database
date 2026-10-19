@@ -244,7 +244,7 @@ void NativeHud::navigation(double width) {
     control("发现音乐 ↗", x - 210, 118, 184, "discover");
     control("音乐检索  /", x, 118, 184, "search");
     control("＋ 我的音乐", x + 200, 118, 184, "saved");
-    control("设置", x + 400, 118, 120, "settings");
+    control(m_host->updater.available() ? "设置 · 更新" : "设置", x + 400, 118, 120, "settings");
 }
 void NativeHud::footer(double width) {
     fill(59, 971, 5, 5, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});

@@ -1043,6 +1043,14 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     check(hud.settingsScroll > 0 && hasAction("performance:toggle"),
           "settings native wheel exposes performance entry");
     capture("performance-settings-scrolled");
+    hud.settingsScroll = hud.settingsScrollMaximum();
+    refresh();
+    check(hasAction("update:check") && hasAction("update:auto") && hasAction("update:release"),
+          "settings scroll exposes software update controls");
+    check(!hasAction("update:download"), "download requires a validated newer release");
+    check(click("update:check") && backend.host.updater.status().contains("离线"),
+          "update button reports offline mode without a request");
+    capture("software-update-settings");
     check(click("performance:toggle") && profiler.visible(),
           "settings performance button opens native monitor");
     backend.action("close-modal");

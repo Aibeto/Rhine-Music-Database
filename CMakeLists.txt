@@ -1,7 +1,15 @@
 cmake_minimum_required(VERSION 3.24)
+# 发布版本在构建前由 Action 注入；本地默认版本保持可独立构建。
+set(RHINE_VERSION
+    "0.4.0"
+    CACHE STRING "Application release version")
+option(RHINE_RELEASE_BUILD "Build a versioned public release" OFF)
+if(NOT RHINE_VERSION MATCHES "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$")
+    message(FATAL_ERROR "RHINE_VERSION must use major.minor.patch")
+endif()
 project(
     RhineMusicDatabase
-    VERSION 0.4.0
+    VERSION ${RHINE_VERSION}
     LANGUAGES CXX)
 set(RHINE_APPLICATION_ID "rhine.music.database")
 set(CMAKE_CXX_STANDARD 20)
@@ -27,6 +35,8 @@ qt_policy(SET QTP0001 NEW)
 qt_policy(SET QTP0004 NEW)
 # 自维护源码和锁定的二维码库构成独立应用目标。
 set(RHINE_APP_SOURCES
+    Qt/src/AppUpdater.cpp
+    Qt/src/AppUpdater.h
     Qt/src/AudioPlayer.cpp
     Qt/src/AudioPlayer.h
     Qt/src/AppStorage.cpp
@@ -120,7 +130,9 @@ target_include_directories(
     RhineCore
     PUBLIC Qt/src
     PRIVATE vendor/qrcodegen)
-target_compile_definitions(RhineCore PUBLIC RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}")
+target_compile_definitions(
+    RhineCore PUBLIC RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}" RHINE_VERSION="${PROJECT_VERSION}"
+                     RHINE_RELEASE_BUILD=$<BOOL:${RHINE_RELEASE_BUILD}>)
 target_link_libraries(
     RhineCore
     PUBLIC Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Multimedia
@@ -215,8 +227,7 @@ elseif(WIN32)
 elseif(UNIX)
     # Linux 复用同一份原生场景实现；凭据、协议交付和媒体集成由本平台文件补齐。
     target_sources(RhineCore PRIVATE Qt/src/PlatformLinux.cpp)
-    # 安装后的程序按 AppImage 前缀查找同级 Qt 运行时；构建树仍用 CMake 生成的 kit 路径，
-    # 否则 CI 中装在独立目录的 Qt 会在运行测试时找不到。
+    # 安装后的程序按 AppImage 前缀查找同级 Qt 运行时；构建树仍用 CMake 生成的 kit 路径， 否则 CI 中装在独立目录的 Qt 会在运行测试时找不到。
     set_target_properties(RhineMusicDatabase PROPERTIES INSTALL_RPATH "\$ORIGIN/../lib")
     install(TARGETS RhineMusicDatabase RUNTIME DESTINATION bin)
 else()
@@ -342,3 +353,11 @@ add_test(NAME qt_native_hud_regression
          COMMAND RhineNativeHudRegression "${CMAKE_CURRENT_SOURCE_DIR}/output/resources"
                  "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/hud-panels.qz")
 set_tests_properties(qt_native_hud_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(RhineUpdaterRegression Qt/tests/AppUpdaterChecks.cpp)
+target_link_libraries(RhineUpdaterRegression PRIVATE RhineCore)
+if(MSVC)
+    target_compile_options(RhineUpdaterRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_updater_regression COMMAND RhineUpdaterRegression)
+set_tests_properties(qt_updater_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

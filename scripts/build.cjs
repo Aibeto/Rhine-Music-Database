@@ -2,6 +2,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
+const { buildVersion } = require('./release-version.cjs');
 const { spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 process.chdir(root);
@@ -182,6 +183,7 @@ function buildQt() {
         throw Error('Set QT_ROOT to a Qt desktop kit with Shader Tools and private headers');
     }
     const config = process.env.RHINE_BUILD_TYPE || 'Release';
+    const version = buildVersion();
     run('cmake', [
         '-S',
         '.',
@@ -192,6 +194,8 @@ function buildQt() {
         `-DCMAKE_PREFIX_PATH=${qt}`,
         `-DCMAKE_BUILD_TYPE=${config}`,
         '-DRHINE_PACKAGE_APP=OFF',
+        `-DRHINE_VERSION=${version.version}`,
+        `-DRHINE_RELEASE_BUILD=${version.release ? 'ON' : 'OFF'}`,
     ]);
     run('cmake', ['--build', 'output/qt-build']);
     return {
@@ -817,7 +821,12 @@ function deployApp(qt, config, existingBundle = '') {
         run('codesign', ['--force', '--deep', '--sign', '-', app]);
     }
     if (linux) {
-        return packageAppImage(app);
+        const image = packageAppImage(app);
+        const version = buildVersion();
+        if (version.release) {
+            fs.copyFileSync(image, `output/RhineMusicDatabase-v${version.version}-Linux-x86_64.AppImage`);
+        }
+        return image;
     }
     return app;
 }

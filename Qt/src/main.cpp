@@ -58,6 +58,7 @@ int main(int argc, char **argv) {
 #endif
     QGuiApplication application(argc, argv);
     application.setWindowIcon(QIcon(":/icons/icon-256.png"));
+    QCoreApplication::setApplicationVersion(AppUpdater::currentVersion());
     QCoreApplication::setOrganizationName(AppIdentity::Organization);
     QCoreApplication::setOrganizationDomain(AppIdentity::Id);
     QCoreApplication::setApplicationName(AppIdentity::Id);
@@ -142,6 +143,13 @@ int main(int argc, char **argv) {
     window->show();
 #endif
     backend.setWindow(window);
+    if (!offline && RHINE_RELEASE_BUILD) {
+        QTimer::singleShot(8000, &backend.host, [&backend] {
+            if (backend.host.preference("auto-update") != "off") {
+                backend.host.updater.check();
+            }
+        });
+    }
     window->installEventFilter(&backend);
     profiler.attach(window);
     // 短暂切换窗口继续复用 GPU；隐藏或最小化超过两秒才释放图形设备和可重建缓存。

@@ -25,6 +25,7 @@ run(process.execPath, ['scripts/check-repository.cjs']);
 run(python, ['scripts/check-qt-project.py']);
 for (const script of [
     'scripts/check-music-upstream.cjs',
+    'Qt/tests/release-version.cjs',
     'Qt/tests/api-contract.mjs',
     'Qt/tests/native-client.mjs',
     'Qt/tests/qq-state.mjs',
