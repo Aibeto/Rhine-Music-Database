@@ -8,6 +8,7 @@
 #include <QMouseEvent>
 #include <QPainter>
 #include <QQuickItem>
+#include <QQuickRhiItem>
 #include <QQuickWindow>
 #include <QThread>
 #include <algorithm>
@@ -90,12 +91,13 @@ bool runSceneEnhancementChecks(Engine &backend, QQuickWindow *window, const QStr
         NativeHud defaultHud(&backend.host, backend.glyphs(), &music, {});
         check(defaultHud.sceneEnhancement, "RhineLab Enhance defaults to enabled without a saved override");
     }
-    if (hud.sceneEnhancement) {
+    const bool transitionBenchmark = qEnvironmentVariableIsSet("RHINE_TRANSITION_BENCHMARK");
+    if (hud.sceneEnhancement && !transitionBenchmark) {
         toggle();
     }
     auto *loader = window->findChild<QQuickItem *>("sceneEnhancementLoader");
-    check(loader && !hud.sceneEnhancement && !loader->property("active").toBool() &&
-              !loader->property("item").value<QObject *>(),
+    check(transitionBenchmark || (loader && !hud.sceneEnhancement && !loader->property("active").toBool() &&
+                                  !loader->property("item").value<QObject *>()),
           "explicitly disabled enhancement has no active instance");
     hud.modal.clear();
     hud.closing = false;
@@ -119,6 +121,75 @@ bool runSceneEnhancementChecks(Engine &backend, QQuickWindow *window, const QStr
         painter.drawEllipse(QPointF(512, 512), 56, 56);
     }
     backend.host.fixtureImage(music.coverImage, cover);
+
+    if (transitionBenchmark) {
+        hud.sceneEnhancement = true;
+        hud.reduced = false;
+        backend.scene.review("archive");
+        backend.scene.freeze(std::nullopt);
+        backend.scene.reduced(false);
+        backend.scene.energyIdle(true);
+        std::atomic<quint64> presentations{0};
+        const auto connection = QObject::connect(
+            window, &QQuickWindow::frameSwapped, window,
+            [&] { presentations.fetch_add(1, std::memory_order_relaxed); }, Qt::DirectConnection);
+        double timeSeconds = 100;
+        const auto present = [&] {
+            const auto previous = presentations.load(std::memory_order_relaxed);
+            QElapsedTimer elapsed;
+            elapsed.start();
+            timeSeconds += 1.0 / 60.0;
+            backend.step(timeSeconds);
+            window->update();
+            while (presentations.load(std::memory_order_relaxed) == previous && elapsed.elapsed() < 2000) {
+                QCoreApplication::processEvents();
+                QThread::msleep(1);
+            }
+            return elapsed.nsecsElapsed() / 1000000.0;
+        };
+        for (int index = 0; index < 30; ++index) {
+            present();
+        }
+        QJsonArray measurements;
+        for (int cycle = 0; cycle < 2; ++cycle) {
+            for (const QString mode : {QString("detail"), QString("archive")}) {
+                const auto before = backend.performance();
+                backend.scene.setMode(mode);
+                QList<double> intervals;
+                int hybridFrames = 0;
+                for (int index = 0; index < 300; ++index) {
+                    intervals.append(present());
+                    hybridFrames += backend.frame()["originalActorBlend"].toDouble() > 0;
+                }
+                std::sort(intervals.begin(), intervals.end());
+                const auto after = backend.performance();
+                const auto newBindings =
+                    after["bindingCreations"].toULongLong() - before["bindingCreations"].toULongLong();
+                if (mode == "archive") {
+                    check(newBindings == 0, "return animation reuses existing record bindings");
+                }
+                measurements.append(QJsonObject{
+                    {"cycle", cycle},
+                    {"mode", mode},
+                    {"presentedFrames", intervals.size()},
+                    {"hybridFrames", hybridFrames},
+                    {"rendererFrames",
+                     qint64(after["renderFrames"].toULongLong() - before["renderFrames"].toULongLong())},
+                    {"newBindings", qint64(after["bindingCreations"].toULongLong() -
+                                           before["bindingCreations"].toULongLong())},
+                    {"presentRoundTripP50Ms", intervals[intervals.size() / 2]},
+                    {"presentRoundTripP95Ms", intervals[int(intervals.size() * 0.95)]},
+                    {"presentRoundTripMaxMs", intervals.last()}});
+            }
+        }
+        QObject::disconnect(connection);
+        QDir().mkpath(output);
+        QFile file(output + "/transition-benchmark.json");
+        if (file.open(QIODevice::WriteOnly)) {
+            file.write(QJsonDocument(measurements).toJson());
+        }
+        return ok;
+    }
 
     if (qEnvironmentVariableIsSet("RHINE_ENHANCEMENT_BENCHMARK")) {
         QJsonArray measurements;
@@ -213,6 +284,21 @@ bool runSceneEnhancementChecks(Engine &backend, QQuickWindow *window, const QStr
             qInfo() << "[enhancement]" << name << "original actor changed pixels" << difference.first
                     << "maximum" << difference.second;
             check(difference.first == 0, "extracted record preserves the original renderer pixels");
+            if (auto *renderItem = qobject_cast<QQuickRhiItem *>(composite)) {
+                renderItem->update();
+                settleEnhancement();
+                check(backend.performance()["gpuDrawCalls"].toULongLong() == 1 &&
+                          capture(name + "-cached") == enhanced,
+                      "unchanged extracted background uses only composite and preserves exact pixels");
+                renderItem->setProperty("lightingEnabled", false);
+                settleEnhancement();
+                check(capture(name + "-unlit") != enhanced,
+                      "lighting changes invalidate the cached extracted background");
+                renderItem->setProperty("lightingEnabled", true);
+                settleEnhancement();
+                check(capture(name + "-relit") == enhanced,
+                      "restoring lighting rebuilds the same extracted background pixels");
+            }
         }
         if (name == "archive-light" && composite) {
             composite->setProperty("lightingEnabled", false);

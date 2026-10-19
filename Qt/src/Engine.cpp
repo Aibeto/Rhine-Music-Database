@@ -155,9 +155,11 @@ void Engine::notifySceneRenderers(bool visualChanged) {
     const bool enhanced = app->hud.sceneEnhancement;
     if (enhanced) {
         m_originalSceneDirty |= visualChanged;
-        // 详情采用原版渲染；资料库继续只更新轻量烘焙分支。
-        if (m_frame["originalActorBlend"].toDouble() > 0 && m_originalSceneDirty) {
+        // 进入资料库时预热一次原版管线，避免抽取末尾才同步编译和分配整套资源。
+        const bool prewarm = !m_originalSceneWarm && m_frame["mode"] != "boot";
+        if ((prewarm || m_frame["originalActorBlend"].toDouble() > 0) && m_originalSceneDirty) {
             m_originalSceneDirty = false;
+            m_originalSceneWarm = true;
             emit sceneUpdated();
         }
         if (visualChanged || !m_sceneEnhancement) {
@@ -165,6 +167,7 @@ void Engine::notifySceneRenderers(bool visualChanged) {
         }
     } else if (visualChanged || (m_sceneEnhancement && m_originalSceneDirty)) {
         m_originalSceneDirty = false;
+        m_originalSceneWarm = true;
         emit sceneUpdated();
     }
     m_sceneEnhancement = enhanced;
@@ -206,6 +209,7 @@ void Engine::setVisible(bool value) {
         m_sleeping = true;
     } else {
         host.restoreMemoryBudget();
+        m_originalSceneWarm = false;
         wake(false);
         notifySceneRenderers(true);
         emit hudUpdated();
@@ -471,7 +475,7 @@ void Engine::step(double time) {
     m_frame = scene.frame;
     m_frame["originalActorBlend"] = scene.originalActorBlend();
     auto signature = m_frame;
-    for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor"}) {
+    for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor", "originalActorBlend"}) {
         signature.remove(key);
     }
     bool stable =
@@ -481,6 +485,9 @@ void Engine::step(double time) {
         stable = equivalent(it->matrices, old.matrices) && equivalent(it->themes, old.themes);
     }
     m_stableFrames = stable ? m_stableFrames + 1 : 0;
+    if (!stable) {
+        ++m_geometryRevision;
+    }
     if (!stable || scene.changed()) {
         m_sceneSleeping = false;
     }

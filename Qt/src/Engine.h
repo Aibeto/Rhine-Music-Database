@@ -58,6 +58,9 @@ class Engine : public QObject {
     SceneDrawBuffers drawBuffers() const {
         return scene.drawBuffers;
     }
+    quint64 geometryRevision() const {
+        return m_geometryRevision;
+    }
     struct MusicTexture {
         QJsonObject item;
         QImage cover;
@@ -115,6 +118,8 @@ class Engine : public QObject {
     void notifySceneRenderers(bool visualChanged);
     bool m_sceneEnhancement = false;
     bool m_originalSceneDirty = false;
+    bool m_originalSceneWarm = false;
+    quint64 m_geometryRevision = 0;
     std::atomic<quint64> m_renderFrames{0}, m_gpuResources{0};
     std::atomic<quint64> m_bindingCreations{0};
     std::atomic<quint64> m_musicTextureBytes{0};

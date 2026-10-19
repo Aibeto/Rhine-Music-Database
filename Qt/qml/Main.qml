@@ -35,7 +35,8 @@ Window {
         id: originalScene
         anchors.fill: parent
         engine: rhine
-        visible: !sceneEnhancementLoader.active || rhine.state.originalActorVisible === true
+        // 增强画布完全遮住底层；原版只接收预热和取出唱片真正需要的更新。
+        visible: true
     }
     Loader {
         id: sceneEnhancementLoader

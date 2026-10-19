@@ -176,6 +176,11 @@ class Renderer {
     QHash<QString, qint64> coverRevisions;
     SceneDrawBuffers nativeBuffers;
     quint64 generation = 0;
+    std::optional<quint64> cachedGeometryRevision;
+    QJsonObject cachedItem;
+    qint64 cachedCoverRevision = 0;
+    bool cachedLightingEnabled = true;
+    bool cachedSelectedHidden = false;
     quint64 bindingCreations = 0;
     quint64 coverUploads = 0;
     quint64 drawCalls = 0;
@@ -352,6 +357,7 @@ class Renderer {
         pipelineLayouts.clear();
         sized.clear();
         size = value;
+        cachedGeometryRevision.reset();
         auto rtFlags = QRhiTexture::RenderTarget;
         depth = texture(size, QRhiTexture::D32F, rtFlags, true);
         color = makeTarget(texture(size, QRhiTexture::RGBA16F, rtFlags, true), depth);
@@ -974,11 +980,26 @@ class Renderer {
                 QRhiRenderTarget *finalTarget = nullptr, const Engine::MusicTextures &musicTextures = {},
                 QRhiTexture *originalActor = nullptr) {
         transient.clear();
-        ++generation;
         if (!updates) {
             updates = rhi->nextResourceUpdateBatch();
         }
         resize(dimensions, !finalTarget);
+        frame["originalActorAvailable"] = originalActor != nullptr;
+        auto g = globals(frame);
+        updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
+        const auto geometryRevision = quint64(frame["geometryRevision"].toDouble());
+        const bool sameBackground = cachedGeometryRevision == geometryRevision && cachedItem == item &&
+                                    cachedCoverRevision == cover.cacheKey() &&
+                                    cachedLightingEnabled == frame["opticalLightEnabled"].toBool(true) &&
+                                    cachedSelectedHidden == (g.opticalLight.w() >= 1.f);
+        if (g.opticalLight.w() >= 1.f && sameBackground) {
+            // 只旋转唱片贴图时，原版提供新唱片像素；重复壳体沿用已绘制的背景颜色。
+            cb->resourceUpdate(updates);
+            updates = nullptr;
+            composite(cb, finalTarget ? finalTarget : target.rt, originalActor);
+            return;
+        }
+        ++generation;
         activeTextureKeys.clear();
         activeTextureKeys.insert(item["key"].toString("empty"));
         for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
@@ -991,16 +1012,8 @@ class Renderer {
             }
         }
         updateMusic(item, cover);
-        frame["originalActorAvailable"] = originalActor != nullptr;
-        auto g = globals(frame);
-        updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
         auto draws = musicDraws(frame);
-        if (g.opticalLight.w() >= 1.f) {
-            // 取出唱片直接合成原版像素，增强分支只绘制它后面的背景，避免重复绘制同一唱片。
-            draws.erase(std::remove_if(draws.begin(), draws.end(),
-                                       [](const auto &draw) { return draw["musicSelected"].toBool(); }),
-                        draws.end());
-        }
+        // 即使被原版唱片覆盖，也保留烘焙唱片资源，归位时不再重建材质绑定和实例缓冲。
         auto data = prepare(draws);
         for (auto it = materials.begin(); it != materials.end();) {
             if (it->used != generation) {
@@ -1049,6 +1062,17 @@ class Renderer {
                 ++it;
             }
         }
+        if (g.opticalLight.w() >= 1.f) {
+            // 先准备资源再省略被覆盖的绘制，既不重复消耗 GPU，也不在归位时重新分配。
+            const auto hideSelected = [](auto &draws) {
+                draws.erase(
+                    std::remove_if(draws.begin(), draws.end(),
+                                   [](const auto &draw) { return draw.data["musicSelected"].toBool(); }),
+                    draws.end());
+            };
+            hideSelected(opaque);
+            hideSelected(transparent);
+        }
         cb->resourceUpdate(updates);
         updates = nullptr;
         const auto background = vector(frame["background"]);
@@ -1056,6 +1080,11 @@ class Renderer {
         geometry(cb, opaque);
         geometry(cb, transparent);
         cb->endPass();
+        cachedGeometryRevision = geometryRevision;
+        cachedItem = item;
+        cachedCoverRevision = cover.cacheKey();
+        cachedLightingEnabled = frame["opticalLightEnabled"].toBool(true);
+        cachedSelectedHidden = g.opticalLight.w() >= 1.f;
         composite(cb, finalTarget ? finalTarget : target.rt, originalActor);
     }
 };
@@ -1083,6 +1112,7 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         if (engine) {
             frame = engine->frame();
             frame["opticalLightEnabled"] = scene->lightingEnabled();
+            frame["geometryRevision"] = double(engine->geometryRevision());
             buffers = engine->drawBuffers();
             musicTextures = engine->musicTextures();
             item = engine->current();

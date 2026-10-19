@@ -59,9 +59,11 @@ bool NativeScene::ready() const {
 int NativeScene::selection() const {
     return m_selected;
 }
-/** 只读抽取高度，在完全离开邻壳后短距离渐变原版外观；归位时先退出合成。 */
+/** 只读抽取与相机进度，接近稳定后渐入原版外观；归位时先退出合成。 */
 double NativeScene::originalActorBlend() const {
-    return SceneMotion::smooth((m_actor.lift.value - 3.96) / 0.08);
+    const double extraction = SceneMotion::smooth((m_actor.lift.value - 3.96) / 0.08);
+    const double cameraSettled = SceneMotion::smooth((m_detail - 0.997) / 0.002);
+    return std::min(extraction, cameraSettled);
 }
 NativeScene::Cell NativeScene::fileLocation(int index) const {
     for (int lane = 0; lane < 5; ++lane) {
