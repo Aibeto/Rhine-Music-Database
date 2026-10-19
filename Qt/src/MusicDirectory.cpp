@@ -220,13 +220,19 @@ void MusicLibrary::showDirectoryInfo() {
     changed();
 }
 
+/** 歌曲详情归位保留当前身份和物理槽位，只有目录资料页需要恢复歌曲选择。 */
 void MusicLibrary::returnToDirectory() {
     if (directory) {
         if (directory->songs.isEmpty()) {
             leaveDirectory();
             return;
         }
-        selectDirectory(directory->index);
+        if (directoryInfo) {
+            selectDirectory(directory->index);
+        } else {
+            wantsSongDetails = false;
+            emit modeRequested("archive");
+        }
     }
     changed();
 }

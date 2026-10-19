@@ -31,6 +31,7 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     dark = themeMode == "system" ? host->systemDark() : themeMode == "dark";
     reduced = host->preference("motion") == "reduced";
     discRotation = host->preference("disc-rotation") == "on";
+    sceneEnhancement = host->preference("scene-enhancement") != "off";
     connect(&host->updater, &AppUpdater::updateAvailable, this, [this] {
         m_music->status = "发现新版本 " + m_host->updater.latestVersion() + "，可在设置中下载更新";
     });
@@ -440,10 +441,6 @@ void NativeHud::action(QString value) {
         musicAction(parts, value);
         return;
     }
-    if (value == "back") {
-        music.observe(-1);
-        music.observe(frame["selected"].toInt());
-    }
     if (value.startsWith("viewer:")) {
         m_scene.viewer(value.mid(7));
         return;
@@ -495,6 +492,9 @@ void NativeHud::action(QString value) {
         dark = themeMode == "system" ? m_host->systemDark() : themeMode == "dark";
         m_scene.theme(dark);
         m_host->setPreference("theme", themeMode);
+    } else if (value == "scene-enhancement") {
+        sceneEnhancement = !sceneEnhancement;
+        m_host->setPreference("scene-enhancement", sceneEnhancement ? "on" : "off");
     } else if (value == "motion") {
         reduced = !reduced;
         m_scene.reduced(reduced);

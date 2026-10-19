@@ -62,6 +62,7 @@ function prepareResources() {
     });
     run(python, ['scripts/check-qt-project.py']);
     run(python, ['scripts/export-assets.py']);
+    run(python, ['scripts/bake-archive-lighting.py']);
     for (const file of fs.readdirSync('Assets/fonts')) {
         fs.copyFileSync(path.join('Assets/fonts', file), path.join('output/resources', file));
     }

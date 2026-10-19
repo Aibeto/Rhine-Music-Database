@@ -54,6 +54,7 @@ set(RHINE_APP_SOURCES
     Qt/src/UiMotion.cpp
     Qt/src/UiMotion.h
     Qt/tests/UiChecks.cpp
+    Qt/tests/SceneEnhancementChecks.cpp
     Qt/tests/NativeHostChecks.cpp
     Qt/tests/NativeMusicChecks.cpp
     Qt/src/Icon.cpp
@@ -112,6 +113,8 @@ set(RHINE_APP_SOURCES
     Qt/src/Hud.h
     Qt/src/RhiScene.cpp
     Qt/src/RhiScene.h
+    Qt/src/OpticalScene.cpp
+    Qt/src/OpticalScene.h
     Qt/src/Glyphs.cpp
     Qt/src/Glyphs.h
     vendor/qrcodegen/qrcodegen.cpp)
@@ -123,7 +126,7 @@ endif()
 # 原生业务和场景由应用与独立回归共用，测试不需要复制整套源码目标。
 set(RHINE_CORE_SOURCES ${RHINE_APP_SOURCES})
 list(FILTER RHINE_CORE_SOURCES EXCLUDE REGEX
-     "/(main|Engine|Icon|RhiScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/")
+     "/(main|Engine|Icon|RhiScene|OpticalScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/")
 list(REMOVE_ITEM RHINE_APP_SOURCES ${RHINE_CORE_SOURCES})
 add_library(RhineCore STATIC ${RHINE_CORE_SOURCES})
 target_include_directories(
@@ -192,6 +195,25 @@ qt_add_shaders(
     Qt/shaders/combineAO.frag
     Qt/shaders/bokehFragment.frag
     Qt/shaders/finalFragment.frag)
+# 增强模式单独打包
+qt_add_shaders(
+    RhineMusicDatabase
+    "rhine_enhancement_shaders"
+    PREFIX
+    "/optical"
+    BASE
+    "Qt/shaders/enhancement"
+    GLSL
+    "150,300es"
+    HLSL
+    50
+    MSL
+    12
+    FILES
+    Qt/shaders/enhancement/opticalGeometry.vert
+    Qt/shaders/enhancement/opticalQuad.vert
+    Qt/shaders/enhancement/opticalSurface.frag
+    Qt/shaders/enhancement/opticalFinalFragment.frag)
 target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}"
                                                       $<$<CONFIG:Debug>:QT_QML_DEBUG>)
 target_link_libraries(

@@ -236,6 +236,16 @@ bool runNativeMusicChecks(const QString &root) {
     check(library.directory->cursor == 4 && library.directory->songs.size() == 3 &&
               library.current["id"] == "3",
           "sparse IDs consumed once and later selection restored");
+    int returnSelections = 0;
+    const auto returnConnection = QObject::connect(&library, &MusicLibrary::selectionRequested, &library,
+                                                   [&](int, QJsonObject) { ++returnSelections; });
+    const auto returningSong = library.current;
+    const auto returningPhysical = library.selectedPhysical;
+    library.returnToDirectory();
+    check(returnSelections == 0 && library.current == returningSong &&
+              library.selectedPhysical == returningPhysical && library.frame["mode"] == "archive",
+          "song return does not reselect a canonical slot or reload identity");
+    QObject::disconnect(returnConnection);
     const auto queue = library.directoryQueue();
     check(queue.size() == 4 && queue.at(1).toObject()["deferred"].toBool(), "queue preserves unloaded IDs");
     library.leaveDirectory();

@@ -344,6 +344,7 @@ void NativeHud::settings(double x, double y, double width) {
         theme = "跟随系统";
     }
     QVector<QStringList> rows{{"COLOR THEME / 界面配色", theme, "theme"},
+                              {"RhineLab Enhance", sceneEnhancement ? "开启" : "关闭", "scene-enhancement"},
                               {"REDUCED MOTION / 动态效果", reduced ? "减少动态效果" : "完整动效", "motion"},
                               {"AUDIO QUALITY / 音质", qualities.value(music.player.quality), "quality"}};
     if (music.provider == "netease") {
@@ -359,9 +360,9 @@ void NativeHud::settings(double x, double y, double width) {
         text(row.at(0), left + 12, yy + 12, 15, "demibold");
         button(row.at(1), left + usable - 235, yy + 4, 225, 36, row.at(2), 13);
     }
-    text("↑ ↓ 选曲 / ENTER 查看 / " + m_host->modifierKey() + " ENTER 播放 / ESC 返回", left, y + 654, 12);
-    rule(left, y + 687, usable, 0.2);
-    text("PROJECT / 项目与开源参考", left, y + 702, 10, "demibold");
+    text("↑ ↓ 选曲 / ENTER 查看 / " + m_host->modifierKey() + " ENTER 播放 / ESC 返回", left, y + 704, 12);
+    rule(left, y + 737, usable, 0.2);
+    text("PROJECT / 项目与开源参考", left, y + 752, 10, "demibold");
     const QVector<QPair<QString, QString>> links{{"本项目 / Rhine Music Database ↗", "project-home"},
                                                  {"网易云音乐 API / api-enhanced ↗", "project-author"},
                                                  {"QQ 音乐 API / qq-music-api ↗", "project-player"},
@@ -372,39 +373,39 @@ void NativeHud::settings(double x, double y, double width) {
                                                  {"同步与匹配参考 / Lyrimuse ↗", "project-lyrimuse"}};
     const auto linkWidth = (usable - 280 - 12) / 2;
     for (int index = 0; index < links.size(); ++index) {
-        button(links.at(index).first, left + (index % 2) * (linkWidth + 8), y + 725 + (index / 2) * 28,
+        button(links.at(index).first, left + (index % 2) * (linkWidth + 8), y + 775 + (index / 2) * 28,
                linkWidth, 25, "music:" + links.at(index).second, 11);
     }
-    button("切换全屏 / F11", left + usable - 260, y + 725, 260, 36, "window:fullscreen", 13);
-    button("REINITIALIZE SYSTEM ↻", left + usable - 260, y + 769, 260, 36, "replay", 13);
-    rule(left, y + 861, usable, 0.2);
-    text("PERFORMANCE / 性能与诊断", left, y + 878, 12, "demibold");
-    fill(left, y + 910, usable, 44, tint);
-    text("帧数显示 / 性能面板", left + 12, y + 922, 15, "demibold");
-    button("显示 / 隐藏 · F10", left + usable - 235, y + 914, 225, 36, "performance:toggle", 13);
-    text("在性能面板内手动收集、导出诊断文件。", left, y + 971, 12);
-    fill(left, y + 1014, usable, 44, tint);
-    text("DISC ROTATION / 唱片旋转", left + 12, y + 1026, 15, "demibold");
-    button(discRotation ? "开启 / 点击关闭" : "关闭 / 点击了解风险", left + usable - 235, y + 1018, 225, 36,
+    button("切换全屏 / F11", left + usable - 260, y + 775, 260, 36, "window:fullscreen", 13);
+    button("REINITIALIZE SYSTEM ↻", left + usable - 260, y + 819, 260, 36, "replay", 13);
+    rule(left, y + 911, usable, 0.2);
+    text("PERFORMANCE / 性能与诊断", left, y + 928, 12, "demibold");
+    fill(left, y + 960, usable, 44, tint);
+    text("帧数显示 / 性能面板", left + 12, y + 972, 15, "demibold");
+    button("显示 / 隐藏 · F10", left + usable - 235, y + 964, 225, 36, "performance:toggle", 13);
+    text("在性能面板内手动收集、导出诊断文件。", left, y + 1021, 12);
+    fill(left, y + 1064, usable, 44, tint);
+    text("DISC ROTATION / 唱片旋转", left + 12, y + 1076, 15, "demibold");
+    button(discRotation ? "开启 / 点击关闭" : "关闭 / 点击了解风险", left + usable - 235, y + 1068, 225, 36,
            "disc-rotation", 13);
-    text("默认关闭；开启会增加持续渲染、耗电和发热。", left, y + 1075, 12);
-    rule(left, y + 1120, usable, 0.2);
-    text("SOFTWARE UPDATE / 软件更新", left, y + 1138, 12, "demibold");
+    text("默认关闭；开启会增加持续渲染、耗电和发热。", left, y + 1125, 12);
+    rule(left, y + 1170, usable, 0.2);
+    text("SOFTWARE UPDATE / 软件更新", left, y + 1188, 12, "demibold");
     const auto &updater = m_host->updater;
     const auto buildLabel = RHINE_RELEASE_BUILD ? QString() : QString(" · 开发版");
-    text("当前版本 / " + AppUpdater::currentVersion() + buildLabel, left, y + 1170, 15, "demibold");
+    text("当前版本 / " + AppUpdater::currentVersion() + buildLabel, left, y + 1220, 15, "demibold");
     button(m_host->preference("auto-update") == "off" ? "启动检查 / 关闭" : "启动检查 / 开启",
-           left + usable - 235, y + 1158, 225, 36, "update:auto", 13);
-    limited(updater.status(), left, y + 1210, 13, usable);
-    button(updater.busy() ? "取消" : "检查更新", left, y + 1243, 160, 36,
+           left + usable - 235, y + 1208, 225, 36, "update:auto", 13);
+    limited(updater.status(), left, y + 1260, 13, usable);
+    button(updater.busy() ? "取消" : "检查更新", left, y + 1293, 160, 36,
            updater.busy() ? "update:cancel" : "update:check", 13);
     if (!updater.busy() && updater.available()) {
         const bool downloaded = !updater.downloadedPath().isEmpty();
-        button(downloaded ? "打开下载目录" : "下载新版本", left + 175, y + 1243, 200, 36,
+        button(downloaded ? "打开下载目录" : "下载新版本", left + 175, y + 1293, 200, 36,
                downloaded ? "update:open" : "update:download", 13);
     }
-    button("发布说明 ↗", left + usable - 200, y + 1243, 200, 36, "update:release", 13);
-    text("下载校验后退出并替换完整应用；Windows 请保留原 data 文件夹。", left, y + 1305, 12);
+    button("发布说明 ↗", left + usable - 200, y + 1293, 200, 36, "update:release", 13);
+    text("下载校验后退出并替换完整应用；Windows 请保留原 data 文件夹。", left, y + 1355, 12);
     restore();
     // QML 的透明输入层不会继承绘制裁切，必须同步裁剪命中区域，避免隐藏按钮拦截点击。
     QJsonArray clippedHits;

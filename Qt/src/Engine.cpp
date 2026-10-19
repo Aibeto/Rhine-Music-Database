@@ -139,12 +139,35 @@ QVariantMap Engine::performance() const {
             {"sceneUpdates", qulonglong(m_sceneUpdates)},
             {"hudUpdates", qulonglong(m_hudUpdates)},
             {"renderFrames", qulonglong(m_renderFrames.load(std::memory_order_relaxed))},
-            {"gpuResources", qulonglong(m_gpuResources.load(std::memory_order_relaxed))},
+            {"gpuResources", qulonglong(m_gpuResources.load(std::memory_order_relaxed) +
+                                        m_opticalGpuResources.load(std::memory_order_relaxed))},
             {"bindingCreations", qulonglong(m_bindingCreations.load(std::memory_order_relaxed))},
-            {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed))},
+            {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed) +
+                                                m_opticalTextureBytes.load(std::memory_order_relaxed))},
             {"coverUploads", qulonglong(m_coverUploads.load(std::memory_order_relaxed))},
             {"gpuDrawCalls", qulonglong(m_lastDrawCalls.load(std::memory_order_relaxed))},
             {"timerActive", timer.isActive()}};
+}
+/**
+ * 只唤醒当前选用的渲染分支
+ */
+void Engine::notifySceneRenderers(bool visualChanged) {
+    const bool enhanced = app->hud.sceneEnhancement;
+    if (enhanced) {
+        m_originalSceneDirty |= visualChanged;
+        // 详情采用原版渲染；资料库继续只更新轻量烘焙分支。
+        if (m_frame["originalActorBlend"].toDouble() > 0 && m_originalSceneDirty) {
+            m_originalSceneDirty = false;
+            emit sceneUpdated();
+        }
+        if (visualChanged || !m_sceneEnhancement) {
+            emit opticalSceneUpdated();
+        }
+    } else if (visualChanged || (m_sceneEnhancement && m_originalSceneDirty)) {
+        m_originalSceneDirty = false;
+        emit sceneUpdated();
+    }
+    m_sceneEnhancement = enhanced;
 }
 void Engine::wake(bool input) {
     const bool wasSleeping = m_sleeping;
@@ -184,7 +207,7 @@ void Engine::setVisible(bool value) {
     } else {
         host.restoreMemoryBudget();
         wake(false);
-        emit sceneUpdated();
+        notifySceneRenderers(true);
         emit hudUpdated();
     }
     emit stateChanged();
@@ -446,6 +469,7 @@ void Engine::step(double time) {
     }
     const auto previousDiscAngle = m_frame["discAngle"].toDouble();
     m_frame = scene.frame;
+    m_frame["originalActorBlend"] = scene.originalActorBlend();
     auto signature = m_frame;
     for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor"}) {
         signature.remove(key);
@@ -523,9 +547,10 @@ void Engine::step(double time) {
     }
     if (visualChanged) {
         ++m_sceneUpdates;
-        emit sceneUpdated();
     }
+    notifySceneRenderers(visualChanged);
     auto state = object["state"].toObject().toVariantMap();
+    state["originalActorVisible"] = m_frame["originalActorBlend"].toDouble() > 0;
     if (state != m_state) {
         m_state = state;
         const auto loginMethod = m_state.value("loginMethod").toString();

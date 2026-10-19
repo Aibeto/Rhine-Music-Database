@@ -24,6 +24,8 @@
 #include <algorithm>
 #include <cmath>
 
+bool runSceneEnhancementChecks(Engine &backend, QQuickWindow *window, const QString &output);
+
 namespace {
 /**
  * GPU 资源重建后只允许极少像素出现一个 RGB8 量化单位的舍入差异。
@@ -85,8 +87,14 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     if (!window || !backend.ready() || !backend.scene.review("archive")) {
         return 1;
     }
+    if (qEnvironmentVariableIntValue("RHINE_ENHANCEMENT_ONLY") == 1) {
+        return runSceneEnhancementChecks(backend, window, output) ? 0 : 1;
+    }
     auto &music = backend.app->music;
     auto &hud = backend.app->hud;
+    // 既有界面与 GPU 基线继续显式验收原版；默认开启与增强模式另有真实窗口检查。
+    hud.sceneEnhancement = false;
+    backend.step(50);
     auto &player = music.player;
     bool ok = true;
     int failures = 0;
@@ -1264,8 +1272,60 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     if (failures == failuresBeforePerformance) {
         qInfo() << "Native performance settings, sampling, export and retry checks passed";
     }
+    // 独立动画夹具放在既有固定时间检查之后，避免较晚的时钟影响旧 HUD 曲线。
+    hud.modal.clear();
+    hud.reduced = false;
+    backend.setVisible(false);
+    backend.scene.review("archive");
+    backend.scene.reduced(false);
+    music.directory.reset();
+    music.current = {};
+    player.queue = followSongs;
+    player.current = followSongs.last().toObject();
+    music.followPlayback(player.current);
+    for (const bool enhanced : {false, true}) {
+        hud.sceneEnhancement = enhanced;
+        backend.scene.setMode("detail");
+        bool sawFade = false;
+        bool blockedEarlyComposite = true;
+        for (int index = 1; index <= 240; ++index) {
+            backend.step(60 + int(enhanced) * 10 + index / 60.0);
+            if (enhanced) {
+                const double blend = backend.frame()["originalActorBlend"].toDouble();
+                sawFade |= blend > 0 && blend < 1;
+                if (index < 30) {
+                    blockedEarlyComposite &= blend == 0;
+                }
+                if (index == 30 || index == 110 || index == 240) {
+                    settle();
+                    capture("extraction-" + QString::number(index));
+                }
+            }
+        }
+        if (enhanced) {
+            check(blockedEarlyComposite && sawFade && backend.scene.originalActorBlend() == 1,
+                  "original actor fades in only after extraction clears neighboring shells");
+        }
+        const QJsonValue selectedCell = backend.frame()["stats"].toObject()["selectedCell"];
+        const QJsonValue selectedKey = music.current["key"];
+        const auto selectedIndex = music.directory->index;
+        backend.action("back");
+        bool retained = true;
+        for (int index = 1; index <= 180; ++index) {
+            backend.step(64 + int(enhanced) * 10 + index / 60.0);
+            retained &= music.current["key"] == selectedKey && music.directory->index == selectedIndex &&
+                        backend.frame()["stats"].toObject()["selectedCell"] == selectedCell;
+        }
+        check(retained && backend.frame()["mode"] == "archive",
+              enhanced ? "enhanced return keeps current song and physical cell throughout animation"
+                       : "original return keeps current song and physical cell throughout animation");
+    }
+    hud.sceneEnhancement = false;
+    backend.step(78);
+    settle();
     if (ok) {
         qInfo() << "Native QML scrolling, paging and search input checks passed";
     }
+    ok &= runSceneEnhancementChecks(backend, window, output.isEmpty() ? QString() : output + "/enhancement");
     return ok ? 0 : 1;
 }

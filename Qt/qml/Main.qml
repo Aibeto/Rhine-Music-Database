@@ -32,8 +32,21 @@ Window {
         onActivated: rhine.toggleFullscreen()
     }
     RhiScene {
+        id: originalScene
         anchors.fill: parent
         engine: rhine
+        visible: !sceneEnhancementLoader.active || rhine.state.originalActorVisible === true
+    }
+    Loader {
+        id: sceneEnhancementLoader
+        objectName: "sceneEnhancementLoader"
+        anchors.fill: parent
+        active: rhine.state.sceneEnhancement === true
+        sourceComponent: OpticalScene {
+            objectName: "enhancementComposite"
+            engine: rhine
+            originalSource: originalScene
+        }
     }
     Hud {
         anchors.fill: parent
