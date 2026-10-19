@@ -52,6 +52,7 @@ class NativeHud : public QObject {
     void setQuery(QString value);
     void pageResults(int direction);
     bool animating(double time) const;
+    bool supportsTrackList() const;
     QVector<Row> rows(int lane);
     QRectF modalBounds(double width) const;
     QRectF detailBounds(double width) const;
@@ -87,6 +88,7 @@ class NativeHud : public QObject {
     bool discRotation = false;
     bool closing = false;
     bool lyricsMode = false;
+    bool trackListMode = false;
     double width = 1920;
     double lastTime = 0;
     UiMotion::SurfaceMotion motion;
@@ -98,6 +100,12 @@ class NativeHud : public QObject {
         double top = 0;
         QStringList text;
         QStringList translation;
+    };
+    struct TrackRulerRow {
+        double centerY = 0;
+        double textRight = 0;
+        double emphasis = 0;
+        double opacity = 1;
     };
     struct Page {
         QString modal;
@@ -111,6 +119,9 @@ class NativeHud : public QObject {
     HudSceneActions m_scene;
     quint64 m_searchGeneration = 0;
     std::optional<Page> m_page;
+    QString m_trackListScope;
+    int m_trackListTarget = -1;
+    std::optional<UiMotion::ReelCurve> m_trackListCurve;
     std::function<void()> m_confirm;
     QCache<QString, QString> m_fitCache{512};
     std::map<QString, UiMotion::RollingLabel> m_rolling;
@@ -165,6 +176,10 @@ class NativeHud : public QObject {
     void footer(double width);
     void empty(double width);
     void archive(double width);
+    void archiveTabButton(double width);
+    void archiveTrackList(double x, double width);
+    double archiveTrackPosition(int selected);
+    void archiveTrackRuler(double x, double centerY, const QVector<TrackRulerRow> &rows);
     void actionButton(QString label, double x, double y, double width, QString action, bool primary = false);
     void detail(double width, double opacity);
     void lyricsPanel(double x, double width);

@@ -426,6 +426,152 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     check(parentY && infoY && *infoY == *parentY + 54,
           "directory info sits immediately below parent navigation");
     capture("directory-navigation");
+    // 列表使用真实 QML 键盘与点击路径；临时目录避免改变后续既有导航夹具。
+    const auto originalDirectory = music.directory;
+    music.directory = std::make_shared<MusicDirectory>(*originalDirectory);
+    music.directory->songs = songs;
+    music.directory->ids = {};
+    music.selectDirectory(12);
+    refresh();
+    const auto selectedTitle = music.current["title"].toString();
+    const auto titleCommand = [&]() {
+        for (const auto &value : hud.commands) {
+            const auto command = value.toArray();
+            if (command.at(0) == "text" && command.at(1) == selectedTitle) {
+                return command;
+            }
+        }
+        return QJsonArray{};
+    };
+    const auto originalTitle = titleCommand();
+    const auto toggleTrackList = [&] {
+        QKeyEvent event(QEvent::KeyPress, Qt::Key_Tab, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &event);
+        refresh();
+    };
+    check(hasAction("archive:tab-mode") && click("archive:tab-mode"), "visible Tab Mode button toggles view");
+    check(hud.trackListMode && titleCommand() == originalTitle,
+          "Tab preserves original current title font, position and size");
+    check(backend.frame()["trackListBlend"].toDouble() > 0,
+          "Tab mode shifts archive projection toward lower left");
+    const auto rulerArrow = [&] {
+        QJsonArray arrows;
+        for (const auto &value : hud.commands) {
+            const auto command = value.toArray();
+            if (command.at(0) == "fill-path" &&
+                command.at(2).toArray() == QJsonArray{0.46, 0.48, 0.37, 0.75}) {
+                arrows.append(command);
+            }
+        }
+        return arrows;
+    };
+    const auto fixedArrow = rulerArrow();
+    QVector<double> rowCenters;
+    QVector<double> tickCenters;
+    bool sameTypography = true;
+    bool horizontal = true;
+    for (const auto &value : hud.commands) {
+        const auto command = value.toArray();
+        if (command.at(0) == "text" && command.at(1).toString().startsWith("本地测试曲目 ")) {
+            sameTypography &= command.at(4) == 28 && command.at(5) == "bold";
+            const auto bounds = backend.glyphs()->bounds(command.at(1).toString(), 28, "bold");
+            rowCenters.append(command.at(3).toDouble() + bounds["y"].toDouble() +
+                              bounds["height"].toDouble() / 2);
+        }
+        if (command.at(0) == "fill" && command.at(5).toDouble() == 1.2 &&
+            (command.at(4).toDouble() == 14 || command.at(4).toDouble() == 50)) {
+            tickCenters.append(command.at(3).toDouble() + 0.6);
+        }
+        horizontal &= command.at(0) != "rotate";
+    }
+    std::sort(rowCenters.begin(), rowCenters.end());
+    std::sort(tickCenters.begin(), tickCenters.end());
+    bool alignedTicks = rowCenters.size() == 9 && tickCenters.size() == 9;
+    for (int index = 0; alignedTicks && index < 9; ++index) {
+        alignedTicks &= std::abs(rowCenters.at(index) - tickCenters.at(index)) < 1;
+    }
+    check(sameTypography && horizontal && alignedTicks,
+          "nine horizontal titles share typography and each has an aligned ruler tick");
+    check(rowCenters.size() == 9 &&
+              rowCenters.at(4) - rowCenters.at(3) > rowCenters.at(3) - rowCenters.at(2) &&
+              rowCenters.at(5) - rowCenters.at(4) > rowCenters.at(6) - rowCenters.at(5),
+          "selected song has larger gaps on both sides");
+    capture("archive-track-list");
+    // 固定时间采样整行运动与刻度，覆盖快速反向打断和动画结束后的休眠条件。
+    hud.reduced = false;
+    music.selectDirectory(13);
+    backend.step(50);
+    backend.step(50.1);
+    const auto incomingEarly = textY("本地测试曲目 14");
+    check(incomingEarly && *incomingEarly > 509 && *incomingEarly < 597 && hud.animating(50.1),
+          "incoming whole song slides upward from its previous row");
+    bool movingTickAligned = false;
+    if (incomingEarly) {
+        const auto bounds = backend.glyphs()->bounds("本地测试曲目 14", 28, "bold");
+        const auto center = *incomingEarly + bounds["y"].toDouble() + bounds["height"].toDouble() / 2;
+        for (const auto &value : hud.commands) {
+            const auto command = value.toArray();
+            if (command.at(0) == "fill" && command.at(5).toDouble() == 1.2 &&
+                std::abs(command.at(3).toDouble() + 0.6 - center) < 0.01) {
+                movingTickAligned = true;
+            }
+        }
+    }
+    check(movingTickAligned, "ruler tick follows song throughout vertical transition");
+    check(fixedArrow.size() == 1 && rulerArrow() == fixedArrow,
+          "single ruler arrow stays fixed while songs and ticks slide");
+    backend.step(50.22);
+    const auto incomingLater = textY("本地测试曲目 14");
+    check(incomingEarly && incomingLater && *incomingLater < *incomingEarly,
+          "song and ruler continue sliding across multiple frames");
+    if (!output.isEmpty()) {
+        settle();
+        window->grabWindow().save(output + "/archive-track-list-moving.png");
+    }
+    music.selectDirectory(12);
+    backend.step(50.22);
+    const auto interrupted = textY("本地测试曲目 14");
+    check(incomingLater && interrupted && std::abs(*incomingLater - *interrupted) < 0.01,
+          "rapid reverse selection preserves current list position");
+    backend.step(51);
+    check(textY("本地测试曲目 13") == std::optional<double>(509) && !hud.animating(52),
+          "list settles exactly at original title anchor and stops scheduling");
+    hud.reduced = true;
+    refresh();
+    const auto savedTitle = music.current["title"];
+    music.current["title"] = QString("超长歌曲名称 Long title ").repeated(20);
+    refresh();
+    check(rulerArrow() == fixedArrow, "long song names do not move ruler or arrow");
+    music.current["title"] = savedTitle;
+    refresh();
+    check(click("music:index:14") && music.directory->index == 14 && hud.frame["mode"] == "archive",
+          "list click selects the matching archive song without opening details");
+    music.selectDirectory(0);
+    refresh();
+    check(!hasAction("music:index:-1") && hasAction("music:index:4") && !hasAction("music:index:5"),
+          "track list start shows only available successors without wrapping");
+    music.selectDirectory(39);
+    refresh();
+    check(hasAction("music:index:35") && !hasAction("music:index:34") && !hasAction("music:index:40"),
+          "track list end shows only available predecessors without wrapping");
+    hud.openModal("search");
+    refresh();
+    toggleTrackList();
+    check(hud.trackListMode, "Tab in search does not toggle archive view");
+    hud.closeModal();
+    refresh();
+    toggleTrackList();
+    check(!hud.trackListMode, "Tab restores original archive view");
+    for (int index = 1; index <= 150; ++index) {
+        backend.step(52 + index / 60.0);
+    }
+    const auto restoredProjection = backend.frame()["projection"].toArray();
+    check(backend.frame()["trackListBlend"].toDouble() == 0 && restoredProjection.at(8).toDouble() == 0 &&
+              restoredProjection.at(9).toDouble() == 0,
+          "leaving Tab mode restores original archive projection exactly");
+    music.directory = originalDirectory;
+    music.selectDirectory(originalDirectory->index);
+    refresh();
     const auto folder = music.directory;
     const auto directoryIndex = folder->index;
     check(click("music:directory-info") && music.directoryInfo, "directory info opens");

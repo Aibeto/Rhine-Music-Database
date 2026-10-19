@@ -355,6 +355,9 @@ bool Engine::keyEvent(int keyCode, int modifiers, QString text) {
     case Qt::Key_Escape:
         text = "Escape";
         break;
+    case Qt::Key_Tab:
+        text = "Tab";
+        break;
     default:
         break;
     }

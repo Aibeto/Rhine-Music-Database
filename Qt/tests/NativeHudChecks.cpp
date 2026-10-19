@@ -129,12 +129,44 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs, const QString &fixt
                 }
                 expected["commands"] = commands;
 #endif
+                // 列切换右箭头为避免压住标签右移 77；只调整这一项冻结几何。
+                auto revisedCommands = expected["commands"].toArray();
+                for (int index = 0; index < revisedCommands.size(); ++index) {
+                    auto command = revisedCommands.at(index).toArray();
+                    if (command.at(0) == "text" && command.at(1) == "→" &&
+                        command.at(2).toDouble() == 1920 * 0.5234375 + 233 &&
+                        command.at(3).toDouble() == 908) {
+                        command[2] = command.at(2).toDouble() + 77;
+                        revisedCommands[index] = command;
+                    }
+                }
+                expected["commands"] = revisedCommands;
+                auto revisedHits = expected["hits"].toArray();
+                for (int index = 0; index < revisedHits.size(); ++index) {
+                    auto hit = revisedHits.at(index).toObject();
+                    if (hit["action"] == "column-next") {
+                        hit["x"] = hit["x"].toDouble() + 77;
+                        revisedHits[index] = hit;
+                    }
+                }
+                expected["hits"] = revisedHits;
                 hud.draw(frame, 1920, 50);
                 const auto expectedCommands = expected["commands"].toArray();
                 const auto expectedHits = expected["hits"].toArray();
                 auto actualHits = hud.hits;
                 auto actualPixels = paint(glyphs, hud.commands);
                 auto expectedPixels = paint(glyphs, expectedCommands);
+                // 新按钮单独由真实窗口回归验收；冻结对照只跳过其明确占用的小区域。
+                for (int index = actualHits.size() - 1; index >= 0; --index) {
+                    if (actualHits.at(index).toObject()["action"] == "archive:tab-mode") {
+                        actualHits.removeAt(index);
+                        for (auto *image : {&actualPixels, &expectedPixels}) {
+                            QPainter painter(image);
+                            painter.setCompositionMode(QPainter::CompositionMode_Source);
+                            painter.fillRect(QRect(1572, 854, 194, 48), Qt::transparent);
+                        }
+                    }
+                }
                 if (panel == "settings") {
                     // 新增滚动轨道位于原留白处；其余设置行继续对照迁移前的尺寸、位置和像素。
                     actualHits = {};

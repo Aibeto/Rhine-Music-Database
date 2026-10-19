@@ -38,7 +38,8 @@ void NativeApplication::initialize() {
     music.restoreIdentityName();
 }
 QJsonObject NativeApplication::step(double time, double width, bool reuseScene) {
-    const auto frame = reuseScene ? music.frame : m_scene->sample(time);
+    const auto viewChanged = m_scene->setTrackListView(hud.trackListMode && music.current["kind"] == "song");
+    const auto frame = reuseScene && !viewChanged ? music.frame : m_scene->sample(time);
     if (frame.isEmpty()) {
         return {};
     }

@@ -33,6 +33,19 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
             music.selectResult(raw, music.selectedLane, false);
             m_scene.mode("archive");
         }
+    } else if (name == "index") {
+        // 列表命中使用完整资料库索引，跨列选择仍由既有资料库维护物理唱片位置。
+        const auto values = music.libraryItems();
+        if (!trackListMode || frame["mode"] != "archive" || last < 0 || last >= values.size() ||
+            values.at(last).toObject()["kind"] != "song") {
+            return;
+        }
+        if (music.directory) {
+            music.selectDirectory(last);
+        } else {
+            const auto raw = music.groupLane == music.selectedLane ? music.groupIndices.value(last) : last;
+            music.selectResult(raw, music.selectedLane, false);
+        }
     } else if (name == "result") {
         music.selectResult(parts.value(3).toInt(), parts.value(2).toInt());
         tab = "overview";

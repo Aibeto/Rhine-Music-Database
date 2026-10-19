@@ -326,6 +326,12 @@ void NativeHud::action(QString value) {
     }
     auto &music = *m_music;
     const auto parts = value.split(':');
+    if (value == "archive:tab-mode") {
+        if (modal.isEmpty() && supportsTrackList()) {
+            trackListMode = !trackListMode;
+        }
+        return;
+    }
     if (value.startsWith("tab:")) {
         trackOffset = 0;
         bodyOffset = 0;
@@ -520,6 +526,10 @@ void NativeHud::key(QString value, bool command) {
     if (!modal.isEmpty()) {
         return;
     }
+    if (value == "Tab" && !command) {
+        action("archive:tab-mode");
+        return;
+    }
     if (value == " ") {
         m_music->player.toggle();
         return;
@@ -535,13 +545,20 @@ void NativeHud::key(QString value, bool command) {
     }
 }
 
+bool NativeHud::supportsTrackList() const {
+    return modal.isEmpty() && frame["mode"] == "archive" && !frame["viewer"].toBool() && !lyricsMode &&
+           m_music->current["kind"] == "song";
+}
+
 bool NativeHud::animating(double time) const {
     if (reduced) {
         return !motion.finished() || closing;
     }
     const bool lyrics = lyricsMode && modal.isEmpty() && m_lyricsCurve &&
                         time - m_lyricsCurve->start < m_lyricsCurve->duration;
-    if (!motion.finished() || lyrics || closing || time - m_resultStart < 0.5) {
+    const bool trackList = trackListMode && frame["mode"] == "archive" && modal.isEmpty() &&
+                           m_trackListCurve && time - m_trackListCurve->start < m_trackListCurve->duration;
+    if (!motion.finished() || lyrics || trackList || closing || time - m_resultStart < 0.5) {
         return true;
     }
     return std::any_of(m_rolling.cbegin(), m_rolling.cend(),
