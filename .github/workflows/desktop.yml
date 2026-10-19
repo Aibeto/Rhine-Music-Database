@@ -6,9 +6,6 @@ on:
   workflow_dispatch:
   workflow_call:
     inputs:
-      source_sha:
-        required: true
-        type: string
       release_version:
         required: true
         type: string
@@ -50,12 +47,6 @@ jobs:
       RHINE_VERSION: ${{ inputs.release_version || '' }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.source_sha || github.sha }}
-      - name: Validate release build support
-        if: inputs.release_version != ''
-        shell: bash
-        run: node -e "require('./scripts/release-version.cjs').buildVersion()"
       - uses: actions/setup-node@v4
         with:
           node-version: '22.14.0'
