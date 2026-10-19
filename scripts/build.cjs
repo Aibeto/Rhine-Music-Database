@@ -65,6 +65,8 @@ function prepareResources() {
         fs.copyFileSync(path.join('Assets/fonts', file), path.join('output/resources', file));
     }
 
+    fs.cpSync('Assets/quality', 'output/resources/quality', { recursive: true });
+
     run(process.execPath, ['scripts/check-music-upstream.cjs']);
     const bridge = 'output/resources/MusicBridge';
     fs.mkdirSync(bridge, {

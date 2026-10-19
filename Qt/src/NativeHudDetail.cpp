@@ -71,13 +71,38 @@ void NativeHud::detail(double width, double opacity) {
         return;
     }
     text("SONG ID / " + item["id"].toString(), x, 278, 12);
-    const auto titleLines = m_glyphs->wrap(item["title"].toString(), usable, 32);
+    const auto &player = music.player;
+    const bool isCurrent = MusicPlayer::identity(item) == MusicPlayer::identity(player.current) &&
+                           !player.loading && !player.failed;
+    const auto quality = isCurrent ? player.actualQuality : QString();
+    const auto badgeKey = "quality:" + music.provider + "-" + quality;
+    const auto badge = quality.isEmpty() ? QImage() : m_host->image(badgeKey);
+    double badgeWidth = 0;
+    if (!quality.isEmpty()) {
+        hit(width * 0.927 - 55, 300, 110, 48, "quality:open", "音质说明与切换");
+        if (!badge.isNull()) {
+            constexpr double badgeHeight = 25;
+            badgeWidth = badgeHeight * badge.width() / badge.height();
+            const auto badgeX = width * 0.927 - badgeWidth / 2;
+            if (music.provider == "kugou") {
+                fill(badgeX - 8, 307, badgeWidth + 16, badgeHeight + 10, {0.30, 0.33, 0.26, 1});
+            }
+            image(badgeKey, badgeX, 312, badgeWidth, badgeHeight);
+        } else {
+            // 平台没有独立图标的普通档位用文字说明，不伪造官方徽标。
+            const auto label = quality == "standard" ? QStringLiteral("标准") : QStringLiteral("高品质");
+            badgeWidth = 56;
+            text(label, width * 0.927 - badgeWidth / 2, 312, 14, "demibold");
+        }
+    }
+    const auto titleWidth = badgeWidth > 0 ? width * 0.927 - badgeWidth / 2 - x - 24 : usable;
+    const auto titleLines = m_glyphs->wrap(item["title"].toString(), titleWidth, 32);
     for (int index = 0; index < std::min(2, int(titleLines.size())); ++index) {
         auto line = titleLines.at(index);
         if (index == 1 && titleLines.size() > 2) {
             line += "…";
         }
-        limited(line, x, 305 + index * 40, 32, usable, "bold");
+        limited(line, x, 305 + index * 40, 32, titleWidth, "bold");
     }
     limited(item["artist"].toString(), x, 394, 19, usable, "demibold");
     if (music.canMutate("/like")) {

@@ -129,7 +129,13 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     }
     const QJsonObject lyrics{{"version", 1},  {"source", "netease"}, {"timing", "line"},
                              {"offsetMs", 0}, {"plainText", ""},     {"lines", lyricLines}};
+    QString fixtureAudioURL;
     backend.host.fixture = [&](QString route, QJsonObject parameters) {
+        if (route.endsWith("/playback") && !fixtureAudioURL.isEmpty()) {
+            return QJsonObject{{"body", QJsonObject{{"code", 200},
+                                                    {"value", QJsonObject{{"url", fixtureAudioURL},
+                                                                          {"level", "standard"}}}}}};
+        }
         if (route.endsWith("/lyrics")) {
             return QJsonObject{{"body", QJsonObject{{"code", 200}, {"value", lyrics}}}};
         }
@@ -494,6 +500,7 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     wav << bytes;
     wav.writeRawData(QByteArray(bytes, '\0').constData(), bytes);
     audioFile.close();
+    fixtureAudioURL = QUrl::fromLocalFile(audioFile.fileName()).toString();
     backend.host.mediaControl("volume", 0);
     check(backend.host.mediaLoad(QUrl::fromLocalFile(audioFile.fileName()).toString()),
           "local audio source accepted");
@@ -528,6 +535,7 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     hud.lyricsMode = false;
     hud.reduced = false;
     music.current = player.current;
+    player.actualQuality = "sq";
     player.loading = false;
     player.failed = false;
     backend.scene.musicIdentity(music.current["key"].toString());
@@ -560,7 +568,12 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     check(backend.frame()["discAngle"].toDouble() > discAngle, "playing selected disc rotates");
     check(backend.performance()["coverUploads"].toULongLong() == discUploads,
           "rotation reuses the uploaded cover texture");
-    capture("playing-disc-rotation");
+    const auto qualityImage = std::find_if(hud.commands.begin(), hud.commands.end(), [](QJsonValue value) {
+        const auto command = value.toArray();
+        return command[0] == "image" && command[1] == "quality:netease-sq";
+    });
+    check(qualityImage != hud.commands.end(), "playing song displays actual source badge");
+    capture("playing-disc-quality");
     hud.lyricsMode = true;
     refresh();
     const auto lyricsDiscAngle = backend.frame()["discAngle"].toDouble();
@@ -575,9 +588,88 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     settle();
     refresh();
     check(backend.frame()["discAngle"].toDouble() == pausedAngle, "paused disc preserves its angle");
+    hud.reduced = true;
+    check(click("quality:open") && hud.modal == "quality", "quality badge opens its explanation card");
+    capture("quality-card");
+    const auto qualityProvider = music.provider;
+    const bool qualityDark = hud.dark;
+    const auto qualityThemeMode = hud.themeMode;
+    hud.themeMode = "light";
+    for (const auto &provider : QStringList{"netease", "qq", "kugou"}) {
+        music.provider = provider;
+        refresh();
+        capture("quality-card-" + provider);
+        const auto bounds = hud.modalBounds(width);
+        int qualityChoices = 0;
+        for (const auto &value : hud.hits) {
+            const auto target = value.toObject();
+            if (!target["action"].toString().startsWith("quality:set:")) {
+                continue;
+            }
+            ++qualityChoices;
+            const QRectF choice(target["x"].toDouble(), target["y"].toDouble(), target["width"].toDouble(),
+                                target["height"].toDouble());
+            check(bounds.contains(choice), "every provider quality option remains inside its panel");
+        }
+        check(qualityChoices == MusicPlayer::qualityOptions(provider).size(),
+              "quality redesign retains every supported provider option");
+    }
+    music.provider = qualityProvider;
+    hud.dark = true;
+    refresh();
+    capture("quality-card-dark");
+    hud.dark = qualityDark;
+    hud.themeMode = qualityThemeMode;
+    refresh();
+    const auto qualityPosition = backend.host.mediaState()["position"].toDouble();
+    const auto qualityQueue = player.queue;
+    check(click("quality:set:jymaster") && player.quality == "jymaster",
+          "featured master card selects the shared preference");
+    wait.restart();
+    while (player.loading && wait.elapsed() < 3000) {
+        settle();
+    }
+    refresh();
+    check(player.actualQuality == "standard", "selected master does not overwrite actual source quality");
+    capture("quality-card-master-selected");
+    player.failed = true;
+    refresh();
+    check(textY("音源不可用").has_value(), "failed playback never presents a stale available quality");
+    player.failed = false;
+    refresh();
+    check(click("quality:set:standard") && player.quality == "standard",
+          "quality card updates shared preference");
+    wait.restart();
+    while (player.loading && wait.elapsed() < 3000) {
+        settle();
+    }
+    wait.restart();
+    while (std::abs(backend.host.mediaState()["position"].toDouble() - qualityPosition) >= 100 &&
+           wait.elapsed() < 3000) {
+        settle();
+    }
+    check(std::abs(backend.host.mediaState()["position"].toDouble() - qualityPosition) < 100 &&
+              !backend.host.mediaState()["playing"].toBool() && player.queue == qualityQueue,
+          "quality card preserves actual decoder position, pause and queue");
+    backend.action("settings");
+    refresh();
+    check(textY("标准").has_value(), "settings reflects quality card selection");
+    check(click("quality"), "settings quality cycle remains available");
+    const auto selectedQuality = player.quality;
+    backend.action("quality:open");
+    refresh();
+    check(player.quality == selectedQuality, "quality card reflects settings selection");
+    hud.modal.clear();
+    hud.motion.set(false, 50, true);
+    player.actualQuality = "sq";
     music.current = songs.at(1).toObject();
     refresh();
     check(backend.frame()["discAngle"].toDouble() == 0, "another song has no playing disc rotation");
+    const auto staleBadge = std::find_if(hud.commands.begin(), hud.commands.end(), [](QJsonValue value) {
+        const auto command = value.toArray();
+        return command[0] == "image" && command[1].toString().startsWith("quality:");
+    });
+    check(staleBadge == hud.commands.end(), "another song does not inherit playback quality");
     // 使用更长的本地 PCM，确保休眠观察期间持续播放并触发真实进度通知。
     QFile shortAudio(audioFile.fileName());
     check(shortAudio.open(QIODevice::ReadOnly), "read long playback fixture source");
@@ -643,7 +735,7 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
                   playingArchive.performance()["sceneUpdates"].toULongLong() == sceneUpdates,
               "full-motion archive ignores progress and lyrics wakeups while rotation is enabled");
     }
-    backend.host.mediaLoad(QUrl::fromLocalFile(audioFile.fileName()).toString());
+    backend.host.mediaLoad(fixtureAudioURL);
     backend.host.mediaControl("pause");
     hud.discRotation = false;
     music.current = player.current;

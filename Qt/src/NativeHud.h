@@ -181,6 +181,8 @@ class NativeHud : public QObject {
     void platformChoices(double x, double y, double width, bool expanded = false);
     void platformPanel(double x, double y, double width);
     void settings(double x, double y, double width);
+    void qualityPanel(double x, double y, double width);
+    void qualityChoice(const QString &id, int number, double x, double y, double width, bool featured);
     void logo(double x, double y, double width);
     void boot(double width);
     void scan(const QJsonObject &boot);

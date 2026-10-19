@@ -17,6 +17,10 @@ class MusicPlayer : public QObject {
     void remove(int index);
     void clearUpcoming();
     void stop();
+    void setQuality(const QString &value);
+    static QVector<QPair<QString, QString>> qualityOptions(const QString &provider);
+    static QString sourceQuality(const QString &provider, const QJsonObject &audio, bool trial = false);
+    QString actualQuality;
     static QString identity(const QJsonObject &track);
     LyricsController lyrics;
     QJsonArray queue;
@@ -45,7 +49,9 @@ class MusicPlayer : public QObject {
     quint64 m_generation = 0;
     qint64 m_endSerial = 0;
     double m_lastPoll = -1;
+    std::optional<double> m_resumePosition;
+    bool m_resumePaused = false;
     MusicApi::Valid valid(quint64 generation);
-    void prepare(QJsonObject track, quint64 generation);
+    void prepare(QJsonObject track, quint64 generation, bool reload = false);
     void fail(QString error);
 };

@@ -17,6 +17,7 @@ const QVector<Provider> providers{
 QString modalTitle(const QString &modal, const MusicLibrary &music) {
     static const QHash<QString, QString> titles{{"provider", "MUSIC PLATFORM"},
                                                 {"settings", "SYSTEM SETTINGS"},
+                                                {"quality", "AUDIO QUALITY"},
                                                 {"disc-rotation-warning", "DISC ROTATION"},
                                                 {"saved", "MY MUSIC"},
                                                 {"player", "NOW PLAYING"},
@@ -38,6 +39,7 @@ QString modalTitle(const QString &modal, const MusicLibrary &music) {
 QString modalSubtitle(const QString &modal, const MusicLibrary &music) {
     static const QHash<QString, QString> subtitles{{"provider", "直接选择音乐平台 / 各平台账号独立保存"},
                                                    {"settings", "终端偏好设置"},
+                                                   {"quality", "声音档案 / 播放音质"},
                                                    {"disc-rotation-warning", "开启前请确认资源与功耗风险"},
                                                    {"player", "播放队列 / QUEUE"},
                                                    {"discover", "推荐 / 排行榜 / 新专辑"},
@@ -78,6 +80,8 @@ void NativeHud::modalDraw(double width) {
         category = "SYSTEM PREFERENCES";
     } else if (modal == "player") {
         category = "AUDIO TERMINAL";
+    } else if (modal == "quality") {
+        category = "AUDIO SPECIFICATION";
     }
     text("RHINE LAB / MUSIC DATABASE / " + category, x + 53, y + 37, 11);
     button("← 返回", x + usable - 220, y + 18, 167, 54, "close-modal", 20, "demibold");
@@ -90,7 +94,8 @@ void NativeHud::modalDraw(double width) {
         text("该功能默认关闭，减少动态效果开启时也不会旋转。", x + 53, y + 394, 16);
         button("了解风险，仍然开启", x + 53, y + 480, 260, 48, "disc-rotation:enable", 16);
         button("保持关闭", x + 340, y + 480, 180, 48, "disc-rotation:cancel", 16);
-
+    } else if (modal == "quality") {
+        qualityPanel(x, y, usable);
     } else if (modal == "provider") {
         platformPanel(x, y, usable);
     } else if (modal == "confirm") {
@@ -170,6 +175,141 @@ void NativeHud::platformPanel(double x, double y, double width) {
     text("网易云与 QQ 支持歌单编辑；酷狗支持读取与播放。", x + 53, y + 558, 15);
     button("账号登录 / " + m_music->providerName(), x + 53, y + 660, 330, 48, "music:login", 16);
 }
+namespace {
+struct QualityDescription {
+    QString title;
+    QString caption;
+    QString detail;
+    QString badge;
+};
+const QHash<QString, QualityDescription> qualityDescriptions{
+    {"standard", {"标准", "STANDARD", "日常聆听，兼顾音质与数据流量", ""}},
+    {"higher", {"较高", "HIGH QUALITY", "提升声音细节，保持轻量传输", "hq"}},
+    {"exhigh", {"极高", "HIGH QUALITY", "更充分保留有损编码中的声音细节", "hq"}},
+    {"lossless", {"无损", "LOSSLESS / SQ", "无损编码，保留更完整的录音细节", "sq"}},
+    {"ape", {"无损 / APE", "LOSSLESS / APE", "以 APE 格式提供无损音源", "sq"}},
+    {"hires", {"高解析无损", "HI-RES AUDIO", "还原高解析录音中的丰富层次", "hires"}},
+    {"jymaster", {"超清母带", "MASTER AUDIO", "聆听母带版本中的细腻质感与动态", "jymaster"}},
+    {"best", {"自动最高可用", "BEST AVAILABLE", "由平台选择当前可用的最高音质", ""}}};
+}
+
+/** 音质选项采用统一档案标记；重点档位展开为卡片，普通档位保持紧凑行高。 */
+void NativeHud::qualityChoice(const QString &id, int number, double x, double y, double width,
+                              bool featured) {
+    const auto description = qualityDescriptions.value(id);
+    const bool selected = m_music->player.quality == id;
+    const auto height = featured ? 174. : 57.;
+    const auto accent = dark ? QJsonArray{0.69, 0.74, 0.53, 1} : QJsonArray{0.43, 0.48, 0.34, 1};
+    auto tint = accent;
+    tint[3] = selected ? 0.18 : 0.055;
+    if (featured || selected) {
+        fill(x, y, width, height, tint);
+    }
+    rule(x, y + height, width, selected ? 0.6 : 0.13);
+    if (selected) {
+        fill(x, y, 3, height, accent);
+    }
+    hit(x, y, width, height, "quality:set:" + id, description.title);
+    const auto index = QString::number(number).rightJustified(2, '0');
+    const auto key = "quality:" + m_music->provider + "-" + description.badge;
+    const auto pixels = description.badge.isEmpty() ? QImage() : m_host->image(key);
+    const auto badgeX = featured ? x + width - 104 : x + 30;
+    const auto badgeY = featured ? y + 19 : y + 16;
+    if (!pixels.isNull()) {
+        const auto badgeWidth = std::min(68., 21. * pixels.width() / pixels.height());
+        const auto badgeHeight = badgeWidth * pixels.height() / pixels.width();
+        if (m_music->provider == "kugou") {
+            fill(badgeX - 4, badgeY - 4, badgeWidth + 8, badgeHeight + 8, {0.30, 0.33, 0.26, 1});
+        }
+        image(key, badgeX, badgeY, badgeWidth, badgeHeight);
+    } else if (!featured) {
+        QString label = "STD";
+        if (id == "best") {
+            label = "AUTO";
+        } else if (description.badge == "hq") {
+            label = "HQ";
+        }
+        text(label, x + 30, y + 18, 11, "demibold");
+    }
+    if (featured) {
+        text(index + " / " + description.caption, x + 22, y + 22, 11, "demibold", 0.8);
+        text(description.title, x + 22, y + 62, 26, "demibold");
+        limited(description.detail, x + 22, y + 106, 13, width - 44);
+        text(selected ? "✓ 已选择" : "选择此档 →", x + 22, y + 143, 12, "demibold");
+    } else {
+        text(index, x + 10, y + 20, 9);
+        text(description.title, x + 112, y + 6, 17, "demibold");
+        limited(description.detail, x + 112, y + 32, 12, width - 256);
+        text(selected ? "✓ 已选择" : description.caption, x + width - 134, y + 20, 10, "demibold");
+    }
+}
+
+/** 将播放偏好与实际音源分开呈现；卡片与设置共用播放器的音质切换入口。 */
+void NativeHud::qualityPanel(double x, double y, double width) {
+    const auto &music = *m_music;
+    const auto &player = music.player;
+    const auto left = x + 53;
+    const auto usable = width - 106;
+    const QHash<QString, QString> names{{"standard", "标准"},     {"hq", "高品质 / HQ"},
+                                        {"sq", "无损 / SQ"},      {"hires", "高解析无损 / Hi-Res"},
+                                        {"jymaster", "超清母带"}, {"jyeffect", "高清臻音"},
+                                        {"sky", "沉浸环绕声"}};
+    QString actual = names.value(player.actualQuality, "尚未确认");
+    if (player.failed) {
+        actual = "音源不可用";
+    } else if (player.loading) {
+        actual = "正在获取音源…";
+    } else if (player.trial) {
+        actual = "试听片段";
+    }
+    const auto accent = dark ? QJsonArray{0.69, 0.74, 0.53, 1} : QJsonArray{0.43, 0.48, 0.34, 1};
+    fill(left, y + 195, 3, 48, accent);
+    text("实际音源 / SOURCE", left + 17, y + 199, 10, "demibold", 0.6);
+    text(actual, left + 17, y + 219, 18, "demibold");
+    const auto preference = qualityDescriptions.value(player.quality).title;
+    limited("已选偏好：" + preference, left + usable * 0.52, y + 219, 14, usable * 0.48);
+    rule(left, y + 257, usable, 0.25);
+    QStringList featured{"jymaster", "hires"};
+    if (music.provider == "qq") {
+        featured = {"best", "lossless"};
+    } else if (music.provider == "kugou") {
+        featured = {"hires", "lossless"};
+    }
+    const auto cardWidth = (usable - 18) / 2;
+    for (int index = 0; index < featured.size(); ++index) {
+        qualityChoice(featured.at(index), index + 1, left + index * (cardWidth + 18), y + 278, cardWidth,
+                      true);
+    }
+    const auto options = MusicPlayer::qualityOptions(music.provider);
+    int row = 0;
+    for (auto option = options.crbegin(); option != options.crend(); ++option) {
+        if (!featured.contains(option->first)) {
+            qualityChoice(option->first, row + 3, left, y + 474 + row * 58, usable, false);
+            ++row;
+        }
+    }
+    // 未开放手动选择的扩展音源仍展示官方图标名称，避免把图标当作额外可选档位。
+    if (music.provider == "netease") {
+        text("其他音源标识", left, y + 738, 11, "demibold");
+        const QStringList extraBadges{"jyeffect", "sky"};
+        for (int index = 0; index < extraBadges.size(); ++index) {
+            const auto id = extraBadges.at(index);
+            const auto key = "quality:" + music.provider + "-" + id;
+            const auto pixels = m_host->image(key);
+            const auto badgeX = left + 130 + index * 235;
+            if (!pixels.isNull()) {
+                const auto badgeWidth = 18. * pixels.width() / pixels.height();
+                image(key, badgeX, y + 735, badgeWidth, 18);
+                text(names.value(id), badgeX + badgeWidth + 12, y + 737, 12);
+            }
+        }
+    }
+    rule(left, y + 775, usable, 0.22);
+    text("选择与设置同步 · 切换保留播放位置", left, y + 791, 12);
+    limited("可用音质由歌曲与平台权益决定，以实际音源为准。", left + usable * 0.47, y + 791, 12,
+            usable * 0.53);
+}
+
 void NativeHud::settings(double x, double y, double width) {
     const auto viewport =
         QRectF(x + 40, y + SettingsViewportTop, width - 80, SettingsViewportBottom - SettingsViewportTop);

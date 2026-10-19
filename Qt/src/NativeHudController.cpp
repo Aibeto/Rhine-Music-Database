@@ -441,12 +441,15 @@ void NativeHud::action(QString value) {
         music.player.alternative = !music.player.alternative;
         m_host->setPreference("alternate-source", music.player.alternative ? "on" : "off");
     } else if (value == "quality") {
-        const QStringList qualities =
-            music.provider == "qq"
-                ? QStringList{"best", "standard", "exhigh", "lossless", "ape"}
-                : QStringList{"standard", "higher", "exhigh", "lossless", "hires", "jymaster"};
-        music.player.quality = cycle(qualities, music.player.quality);
-        m_host->setPreference("quality", music.player.quality);
+        QStringList qualities;
+        for (const auto &option : MusicPlayer::qualityOptions(music.provider)) {
+            qualities.append(option.first);
+        }
+        music.player.setQuality(cycle(qualities, music.player.quality));
+    } else if (value == "quality:open") {
+        openModal("quality");
+    } else if (value.startsWith("quality:set:")) {
+        music.player.setQuality(value.mid(12));
     } else if (value == "disc-rotation") {
         if (discRotation) {
             discRotation = false;

@@ -6,6 +6,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QJsonDocument>
+#include <QMediaDevices>
 #include <QThread>
 #include <QTemporaryDir>
 #include <QUrl>
@@ -74,6 +75,45 @@ bool runNativeMusicChecks(const QString &root) {
         }
         ok &= value;
     };
+    const auto sourceQuality = [](QString provider, QJsonObject audio, bool trial = false) {
+        return MusicPlayer::sourceQuality(provider, audio, trial);
+    };
+    const auto source = [](QString path, QJsonObject fields = {}) {
+        fields["url"] = "https://audio.example/" + path;
+        return fields;
+    };
+    check(sourceQuality("netease", source("song.mp3", {{"level", "standard"}})) == "standard",
+          "actual NetEase downgrade remains standard");
+    check(sourceQuality("netease", source("song.flac", {{"level", "hires"}})) == "hires",
+          "actual NetEase Hi-Res level is retained");
+    check(sourceQuality("netease", source("song.flac", {{"br", 1800000}})) == "sq",
+          "lossless bitrate alone does not imply Hi-Res");
+    check(sourceQuality("netease", source("alternate.mp3", {{"level", "hires"}, {"br", 128000}})) ==
+              "standard",
+          "actual lossy alternate source cannot retain a lossless label");
+    check(sourceQuality("qq", source("M500fixture.mp3", {{"quality", "flac"}})) == "standard",
+          "QQ actual file overrides a misleading requested quality");
+    check(sourceQuality("qq", source("M800fixture.mp3")) == "hq" &&
+              sourceQuality("qq", source("F000fixture.flac")) == "sq" &&
+              sourceQuality("qq", source("A000fixture.ape")) == "sq",
+          "QQ logged-in media prefixes identify HQ and lossless");
+    check(sourceQuality("qq", source("unknown.mp3", {{"quality", "flac"}})).isEmpty(),
+          "QQ unknown file does not inherit requested quality");
+    check(sourceQuality("kugou", source("audio", {{"extName", "flac"}, {"br", 2000000}})) == "sq",
+          "Kugou actual format survives an opaque URL");
+    check(sourceQuality("kugou",
+                        source("audio", {{"extName", "flac"}, {"sampleRate", 96000}, {"bitDepth", 24}})) ==
+              "hires",
+          "Kugou Hi-Res requires actual sample rate and bit depth");
+    check(sourceQuality("netease", source("song.flac", {{"level", "hires"}}), true).isEmpty() &&
+              sourceQuality("netease", {{"level", "hires"}}).isEmpty() &&
+              sourceQuality("kugou", source("opaque", {{"br", 2000000}})).isEmpty(),
+          "preview, absent source and unknown codec never claim quality");
+    for (const auto &badge : {"netease-sq", "netease-hires", "netease-jymaster", "netease-jyeffect",
+                              "netease-sky", "qq-hq", "qq-sq", "kugou-hq", "kugou-sq", "kugou-hires"}) {
+        check(!host.image("quality:" + QString(badge)).isNull(), "official quality image is packaged");
+    }
+    QString returnedQuality = "lossless";
     int nativeSearches = 0;
     int details = 0;
     int mutations = 0;
@@ -112,7 +152,8 @@ bool runNativeMusicChecks(const QString &root) {
         } else if (route.endsWith("/wiki")) {
             value = "本地百科";
         } else if (route.endsWith("/playback") || route.endsWith("/preview")) {
-            value = QJsonObject{{"url", audioURL}, {"preview", route.endsWith("/preview")}};
+            value = QJsonObject{
+                {"url", audioURL}, {"level", returnedQuality}, {"preview", route.endsWith("/preview")}};
         } else if (route.endsWith("/mutate")) {
             ++mutations;
             if (rejectQQWrite) {
@@ -230,6 +271,7 @@ bool runNativeMusicChecks(const QString &root) {
     library.player.play(song("1"), QJsonArray{song("1"), song("2")});
     check(waitFor([&] { return !library.player.loading; }), "native playback source finishes");
     check(!library.player.failed && library.player.queue.size() == 2, "native playback prepares the queue");
+    check(library.player.actualQuality == "sq", "player retains actual resolved quality");
     check(waitFor([&] { return library.player.lyrics.status == "ready"; }), "native lyrics finish");
     library.player.lyrics.sync(1500);
     check(library.player.lyrics.index == 0, "lyrics locate the first line");
@@ -237,11 +279,52 @@ bool runNativeMusicChecks(const QString &root) {
     check(library.player.lyrics.index == 1, "lyrics offset updates the shared index");
     library.player.lyrics.sync(0);
     check(library.player.lyrics.index == 0, "backward seeking updates lyrics");
+    host.mediaControl("pause");
+    library.player.tick(100, true);
+    const auto queueBeforeQuality = library.player.queue;
+    const auto lyricsBeforeQuality = library.player.lyrics.document();
+    returnedQuality = "standard";
+    library.player.setQuality("standard");
+    check(library.player.loading && library.player.actualQuality.isEmpty(),
+          "quality switch clears old badge");
+    check(waitFor([&] { return !library.player.loading; }), "quality switch resolves its source");
+    check(!host.mediaState().value("playing").toBool() && library.player.queue == queueBeforeQuality &&
+              library.player.lyrics.document() == lyricsBeforeQuality,
+          "quality switch preserves pause, queue and lyrics");
+    library.player.setQuality("hires");
+    library.player.setQuality("lossless");
+    check(waitFor([&] {
+              library.player.tick(102, true);
+              return !library.player.loading && library.player.actualQuality == "standard";
+          }) &&
+              library.player.quality == "lossless",
+          "rapid switches keep latest preference and actual downgrade");
+    library.player.setQuality("invalid-quality");
+    check(library.player.quality == "lossless", "unknown quality is rejected");
     library.player.next();
+    check(library.player.actualQuality.isEmpty(), "new request clears the previous quality immediately");
     check(waitFor([&] { return !library.player.loading; }) && library.player.current["id"] == "2",
           "next song uses the native queue");
+    // 无输出设备时播放器会延后打开音源；真实解码错误只在设备可用时验证。
+    if (!QMediaDevices::defaultAudioOutput().isNull()) {
+        QFile invalidAudio(audioFixture.filePath("invalid-audio.bin"));
+        check(invalidAudio.open(QIODevice::WriteOnly), "invalid audio fixture opens");
+        invalidAudio.write("invalid audio fixture");
+        invalidAudio.close();
+        check(host.mediaLoad(QUrl::fromLocalFile(invalidAudio.fileName()).toString()),
+              "decoder accepts the local source before inspecting its content");
+        check(waitFor([&] {
+                  library.player.tick(103, true);
+                  return library.player.failed;
+              }),
+              "actual decoder failure reaches the player");
+        check(library.player.actualQuality.isEmpty(), "decoder failure clears the previous actual quality");
+    } else {
+        qInfo() << "无音频输出设备，跳过真实解码失败检查";
+    }
     library.player.stop();
-    check(library.player.current.isEmpty() && library.player.lyrics.document().isEmpty(),
+    check(library.player.current.isEmpty() && library.player.lyrics.document().isEmpty() &&
+              library.player.actualQuality.isEmpty(),
           "stop clears player and lyrics");
 
     library.discover->load("playlists");

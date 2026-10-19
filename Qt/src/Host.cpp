@@ -668,6 +668,18 @@ QString Host::qr(QString key) {
     return name;
 }
 QImage Host::image(const QString &key) const {
+    // 官方音质标识随包离线交付；限定文件名，防止图片键访问资源目录之外。
+    static const QRegularExpression qualityKey(
+        "^quality:(netease|qq|kugou)-(sq|hq|hires|jymaster|jyeffect|sky)$");
+    if (key.startsWith("quality:") && qualityKey.match(key).hasMatch()) {
+        static QCache<QString, QImage> badges(32);
+        if (auto cached = badges.object(key)) {
+            return *cached;
+        }
+        const QImage badge(root + "/quality/" + key.mid(8) + ".png");
+        badges.insert(key, new QImage(badge));
+        return badge;
+    }
     auto p = images.object(key);
     return p ? *p : QImage();
 }

@@ -20,6 +20,19 @@ const files = [
     'slots.json',
     'scene-fixture.json',
     'boot-lettering-art.json',
+    ...[
+        'netease-sq',
+        'netease-hires',
+        'netease-jymaster',
+        'netease-jyeffect',
+        'netease-sky',
+        'qq-hq',
+        'qq-sq',
+        'kugou-hq',
+        'kugou-sq',
+        'kugou-hires',
+    ].map((name) => `quality/${name}.png`),
+    'quality/sources.json',
     'misans-glyphs.json',
     ...['light', 'regular', 'demibold', 'bold'].map((w) => `RhineMiSans-${w}.otf`),
 ];
@@ -27,6 +40,7 @@ fs.mkdirSync(out, {
     recursive: true,
 });
 for (const name of files) {
+    fs.mkdirSync(path.dirname(path.join(out, name)), { recursive: true });
     fs.copyFileSync(path.join(root, name), path.join(out, name));
 }
 const bridge = path.join(root, 'MusicBridge');
