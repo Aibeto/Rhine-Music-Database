@@ -238,6 +238,8 @@ if(APPLE)
                    MACOSX_BUNDLE_BUNDLE_NAME "RHINE MUSIC DATABASE"
                    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Qt/Info.plist.in")
 elseif(WIN32)
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/WindowsGraphics.cpp)
+    target_link_libraries(RhineMusicDatabase PRIVATE dxgi d3d11)
     configure_file(Qt/WindowsIcon.rc.in "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc" @ONLY)
     target_sources(RhineMusicDatabase PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc")
     target_link_libraries(RhineCore PRIVATE psapi)

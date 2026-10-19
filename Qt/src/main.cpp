@@ -20,6 +20,9 @@
 #include <cstring>
 int makeIcon(const QString &directory);
 int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, FrameProfiler &profiler);
+#ifdef Q_OS_WIN
+void initializeWindowsGraphics();
+#endif
 /**
  * 建立应用身份、Qt 引擎和原生窗口。
  * 离线测试与正式播放沿用同一入口，资源只从独立应用读取。
@@ -56,6 +59,9 @@ int main(int argc, char **argv) {
     if (bundledPlugins.exists("platforms/libqcocoa.dylib")) {
         qputenv("QT_PLUGIN_PATH", bundledPlugins.absolutePath().toUtf8());
     }
+#endif
+#ifdef Q_OS_WIN
+    initializeWindowsGraphics();
 #endif
     QGuiApplication application(argc, argv);
     application.setWindowIcon(QIcon(":/icons/icon-256.png"));
