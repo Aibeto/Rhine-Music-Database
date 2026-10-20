@@ -33,6 +33,7 @@ for (const script of [
     'Qt/tests/qq-upgrade.mjs',
     'Qt/tests/kugou-state.mjs',
     'Qt/tests/lyrics-format.mjs',
+    'Qt/tests/local-lyrics.cjs',
     'Qt/tests/kugou-device.cjs',
     'Qt/tests/device-state.cjs',
     'Qt/tests/netease-xeapi.cjs',
@@ -49,6 +50,7 @@ const deployments = {
 const [app, resourceDirectory] = deployments[process.platform];
 const resources = app + '/' + resourceDirectory;
 run(process.execPath, ['scripts/check-packaged-bridge.cjs', resources + '/MusicBridge']);
+run(process.execPath, ['Qt/tests/local-lyrics.cjs', resources + '/MusicBridge']);
 run(process.execPath, ['Qt/tests/netease-xeapi.cjs', resources + '/MusicBridge']);
 run(process.execPath, ['Qt/tests/kugou-device.cjs', resources + '/MusicBridge']);
 if (mac) {

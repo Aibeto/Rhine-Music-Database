@@ -806,6 +806,9 @@ function deployApp(qt, config, existingBundle = '') {
     // 先部署 Qt，再装入大量 SDK 文件，避免部署工具逐个扫描非原生依赖。
     run(process.execPath, ['scripts/package-resources.cjs', resources]);
     fs.copyFileSync('LICENSE', path.join(resources, 'LICENSE'));
+    for (const name of ['taglib', 'utfcpp']) {
+        fs.cpSync(path.join('vendor', name), path.join(resources, 'third-party', name), { recursive: true });
+    }
     fs.copyFileSync('vendor/qrcodegen/qrcodegen.hpp', path.join(resources, 'qrcodegen-LICENSE.hpp'));
     fs.cpSync('licenses/Qt', path.join(resources, 'Qt-Licenses'), {
         recursive: true,

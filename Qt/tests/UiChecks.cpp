@@ -19,6 +19,7 @@
 #include <QThread>
 #include <QUrl>
 #include <QWheelEvent>
+#include <QtGui/qpa/qplatformdialoghelper.h>
 #include <QtEndian>
 #include <functional>
 #include <algorithm>
@@ -644,7 +645,9 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     check(audioFile.open(QIODevice::WriteOnly), "local audio fixture file");
     QDataStream wav(&audioFile);
     wav.setByteOrder(QDataStream::LittleEndian);
-    constexpr quint32 bytes = 8000 * 2 * 4;
+    // 截图和 GPU 读回在不同平台耗时不同；播放夹具须覆盖整段交互，避免提前播完自动切歌。
+    constexpr quint32 audioSeconds = 60;
+    constexpr quint32 bytes = 8000 * 2 * audioSeconds;
     wav.writeRawData("RIFF", 4);
     wav << quint32(36 + bytes);
     wav.writeRawData("WAVEfmt ", 8);
@@ -663,7 +666,8 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
         settle();
     }
     const auto decoded = backend.host.mediaState();
-    check(decoded.value("duration").toLongLong() >= 3900 && decoded.value("error").toString().isEmpty(),
+    check(decoded.value("duration").toLongLong() >= audioSeconds * 1000 - 100 &&
+              decoded.value("error").toString().isEmpty(),
           "native PCM decode duration");
     backend.host.mediaControl("pause");
     settle();
@@ -816,7 +820,8 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     hud.modal.clear();
     hud.motion.set(false, 50, true);
     player.actualQuality = "sq";
-    music.current = songs.at(1).toObject();
+    // 对比项取自队列之外，保证它不会因自动切歌变成当前播放项。
+    music.current = songs.last().toObject();
     refresh();
     check(backend.frame()["discAngle"].toDouble() == 0, "another song has no playing disc rotation");
     const auto staleBadge = std::find_if(hud.commands.begin(), hud.commands.end(), [](QJsonValue value) {
@@ -892,6 +897,10 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     backend.host.mediaLoad(fixtureAudioURL);
     backend.host.mediaControl("pause");
     hud.discRotation = false;
+    // 窗口验收耗时因平台而异；重新固定队列，避免先前音频播完后当前项变化影响移除检查。
+    player.queue = MusicData::slice(songs, 0, 10);
+    player.index = 0;
+    player.current = songs.first().toObject();
     music.current = player.current;
     backend.scene.review("detail");
     hud.reduced = true;
@@ -917,12 +926,13 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
         }
     };
     dragControl(hud.playerSeekRect, 0.5);
+    const auto expectedSeekMs = audioSeconds * 500;
     wait.restart();
-    while (std::abs(backend.host.mediaState()["position"].toLongLong() - 2000) >= 100 &&
+    while (std::abs(backend.host.mediaState()["position"].toLongLong() - expectedSeekMs) >= 100 &&
            wait.elapsed() < 3000) {
         settle();
     }
-    check(std::abs(backend.host.mediaState()["position"].toLongLong() - 2000) < 100,
+    check(std::abs(backend.host.mediaState()["position"].toLongLong() - expectedSeekMs) < 100,
           "QML seek reaches native decoder");
     dragControl(hud.playerVolumeRect, 0.6);
     check(std::abs(backend.host.mediaState()["volume"].toDouble() - 0.6) < 0.01, "QML volume reaches output");
@@ -1011,6 +1021,50 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
               hasAction("provider:kugou"),
           "three directly selectable providers");
     capture("providers");
+    check(hasAction("provider:local"), "local provider is directly selectable");
+    music.switchProvider("local");
+    hud.action("discover");
+    refresh();
+    check(hud.modal == "local" && hasAction("local:folder") && hasAction("local:files") &&
+              hasAction("local:rescan") && !hasAction("music:login"),
+          "local import and index card");
+    capture("local-library");
+    // 默认用生成音频验证 QML 到原生索引；显式环境变量可指定只读的真实目录验收。
+    auto *folderDialog = window->findChild<QObject *>("localMusicFolderDialog");
+    check(folderDialog != nullptr, "local folder dialog is packaged and available");
+    if (folderDialog) {
+        // 原生系统面板不接受程序化选择；测试使用 Qt 同一接口的确定性后备面板。
+        folderDialog->setProperty("options", int(QFileDialogOptions::DontUseNativeDialog));
+        const auto realFolder = qEnvironmentVariable("RHINE_LOCAL_MUSIC_FIXTURE");
+        const auto fixtureFolder =
+            QUrl::fromLocalFile(realFolder.isEmpty() ? audioFixture.path() : realFolder);
+        check(folderDialog->setProperty("currentFolder", fixtureFolder), "local dialog opens fixture folder");
+        check(QMetaObject::invokeMethod(folderDialog, "open"), "native local folder dialog opens");
+        settle();
+        check(folderDialog->setProperty("selectedFolder", fixtureFolder),
+              "local folder selection accepts file URL");
+        check(!folderDialog->property("selectedFolder").toUrl().isEmpty(), "folder selection is available");
+        check(QMetaObject::invokeMethod(folderDialog, "accepted"), "folder result signal reaches QML");
+        QMetaObject::invokeMethod(folderDialog, "close");
+        wait.restart();
+        while (music.local->busy && wait.elapsed() < 10000) {
+            settle();
+        }
+        refresh();
+        check(music.local->roots().size() == 1 && music.lists[1].size() >= 2,
+              "QML folder selection imports real generated audio");
+        capture("local-library-imported");
+    }
+    hud.openModal("search");
+    music.search("本地");
+    refresh();
+    check(hud.modal == "search" && !hasAction("music:login"), "local search has no online login entry");
+    capture("local-search");
+    hud.openModal("settings");
+    refresh();
+    check(!hasAction("music:login") && !hasAction("quality") && !hasAction("music:activate"),
+          "local settings disable online platform controls");
+    capture("local-settings");
     music.switchProvider("kugou");
     hud.openModal("login");
     music.loginMethod = "qr";
@@ -1085,6 +1139,8 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     hud.modal.clear();
     backend.scene.review("detail");
     backend.setVisible(true);
+    // 切换平台会清空 Host 图像缓存；显式恢复夹具，避免 GPU 重建依赖之前残留的纹理。
+    backend.host.fixtureImage("fixture-disc", cover);
     const auto cachedSelection = [&](int index) {
         music.current = MusicData::item("song", QString::number(index), "缓存回选验收", "本地");
         music.current["key"] = "cache-" + QString::number(index);
