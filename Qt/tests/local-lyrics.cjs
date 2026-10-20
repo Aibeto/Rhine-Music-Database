@@ -3,10 +3,11 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { spawn } = require('node:child_process');
 const { createInterface } = require('node:readline');
+const { bridgeRuntime } = require('./fixtures/bridge-runtime.cjs');
 
 /** 检查本地歌词归一化 */
 async function main() {
-    const bridge = path.resolve(process.argv[2] || 'MusicBridge');
+    const { bridge, runtime } = bridgeRuntime();
     const cases = [
         ['timed', '[00:01.00]第一句\n[00:03.50]第二句'],
         ['plain', '本地纯文本歌词'],
@@ -20,19 +21,26 @@ async function main() {
             }
         }
     }
-    const child = spawn(process.execPath, [path.join(bridge, 'worker.cjs')], {
+    const child = spawn(runtime, [path.join(bridge, 'worker.cjs')], {
+        cwd: bridge,
         stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let errors = '';
+    child.stderr.on('data', (chunk) => {
+        errors += chunk;
     });
     const timeout = setTimeout(() => child.kill(), 10000);
     const responses = new Map();
     const exited = new Promise((resolve, reject) => {
         child.on('error', reject);
-        child.on('exit', (code) => {
+        child.stdin.on('error', reject);
+        // close 在 stderr 读完后触发，保留模块加载失败的原始原因。
+        child.on('close', (code, signal) => {
             clearTimeout(timeout);
             if (code === 0) {
                 resolve();
             } else {
-                reject(new Error('Local lyrics worker failed: ' + code));
+                reject(new Error(`Local lyrics worker failed (${code ?? signal}): ${errors}`));
             }
         });
     });
@@ -48,7 +56,14 @@ async function main() {
             JSON.stringify({ id, route: '/local/lyrics', params: { content }, cookies: {} }) + '\n',
         );
     }
-    await exited;
+    try {
+        await exited;
+    } finally {
+        clearTimeout(timeout);
+        if (child.exitCode === null) {
+            child.kill();
+        }
+    }
     const timed = responses.get('timed');
     assert.equal(timed.code, 200);
     assert.equal(timed.document.source, 'local');
