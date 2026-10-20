@@ -83,10 +83,92 @@ bool runGpuReferenceCheck(const QImage &expected, const QImage &actual) {
     return same;
 }
 
+/** 验证无边框 */
+int runWindowChromeChecks(Engine &backend, QQuickWindow *window, const QString &output) {
+    bool ok = true;
+    const auto check = [&](bool value, const char *name) {
+        qInfo() << "Window chrome:" << name << value;
+        ok &= value;
+    };
+    const auto settle = [] {
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 1800) {
+            QCoreApplication::processEvents();
+            QThread::msleep(10);
+        }
+    };
+    
+    const std::function<QQuickItem *(QQuickItem *, const QString &)> findItem =
+        [&](QQuickItem *parent, const QString &name) -> QQuickItem * {
+        if (parent->objectName() == name) {
+            return parent;
+        }
+        for (auto child : parent->childItems()) {
+            if (auto found = findItem(child, name)) {
+                return found;
+            }
+        }
+        return nullptr;
+    };
+    const auto click = [&](const char *name) {
+        auto button = findItem(window->contentItem(), QString::fromLatin1(name));
+        check(button != nullptr, name);
+        if (!button) {
+            return;
+        }
+        const auto position = button->mapToScene(QPointF(button->width() / 2, button->height() / 2));
+        QMouseEvent press(QEvent::MouseButtonPress, position, window->mapToGlobal(position), Qt::LeftButton,
+                          Qt::LeftButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &press);
+        QMouseEvent release(QEvent::MouseButtonRelease, position, window->mapToGlobal(position),
+                            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(window, &release);
+        settle();
+    };
+    const auto capture = [&](const QString &name) {
+        if (!output.isEmpty()) {
+            QDir().mkpath(output);
+            check(window->grabWindow().save(output + "/" + name + ".png"), "capture chrome");
+        }
+    };
+    settle();
+    check(window->flags().testFlag(Qt::FramelessWindowHint), "frameless flag");
+    auto titleBar = window->findChild<QQuickItem *>("windowTitleBar");
+    check(titleBar && titleBar->isVisible(), "embedded title bar visible");
+    capture("window-chrome-light");
+    backend.app->hud.themeMode = "dark";
+    backend.app->hud.dark = true;
+    backend.step(50);
+    settle();
+    capture("window-chrome-dark");
+    click("windowButton_maximize");
+    check(window->visibility() == QWindow::Maximized, "maximize");
+    click("windowButton_maximize");
+    check(window->visibility() == QWindow::Windowed, "restore");
+    click("windowButton_minimize");
+    check(window->visibility() == QWindow::Minimized, "minimize");
+    window->showNormal();
+    settle();
+    backend.toggleFullscreen();
+    settle();
+    check(window->visibility() == QWindow::FullScreen && titleBar && !titleBar->isVisible(),
+          "hide chrome in fullscreen");
+    backend.toggleFullscreen();
+    settle();
+    check(titleBar && titleBar->isVisible(), "restore chrome after fullscreen");
+    click("windowButton_close");
+    check(!window->isVisible(), "close");
+    return ok ? 0 : 1;
+}
+
 /** 用真实 QML 输入和 QRhi 窗口验证原生业务，全部数据来自本地夹具。 */
 int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, FrameProfiler &profiler) {
     if (!window || !backend.ready() || !backend.scene.review("archive")) {
         return 1;
+    }
+    if (qEnvironmentVariableIntValue("RHINE_CHROME_ONLY") == 1) {
+        return runWindowChromeChecks(backend, window, output);
     }
     if (qEnvironmentVariableIntValue("RHINE_ENHANCEMENT_ONLY") == 1) {
         return runSceneEnhancementChecks(backend, window, output) ? 0 : 1;

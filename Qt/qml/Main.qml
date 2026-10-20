@@ -10,7 +10,8 @@ Window {
     minimumWidth: 960
     minimumHeight: 540
     visible: true
-    flags: Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint | Qt.WindowFullscreenButtonHint
+    property bool windowsFrameless: Qt.platform.os === "windows"
+    flags: (windowsFrameless ? Qt.FramelessWindowHint : 0) | Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint | Qt.WindowFullscreenButtonHint
     title: "RHINE MUSIC DATABASE"
     color: "#e7e7e1"
     FolderDialog {
@@ -322,6 +323,13 @@ Window {
     Shortcut {
         sequence: "F10"
         onActivated: profiler.toggleVisible()
+    }
+    WindowChrome {
+        window: root
+        enabled: root.windowsFrameless
+        visible: enabled && root.visibility !== Window.FullScreen
+        dark: rhine.state.dark === true
+        z: 999
     }
     PerformancePanel {
         z: 1000
