@@ -806,9 +806,21 @@ function deployApp(qt, config, existingBundle = '') {
     // 先部署 Qt，再装入大量 SDK 文件，避免部署工具逐个扫描非原生依赖。
     run(process.execPath, ['scripts/package-resources.cjs', resources]);
     fs.copyFileSync('LICENSE', path.join(resources, 'LICENSE'));
-    for (const name of ['taglib', 'utfcpp']) {
-        fs.cpSync(path.join('vendor', name), path.join(resources, 'third-party', name), { recursive: true });
-    }
+    // 只复制第三方库的许可证文件，不复制源码包。
+    const thirdParty = path.join(resources, 'third-party');
+    fs.mkdirSync(path.join(thirdParty, 'taglib'), { recursive: true });
+    fs.mkdirSync(path.join(thirdParty, 'utfcpp'), { recursive: true });
+    fs.copyFileSync(
+        path.join('vendor/taglib/COPYING.LGPL'),
+        path.join(thirdParty, 'taglib/COPYING.LGPL'),
+    );
+    fs.copyFileSync(
+        path.join('vendor/taglib/COPYING.MPL'),
+        path.join(thirdParty, 'taglib/COPYING.MPL'),
+    );
+    fs.copyFileSync(path.join('vendor/taglib/source.json'), path.join(thirdParty, 'taglib/source.json'));
+    fs.copyFileSync(path.join('vendor/utfcpp/LICENSE'), path.join(thirdParty, 'utfcpp/LICENSE'));
+    fs.copyFileSync(path.join('vendor/utfcpp/source.json'), path.join(thirdParty, 'utfcpp/source.json'));
     fs.copyFileSync('vendor/qrcodegen/qrcodegen.hpp', path.join(resources, 'qrcodegen-LICENSE.hpp'));
     fs.cpSync('licenses/Qt', path.join(resources, 'Qt-Licenses'), {
         recursive: true,
