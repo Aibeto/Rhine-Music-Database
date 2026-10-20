@@ -342,8 +342,24 @@ void MusicPlayer::prepare(QJsonObject track, quint64 generation, bool reload) {
         emit changed();
         return;
     }
+    // QQ 专有音质在其他平台转换为通用无损
     const auto qqQuality = quality == "best" || quality == "ape";
-    const auto effectiveQuality = qqQuality && m_api->provider != "qq" ? "lossless" : quality;
+    auto effectiveQuality = qqQuality && m_api->provider != "qq" ? "lossless" : quality;
+
+    // 网易云专有音质在其他平台转换为对应档位
+    if (m_api->provider != "netease") {
+        if (quality == "jymaster" || quality == "jyeffect" || quality == "sky") {
+            effectiveQuality = "lossless";
+        } else if (quality == "higher") {
+            effectiveQuality = "standard";
+        }
+    }
+
+    // 酷狗不支持 ape，转换为通用无损
+    if (m_api->provider == "kugou" && quality == "ape") {
+        effectiveQuality = "lossless";
+    }
+
     m_api->call(
         previewRequested ? "preview" : "playback", {track, effectiveQuality, alternative},
         [this, track](MusicReply result) {
