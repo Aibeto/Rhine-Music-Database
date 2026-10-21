@@ -75,6 +75,34 @@ bool runNativeMusicChecks(const QString &root) {
         }
         ok &= value;
     };
+
+    // 异常对象验证白名单
+    PlaybackDiagnostics privacy;
+    const QString privateMarker("PRIVATE_DIAGNOSTIC_SENTINEL");
+    const QJsonObject unsafe{{"url", privateMarker},         {"cookies", privateMarker},
+                             {"path", privateMarker},        {"deviceName", privateMarker},
+                             {"serviceCode", privateMarker}, {"errorCode", 2},
+                             {"upstreamHttpStatus", 503}};
+    privacy.record("error", unsafe);
+    check(privacy.report()["events"].toArray().isEmpty(), "audio diagnostic recording is opt-in");
+    privacy.start();
+    privacy.record(privateMarker, unsafe);
+    privacy.record("error", unsafe);
+    const auto safeEvents = privacy.report()["events"].toArray();
+    check(safeEvents.size() == 1 && safeEvents.first().toObject()["errorCode"] == 2 &&
+              safeEvents.first().toObject()["upstreamHttpStatus"] == 503 &&
+              !QJsonDocument(privacy.report()).toJson().contains(privateMarker.toUtf8()),
+          "audio diagnostics reject arbitrary events, strings and private fields");
+    for (int i = 0; i < 8200; ++i) {
+        privacy.record("error", unsafe);
+    }
+    check(privacy.report()["events"].toArray().size() == 8192 &&
+              privacy.report()["omittedEvents"].toInt() == 9,
+          "audio diagnostic event storage is bounded");
+    privacy.stop();
+    privacy.record("error", unsafe);
+    check(privacy.report()["omittedEvents"].toInt() == 9, "stopping freezes audio diagnostics");
+
     const auto sourceQuality = [](QString provider, QJsonObject audio, bool trial = false) {
         return MusicPlayer::sourceQuality(provider, audio, trial);
     };
@@ -282,6 +310,8 @@ bool runNativeMusicChecks(const QString &root) {
     library.playlistForm("rename", "非法", "other");
     check(mutations == before, "cannot edit another user's playlist");
 
+    host.enablePlaybackDiagnostics(true);
+    host.playbackDiagnostics.start();
     library.player.play(song("1"), QJsonArray{song("1"), song("2")});
     check(waitFor([&] { return !library.player.loading; }), "native playback source finishes");
     check(!library.player.failed && library.player.queue.size() == 2, "native playback prepares the queue");
@@ -336,6 +366,22 @@ bool runNativeMusicChecks(const QString &root) {
     } else {
         qInfo() << "无音频输出设备，跳过真实解码失败检查";
     }
+    host.playbackDiagnostics.stop();
+    const auto playbackReport = host.playbackDiagnostics.report();
+    const auto playbackBytes = QJsonDocument(playbackReport).toJson();
+    const auto playbackEvents = playbackReport["events"].toArray();
+    bool hasRequest = false;
+    bool hasLoad = false;
+    for (const auto &entry : playbackEvents) {
+        const auto event = entry.toObject();
+        hasRequest |= event["event"] == "request-finish" && event.contains("requestDurationMs");
+        hasLoad |= event["event"] == "load";
+    }
+    check(hasRequest && hasLoad, "audio diagnostics correlate real Host requests and decoder loads");
+    check(!playbackBytes.contains(audioURL.toUtf8()) && !playbackBytes.contains("测试歌手") &&
+              !playbackBytes.contains("本地歌曲") && !playbackReport["mediaHttpStatusAvailable"].toBool(),
+          "playback report omits source identity and never invents media HTTP metrics");
+    host.enablePlaybackDiagnostics(false);
     library.player.stop();
     check(library.player.current.isEmpty() && library.player.lyrics.document().isEmpty() &&
               library.player.actualQuality.isEmpty(),

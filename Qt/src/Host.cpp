@@ -15,6 +15,7 @@
 #include <QJsonDocument>
 #include <QNetworkCookie>
 #include <QNetworkReply>
+#include <QNetworkInformation>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -187,6 +188,57 @@ void Host::requestJson(QString route, QJsonObject values, JsonReply callback) {
         callback({}, QStringLiteral("本地模式已禁用在线平台操作"));
         return;
     }
+    const auto operation = route.section('/', 3, 3);
+    const bool playbackRequest =
+        (route.startsWith("/native/") && (operation == "playback" || operation == "preview")) ||
+        route == "/song/url" || route == "/song/url/v1";
+    if (audioDiagnosticsEnabled && playbackRequest) {
+        const int serial = ++diagnosticRequestSerial;
+        QElapsedTimer requestClock;
+        requestClock.start();
+        int operationCode = 3;
+        if (route.startsWith("/native/")) {
+            operationCode = operation == "preview" ? 2 : 1;
+        }
+        const int requestProvider = int(std::max<qsizetype>(
+            0, QStringList{"other", "netease", "qq", "kugou", "local"}.indexOf(routeProvider(route))));
+        playbackDiagnostics.record(
+            "request-start",
+            {{"requestSerial", serial}, {"operation", operationCode}, {"provider", requestProvider}});
+        const int diagnosticSession = playbackDiagnostics.session();
+        callback = [this, diagnosticSession, callback = std::move(callback), requestClock, serial,
+                    operationCode, requestProvider](QJsonObject response, QString error) {
+            const auto body = response["body"].toObject();
+            QJsonObject values{{"requestSerial", serial},
+                               {"operation", operationCode},
+                               {"provider", requestProvider},
+                               {"requestDurationMs", double(requestClock.elapsed())},
+                               {"transportFailed", !error.isEmpty()},
+                               {"stale", response["_epoch"].toInt() != epoch},
+                               {"replyBytes", QJsonDocument(response).toJson(QJsonDocument::Compact).size()}};
+            if (response["_playbackDiagnosticsOmitted"].isDouble()) {
+                values["omittedUpstreamEvents"] = response["_playbackDiagnosticsOmitted"];
+            }
+            for (const auto *key : {"code", "upstreamHttpStatus", "upstreamCode"}) {
+                if (body[key].isDouble()) {
+                    values[QString(key) == "code" ? "serviceCode" : key] = body[key];
+                }
+            }
+            if (diagnosticSession == playbackDiagnostics.session()) {
+                playbackDiagnostics.record("request-finish", values);
+            }
+            for (const auto &entry : response["_playbackDiagnostics"].toArray()) {
+                auto upstream = PlaybackDiagnostics::numericFields(entry.toObject());
+                upstream["requestSerial"] = serial;
+                if (diagnosticSession == playbackDiagnostics.session()) {
+                    playbackDiagnostics.record("upstream", upstream);
+                }
+            }
+            response.remove("_playbackDiagnostics");
+            response.remove("_playbackDiagnosticsOmitted");
+            callback(response, error);
+        };
+    }
     const auto service = routeProvider(route);
     auto token = cookies[service == "qq" ? "qqmusic_session" : "MUSIC_U"].toString();
     if (service == "kugou") {
@@ -322,6 +374,10 @@ void Host::send(QString key) {
     }
     QJsonObject envelope{
         {"id", work.id}, {"route", work.route}, {"params", work.params}, {"cookies", work.cookies}};
+    if (audioDiagnosticsEnabled && work.route.startsWith("/native/") &&
+        QStringList{"playback", "preview"}.contains(work.route.section('/', 3, 3))) {
+        envelope["_collectPlaybackDiagnostics"] = true;
+    }
     child.write(QJsonDocument(envelope).toJson(QJsonDocument::Compact) + '\n');
     QTimer::singleShot(30000, this, [=, this] {
         if (pending.remove(work.id)) {
@@ -787,12 +843,20 @@ void Host::playOfficial(QString id, TextReply callback) {
 bool Host::mediaLoad(QString url, bool alternative) {
     if (!audio) {
         audio = std::make_unique<AudioPlayer>([this] { emit mediaChanged(); });
+        audio->diagnosticEvent = [this](const QString &event, const QJsonObject &values) {
+            playbackDiagnostics.record(event, values);
+        };
+        audio->enableDiagnostics(audioDiagnosticsEnabled);
     }
     return audio->load(url, offline, alternative, provider);
 }
 void Host::mediaControl(QString action, double value) {
     if (!audio && action == "volume") {
         audio = std::make_unique<AudioPlayer>([this] { emit mediaChanged(); });
+        audio->diagnosticEvent = [this](const QString &event, const QJsonObject &values) {
+            playbackDiagnostics.record(event, values);
+        };
+        audio->enableDiagnostics(audioDiagnosticsEnabled);
     }
     if (audio) {
         audio->control(action, value);
@@ -941,4 +1005,37 @@ void Host::shutdown() {
     pending.clear();
     queue.clear();
     temporary.reset();
+}
+
+/** 性能面板按需开启解码统计，网络只读取系统公开的枚举状态，不枚举地址或网络名称。 */
+void Host::enablePlaybackDiagnostics(bool enabled) {
+    audioDiagnosticsEnabled = enabled;
+    if (enabled && !QNetworkInformation::instance()) {
+        QNetworkInformation::loadDefaultBackend();
+    }
+    if (audio) {
+        audio->enableDiagnostics(enabled);
+    }
+}
+
+QJsonObject Host::playbackSnapshot() const {
+    auto values = audio ? audio->diagnosticState() : QJsonObject();
+    values["bridgeState"] = int(child.state());
+    values["bridgeError"] = int(child.error());
+    const auto *information = QNetworkInformation::instance();
+    if (information) {
+        if (information->supports(QNetworkInformation::Feature::Reachability)) {
+            values["networkReachability"] = int(information->reachability());
+        }
+        if (information->supports(QNetworkInformation::Feature::TransportMedium)) {
+            values["networkTransport"] = int(information->transportMedium());
+        }
+        if (information->supports(QNetworkInformation::Feature::Metered)) {
+            values["networkMetered"] = information->isMetered();
+        }
+        if (information->supports(QNetworkInformation::Feature::CaptivePortal)) {
+            values["networkCaptive"] = information->isBehindCaptivePortal();
+        }
+    }
+    return PlaybackDiagnostics::numericFields(values);
 }

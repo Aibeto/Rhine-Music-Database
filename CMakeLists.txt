@@ -63,6 +63,8 @@ set(RHINE_APP_SOURCES
     Qt/src/AppUpdater.h
     Qt/src/AudioPlayer.cpp
     Qt/src/AudioPlayer.h
+    Qt/src/PlaybackDiagnostics.cpp
+    Qt/src/PlaybackDiagnostics.h
     Qt/src/AppStorage.cpp
     Qt/src/AppStorage.h
     Qt/src/DiscGeometry.cpp

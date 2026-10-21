@@ -1,9 +1,12 @@
 #pragma once
 #include <QAudioDevice>
+#include <QAudioBufferOutput>
 #include <QAudioOutput>
 #include <QMediaPlayer>
 #include <QMediaDevices>
 #include <QUrl>
+#include <QJsonObject>
+#include <QElapsedTimer>
 #include <QVariantMap>
 #include <functional>
 #include <memory>
@@ -12,15 +15,39 @@
 class AudioPlayer {
   public:
     explicit AudioPlayer(std::function<void()> changed = {});
+    ~AudioPlayer();
     bool load(QString input, bool offline, bool alternative = false, QString provider = "netease");
     void control(QString action, double value = 0);
     QVariantMap state() const;
+    QJsonObject diagnosticState() const;
+    void enableDiagnostics(bool enabled);
+    std::function<void(const QString &, const QJsonObject &)> diagnosticEvent;
 
   private:
     friend class AudioPlayerRegression;
     QMediaDevices devices;
     QAudioOutput output;
     std::unique_ptr<QMediaPlayer> player;
+    std::unique_ptr<QAudioBufferOutput> decodedOutput;
+    void releasePlayer();
+    bool diagnosticsEnabled = false;
+    QMetaObject::Connection decoderConnection;
+    quint64 decoderObservation = 0;
+    void observeDecodedBuffers();
+    int sourceSerial = 0;
+    int sourceKind = 0;
+    int sourceProvider = 0;
+    int backendFailureCategory = 0;
+    int reportedHttpStatus = 0;
+    qint64 decodedBuffers = 0;
+    qint64 decodedBytes = 0;
+    qint64 decodedFrames = 0;
+    qint64 lastDecodedElapsedMs = -1;
+    qint64 lastDecodedEndMs = -1;
+    QAudioFormat decodedFormat;
+    QElapsedTimer decodeClock;
+    void diagnose(const QString &event);
+    void diagnoseError(QMediaPlayer::Error code, const QString &message);
     std::function<void()> playbackChanged;
     std::function<QAudioDevice()> defaultOutput = QMediaDevices::defaultAudioOutput;
     bool playbackRequested = false;

@@ -1,5 +1,6 @@
 #pragma once
 #include "AudioPlayer.h"
+#include "PlaybackDiagnostics.h"
 #include "AppUpdater.h"
 #include <QCache>
 #include <QImage>
@@ -60,6 +61,9 @@ class Host : public QObject {
     Q_INVOKABLE QString read(QString name) const;
     QImage image(const QString &key) const;
     void fixtureImage(const QString &key, const QImage &image);
+    PlaybackDiagnostics playbackDiagnostics;
+    void enablePlaybackDiagnostics(bool enabled);
+    QJsonObject playbackSnapshot() const;
     AppUpdater updater;
     QString root;
     bool offline;
@@ -121,6 +125,8 @@ class Host : public QObject {
     QString kugouEdition = "standard";
     QString active;
     bool stopped = false;
+    bool audioDiagnosticsEnabled = false;
+    int diagnosticRequestSerial = 0;
     void pump();
     void send(QString key);
     void finish(QString key, QJsonObject response, QString error = {});

@@ -38,15 +38,23 @@ Item {
                 font.bold: true
                 Accessible.name: text
             }
-            Text {
+            Flickable {
                 visible: panel.expanded
                 width: parent.width
-                text: profiler.details
-                color: "#e1e6eb"
-                font.family: rhineFontFamily
-                font.pixelSize: 12
-                lineHeight: 1.35
-                wrapMode: Text.Wrap
+                height: Math.min(diagnosticDetails.height, Math.max(80, panel.height - 210))
+                contentHeight: diagnosticDetails.height
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                Text {
+                    id: diagnosticDetails
+                    width: parent.width
+                    text: profiler.details
+                    color: "#e1e6eb"
+                    font.family: rhineFontFamily
+                    font.pixelSize: 12
+                    lineHeight: 1.35
+                    wrapMode: Text.Wrap
+                }
             }
             Row {
                 spacing: 6
@@ -131,13 +139,6 @@ Item {
                         onClicked: profiler.toggleVisible()
                     }
                 }
-            }
-            Text {
-                width: parent.width
-                text: profiler.status || "开始收集后复现卡顿，再停止导出 JSON 诊断。\n仅采集性能数值；不含账号、曲目或请求内容。"
-                color: "#acb8c2"
-                font.pixelSize: 11
-                wrapMode: Text.WrapAnywhere
             }
         }
     }

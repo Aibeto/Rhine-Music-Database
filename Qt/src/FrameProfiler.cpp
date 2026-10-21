@@ -191,6 +191,7 @@ void FrameProfiler::openReportFolder() {
 void FrameProfiler::updateSampling() {
     const bool shown = m_window && m_window->isVisible() && m_window->visibility() != QWindow::Minimized;
     const bool enabled = (m_visible && shown) || m_recording || file.isOpen();
+    m_engine->host.enablePlaybackDiagnostics((m_visible && shown) || m_recording);
     const bool previous = m_enabled.exchange(enabled, std::memory_order_relaxed);
     if (enabled != previous) {
         if (enabled) {
@@ -281,6 +282,14 @@ void FrameProfiler::sample() {
     m_previousSceneFrames = sceneFrames;
     m_stepCount = 0;
     m_stepTotalMs = m_stepMaxMs = 0;
+    auto audio = m_engine->host.playbackSnapshot();
+    if (m_engine->app) {
+        const auto &player = m_engine->app->music.player;
+        audio["controllerFailed"] = player.failed;
+        audio["controllerLoading"] = player.loading;
+        audio["controllerPlaying"] = player.state["playing"].toBool();
+    }
+    m_metrics.insert("audio", audio.toVariantMap());
     formatMetrics();
     if (m_recording) {
         m_samples.append(QJsonObject::fromVariantMap(m_metrics));
@@ -311,11 +320,8 @@ void FrameProfiler::formatMetrics() {
         QStringLiteral("场景提交      %1 FPS\nQt 帧间隔 P50 / P95  %2 / %3 ms\n"
                        "P99 / 峰值    %4 / %5 ms\n>33 / 50 / 100 ms   %6 / %7 / %8\n"
                        "逻辑 CPU 均值 / 峰值  %9 / %10 ms\n同步 / 提交 CPU  %11 / %12 ms\n"
-                       "主进程 CPU    %13%（单核=100%）\n主进程常驻内存  %14\n"
-                       "Draw calls / GPU 资源  %15 / %16\n封面 GPU 纹理  %17 MiB\n"
-                       "GPU 耗时 / 占用  未采集\n"
-                       "Qt FPS 含面板刷新；帧间隔含按需停绘。\n休眠时低帧率和长间隔不代表卡顿。\n内存与 CPU "
-                       "不含 Node 桥接子进程。")
+                       "主进程 CPU    %13%\n主进程常驻内存  %14\n"
+                       "Draw calls / GPU 资源  %15 / %16\n封面 GPU 纹理  %17 MiB")
             .arg(number("sceneFps"), number("gapP50Ms"), number("gapP95Ms"), number("gapP99Ms"))
             .arg(number("gapMaxMs"), number("over33ms", 0), number("over50ms", 0), number("over100ms", 0))
             .arg(number("stepMeanCpuMs", 2), number("stepMaxCpuMs", 2), number("latestSyncCpuMs", 2),
@@ -323,6 +329,22 @@ void FrameProfiler::formatMetrics() {
             .arg(cpu < 0 ? QStringLiteral("不可用") : number("mainProcessCpuOneCorePercent"), memory,
                  number("gpuDrawCalls", 0), number("gpuResources", 0))
             .arg(QString::number(m_metrics.value("gpuMusicTextureBytes").toDouble() / 1048576., 'f', 1));
+    const auto audio = m_metrics.value("audio").toMap();
+    m_details += QStringLiteral("\n\n音频状态 / 错误码  %1 / %2\n进度 / 时长  %3 / %4 ms\n"
+                                "缓冲  %5% · 解码缓冲  %6\n解码格式  %7 Hz / %8 声道\n"
+                                "输出设备数  %9 · 系统网络状态  %10")
+                     .arg(audio.value("mediaStatus").toInt())
+                     .arg(audio.value("errorCode").toInt())
+                     .arg(audio.value("positionMs").toLongLong())
+                     .arg(audio.value("durationMs").toLongLong())
+                     .arg(audio.value("bufferProgress").toDouble() * 100, 0, 'f', 0)
+                     .arg(audio.value("decodedBuffers").toLongLong())
+                     .arg(audio.value("sampleRateHz").toInt())
+                     .arg(audio.value("channels").toInt())
+                     .arg(audio.value("outputCount").toInt())
+                     .arg(audio.contains("networkReachability")
+                              ? QString::number(audio.value("networkReachability").toInt())
+                              : QStringLiteral("未采集"));
     const auto adapter = m_metrics.value("gpuAdapter").toString();
     if (!adapter.isEmpty()) {
         m_details.prepend(QStringLiteral("GPU 设备  %1\n").arg(adapter));
@@ -388,9 +410,12 @@ bool FrameProfiler::startRecording() {
         m_omittedTraceFrames = 0;
         m_capture.store(true, std::memory_order_relaxed);
     }
+    m_engine->host.playbackDiagnostics.start();
+    m_audioReport = {};
     m_recording = true;
-    m_status = QStringLiteral("正在收集，请复现卡顿后停止并导出。");
+    m_status = QStringLiteral("正在收集性能与音频诊断，请复现问题后停止并导出。");
     updateSampling();
+    m_engine->host.playbackDiagnostics.record("snapshot", m_engine->host.playbackSnapshot());
     emit changed();
     return true;
 }
@@ -407,6 +432,9 @@ bool FrameProfiler::saveRecording() {
     if (m_recording) {
         sample();
         m_recordStoppedMs = clock.elapsed();
+        m_engine->host.playbackDiagnostics.record("snapshot", m_engine->host.playbackSnapshot());
+        m_engine->host.playbackDiagnostics.stop();
+        m_audioReport = m_engine->host.playbackDiagnostics.report();
     }
     m_recording = false;
     QJsonArray trace;
@@ -425,21 +453,23 @@ bool FrameProfiler::saveRecording() {
                       "-" + QUuid::createUuid().toString(QUuid::WithoutBraces) + ".json";
     QSaveFile report(QDir(m_directory).filePath(name));
     const QJsonObject document{
-        {"schema", 1},
+        {"schema", 2},
         {"startedUtc", QDateTime::fromMSecsSinceEpoch(epochMs + m_recordStartedMs, QTimeZone::UTC)
                            .toString(Qt::ISODateWithMs)},
         {"durationMs", m_recordStoppedMs - m_recordStartedMs},
         {"environment", environment()},
         {"notes", "Qt FPS includes overlay repaints. Gaps include idle intervals. CPU is main-process "
                   "single-core percent; RSS excludes Node. Sync/submit are CPU wall time, not GPU time. No "
-                  "account, request, track, screenshot, or environment-variable content is collected."},
+                  "account, request payload, track, screenshot, URL, IP, raw error, device identity or "
+                  "environment-variable content is collected. Audio fields use numeric allowlists."},
         {"samples", m_samples},
+        {"audioPlayback", m_audioReport},
         {"frameColumns", QJsonArray{"elapsedMs", "presentGapMs", "syncCpuMs", "submitCpuMs"}},
         {"frames", trace},
         {"omittedTraceFrames", qint64(omitted)}};
     const auto bytes = QJsonDocument(document).toJson(QJsonDocument::Compact);
     if (!report.open(QIODevice::WriteOnly) || report.write(bytes) != bytes.size() || !report.commit()) {
-        m_status = QStringLiteral("导出失败，记录已保留；点击“重试导出”。%1").arg(report.errorString());
+        m_status = QStringLiteral("导出失败，记录已保留；请检查目录权限后点击“重试导出”。");
         m_saving = false;
         updateSampling();
         emit changed();
@@ -447,11 +477,13 @@ bool FrameProfiler::saveRecording() {
     }
     m_saving = false;
     m_samples = {};
+    m_audioReport = {};
+    m_engine->host.playbackDiagnostics.clear();
     {
         QMutexLocker lock(&m_gapMutex);
         QList<FrameEvent>().swap(m_trace);
     }
-    m_status = QStringLiteral("已保存：%1").arg(QDir::toNativeSeparators(report.fileName()));
+    m_status = QStringLiteral("已保存：%1").arg(QFileInfo(report.fileName()).fileName());
     updateSampling();
     emit changed();
     return true;

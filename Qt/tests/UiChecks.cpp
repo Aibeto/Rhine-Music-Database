@@ -98,7 +98,7 @@ int runWindowChromeChecks(Engine &backend, QQuickWindow *window, const QString &
             QThread::msleep(10);
         }
     };
-    
+
     const std::function<QQuickItem *(QQuickItem *, const QString &)> findItem =
         [&](QQuickItem *parent, const QString &name) -> QQuickItem * {
         if (parent->objectName() == name) {
@@ -1362,6 +1362,8 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
         window->grabWindow().save(output + "/performance-panel.png");
     }
     check(profiler.saveRecording(), "performance recording exports atomically");
+    check(!profiler.status().contains(diagnostics.path()) && !profiler.status().contains(QDir::homePath()),
+          "performance export status hides private directory paths");
     const auto reports = QDir(diagnostics.path()).entryList({"*.json"}, QDir::Files);
     check(reports.size() == 1, "one manual performance diagnostic exported");
     if (!reports.isEmpty()) {
@@ -1370,7 +1372,12 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
         const auto bytes = report.readAll();
         const auto document = QJsonDocument::fromJson(bytes).object();
         const auto samples = document["samples"].toArray();
-        check(document["schema"].toInt() == 1 && !samples.isEmpty(), "diagnostic has samples and schema");
+        check(document["schema"].toInt() == 2 && !samples.isEmpty(), "diagnostic has samples and schema");
+        const auto audioReport = document["audioPlayback"].toObject();
+        check(!audioReport["events"].toArray().isEmpty() && !audioReport["mediaHttpStatusAvailable"].toBool(),
+              "performance export includes audio events and explicit transport limits");
+        check(samples.first().toObject()["audio"].isObject(),
+              "performance samples include synchronized audio state");
         check(!document["environment"].toObject()["graphicsApi"].toString().isEmpty(),
               "diagnostic identifies graphics backend");
         for (const auto &entry : samples) {

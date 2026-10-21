@@ -1,3 +1,84 @@
+const { AsyncLocalStorage } = require('node:async_hooks');
+const playbackDiagnosticContext = new AsyncLocalStorage();
+
+/** 记录 HTTP 传输 */
+function recordHttpResult(events, started, status, error, phase) {
+    if (events.length >= 64) {
+        events.omitted = (events.omitted || 0) + 1;
+        return;
+    }
+    const values = {
+        operation: 5,
+        workerMs: performance.now() - started,
+        transportFailed: !!error,
+        httpPhase: phase,
+        workerOffsetMs: started - events.started,
+    };
+    if (Number.isInteger(status) && status >= 100 && status <= 599) {
+        values.upstreamHttpStatus = status;
+    }
+    if (error) {
+        values.networkError = Math.max(
+            0,
+            [
+                'other',
+                'ETIMEDOUT',
+                'ECONNRESET',
+                'ENOTFOUND',
+                'EAI_AGAIN',
+                'ECONNREFUSED',
+                'ENETUNREACH',
+                'EHOSTUNREACH',
+                'ERR_CANCELED',
+            ].indexOf(error.code || error.cause?.code),
+        );
+    }
+    events.push(values);
+}
+
+const axios = require('axios');
+const httpTimings = new WeakMap();
+axios.interceptors.request.use((config) => {
+    const events = playbackDiagnosticContext.getStore();
+    if (events) {
+        httpTimings.set(config, { events, started: performance.now() });
+    }
+    return config;
+});
+axios.interceptors.response.use(
+    (response) => {
+        const timing = httpTimings.get(response.config);
+        if (timing) {
+            recordHttpResult(timing.events, timing.started, response.status, undefined, 2);
+        }
+        return response;
+    },
+    (error) => {
+        const timing = error.config && httpTimings.get(error.config);
+        if (timing) {
+            recordHttpResult(timing.events, timing.started, error.response?.status, error, 2);
+        }
+        return Promise.reject(error);
+    },
+);
+const originalFetch = global.fetch;
+global.fetch = function (...args) {
+    const events = playbackDiagnosticContext.getStore();
+    if (!events) {
+        return originalFetch(...args);
+    }
+    const started = performance.now();
+    return originalFetch(...args).then(
+        (response) => {
+            recordHttpResult(events, started, response.status, undefined, 1);
+            return response;
+        },
+        (error) => {
+            recordHttpResult(events, started, undefined, error, 1);
+            throw error;
+        },
+    );
+};
 // 网易云协议使用锁定的 Enhanced 原包；QQ 协议使用锁定的 QQ API 原包。
 // 本文件仅通过父子进程的私有管道传递请求。
 // 替代音源组件的日志也必须静默，避免污染私有 IPC。
@@ -154,7 +235,7 @@ function loadClient(name, request) {
  * 根据私有 IPC 消息分派允许的音乐请求。
  * 沿用锁定上游的协议与错误语义，响应 Cookie 交给父进程隔离处理。
  */
-async function dispatch(message) {
+async function dispatchRequest(message) {
     if (message.route === '/local/lyrics') {
         const content = message.params?.content;
         if (typeof content !== 'string' || content.length > 1000000) {
@@ -217,6 +298,62 @@ async function dispatch(message) {
     };
 }
 
+/** 诊断期间记录音源请求的数值结果 */
+async function dispatch(message) {
+    const events = playbackDiagnosticContext.getStore();
+    if (!events || message.route?.startsWith('/native/')) {
+        return dispatchRequest(message);
+    }
+    const started = performance.now();
+    const values = { operation: 4, workerOffsetMs: started - events.started };
+    try {
+        const result = await dispatchRequest(message);
+        const body = result?.body;
+        for (const [source, target] of [
+            ['code', 'serviceCode'],
+            ['upstreamHttpStatus', 'upstreamHttpStatus'],
+            ['upstreamCode', 'upstreamCode'],
+        ]) {
+            if (typeof body?.[source] === 'number' && Number.isFinite(body[source])) {
+                values[target] = body[source];
+            }
+        }
+        values.transportFailed = false;
+        return result;
+    } catch (error) {
+        values.transportFailed = true;
+        if (typeof error?.body?.code === 'number' && Number.isFinite(error.body.code)) {
+            values.serviceCode = error.body.code;
+        }
+        const status = error?.response?.status;
+        if (Number.isInteger(status) && status >= 100 && status <= 599) {
+            values.upstreamHttpStatus = status;
+        }
+        values.networkError = Math.max(
+            0,
+            [
+                'other',
+                'ETIMEDOUT',
+                'ECONNRESET',
+                'ENOTFOUND',
+                'EAI_AGAIN',
+                'ECONNREFUSED',
+                'ENETUNREACH',
+                'EHOSTUNREACH',
+                'ERR_CANCELED',
+            ].indexOf(error?.code),
+        );
+        throw error;
+    } finally {
+        if (events.length < 64) {
+            values.workerMs = performance.now() - started;
+            events.push(values);
+        } else {
+            events.omitted = (events.omitted || 0) + 1;
+        }
+    }
+}
+
 function send(value) {
     process.stdout.write(JSON.stringify(value) + '\n');
 }
@@ -228,10 +365,20 @@ readline
         let message;
         try {
             message = JSON.parse(line);
-            const result = await dispatch(message);
+            const collect =
+                message._collectPlaybackDiagnostics === true &&
+                /^\/native\/(netease|qq|kugou)\/(playback|preview)$/.test(message.route);
+            const events = collect ? [] : undefined;
+            if (events) {
+                events.started = performance.now();
+            }
+            const result = await playbackDiagnosticContext.run(events, () => dispatch(message));
             send({
                 id: message.id,
                 ...result,
+                ...(events
+                    ? { _playbackDiagnostics: events, _playbackDiagnosticsOmitted: events.omitted || 0 }
+                    : {}),
             });
         } catch (error) {
             send({

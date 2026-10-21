@@ -1,5 +1,8 @@
 #include "AppStorage.h"
 #include "AudioPlayer.h"
+#include <QAudioBuffer>
+#include <QJsonDocument>
+#include <QJsonArray>
 #include "ProcessMetrics.h"
 #include <QCoreApplication>
 #include <QDir>
@@ -119,6 +122,45 @@ bool storageRegression(const QString &directory) {
 
 class AudioPlayerRegression {
   public:
+    // 验证解码统计开关
+    static bool diagnosticRegression() {
+        AudioPlayer audio;
+        QJsonArray events;
+        audio.diagnosticEvent = [&](const QString &, const QJsonObject &values) { events.append(values); };
+        audio.enableDiagnostics(true);
+        audio.player->errorOccurred(
+            QMediaPlayer::NetworkError,
+            QStringLiteral("HTTP error 403 https://PRIVATE_AUDIO_ERROR_URL/?token=secret"));
+        QAudioFormat format;
+        format.setSampleRate(48000);
+        format.setChannelCount(2);
+        format.setSampleFormat(QAudioFormat::Int16);
+        const QAudioBuffer buffer(QByteArray(1920, '\0'), format, 0);
+        audio.decodedOutput->audioBufferReceived(buffer);
+        const auto state = audio.diagnosticState();
+        bool ok = check(state["decodedBuffers"].toInt() == 1 && state["decodedFrames"].toInt() == 480 &&
+                            state["sampleRateHz"].toInt() == 48000 && state["channels"].toInt() == 2,
+                        "Diagnostic decoder counters report format and frames without PCM content");
+        ok &= check(events.size() == 1 &&
+                        events.first().toObject()["errorCode"].toInt() == int(QMediaPlayer::NetworkError) &&
+                        events.first().toObject()["reportedHttpStatus"].toInt() == 403 &&
+                        !QJsonDocument(events).toJson().contains("PRIVATE_AUDIO_ERROR_URL"),
+                    "Diagnostic error events retain enum codes without raw errors");
+        audio.enableDiagnostics(false);
+        audio.decodedOutput->audioBufferReceived(buffer);
+        ok &= check(audio.diagnosticState()["decodedBuffers"].toInt() == 1,
+                    "Disabled diagnostics do not collect decoded buffers");
+        audio.enableDiagnostics(true);
+        audio.createPlayer();
+        ok &= check(audio.player->audioBufferOutput() == audio.decodedOutput.get(),
+                    "Rebuilt media sessions retain an independent live decoder observer");
+        audio.enableDiagnostics(false);
+        audio.enableDiagnostics(true);
+        audio.createPlayer();
+
+        return ok;
+    }
+
     // 没有输出设备时不会访问网络，可验证真实 load 路径是否改写了上游地址。
     static bool sourceRegression() {
         AudioPlayer audio;
@@ -261,8 +303,8 @@ int main(int argc, char **argv) {
     }
     const bool storage = storageRegression(fixture.path());
     const bool metrics = processMetricsRegression();
-    const bool audio = AudioPlayerRegression::run() && AudioPlayerRegression::layoutRegression() &&
-                       AudioPlayerRegression::sourceRegression();
+    const bool audio = AudioPlayerRegression::diagnosticRegression() && AudioPlayerRegression::run() &&
+                       AudioPlayerRegression::layoutRegression() && AudioPlayerRegression::sourceRegression();
     qInfo() << "Portable storage, process metrics and default audio output regressions:"
             << (storage && metrics && audio ? "PASS" : "FAIL");
     return storage && metrics && audio ? 0 : 1;

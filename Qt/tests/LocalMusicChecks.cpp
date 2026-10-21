@@ -80,7 +80,8 @@ class AudioPlayerRegression {
     static bool decode(const QString &path) {
         AudioPlayer audio;
         audio.output.setVolume(0);
-        QAudioBufferOutput capture;
+        audio.enableDiagnostics(true);
+        auto &capture = *audio.decodedOutput;
         int frames = 0;
         qint64 bufferPosition = -1;
         bool nonzero = false;
@@ -93,7 +94,6 @@ class AudioPlayerRegression {
                                  nonzero |= byte != 0;
                              }
                          });
-        audio.player->setAudioBufferOutput(&capture);
         const auto loaded = audio.load(QUrl::fromLocalFile(path).toString(), false, false, "local");
         const auto decoded =
             loaded && waitFor([&] { return frames > 4000 && nonzero && audio.player->position() >= 200; });
@@ -107,10 +107,15 @@ class AudioPlayerRegression {
         const auto seeked = waitFor([&] {
             return frames > framesBeforeSeek && bufferPosition >= 1700 && audio.player->position() >= 1900;
         });
+        // 在清理音源前验证实际编解码器
+        const auto diagnostic = audio.diagnosticState();
         audio.control("stop");
         qInfo() << "Local decoder: frames" << frames << "nonzero" << nonzero << "position" << position
                 << "seek buffer position" << bufferPosition;
-        return decoded && paused && seeked;
+        const bool diagnosticDecoded =
+            diagnostic["decodedFrames"].toDouble() > 4000 && diagnostic["sampleRateHz"].toInt() > 0 &&
+            diagnostic["codec"].toInt(-1) >= 0 && diagnostic["decodedBytes"].toDouble() > 0;
+        return decoded && paused && seeked && diagnosticDecoded;
     }
 };
 

@@ -45,6 +45,7 @@ const bridgeTests = [
     'Qt/tests/kugou-device.cjs',
     'Qt/tests/device-state.cjs',
     'Qt/tests/netease-xeapi.cjs',
+    'Qt/tests/playback-diagnostics.cjs',
 ];
 run(process.execPath, ['scripts/check-packaged-bridge.cjs', resources + '/MusicBridge']);
 for (const script of bridgeTests) {

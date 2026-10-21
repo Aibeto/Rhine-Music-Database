@@ -2,6 +2,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
+#include <QJsonObject>
 #include <QMutex>
 #include <QObject>
 #include <QPointer>
@@ -88,6 +89,7 @@ class FrameProfiler : public QObject {
     QString m_directory;
     QVariantMap m_metrics;
     QJsonArray m_samples;
+    QJsonObject m_audioReport;
     QTimer m_sampleTimer;
     qint64 m_recordStartedMs = 0;
     qint64 m_recordStoppedMs = 0;

@@ -442,6 +442,7 @@ function deployLinuxRuntime(qt, app, binary) {
         'imageformats',
         'tls',
         'multimedia',
+        'networkinformation',
         'platforminputcontexts',
         'wayland-shell-integration',
         'wayland-decoration-client',
@@ -729,6 +730,7 @@ function deployApp(qt, config, existingBundle = '') {
             'imageformats/libqgif.dylib',
             'imageformats/libqico.dylib',
             'tls/libqsecuretransportbackend.dylib',
+            'networkinformation/libqapplenetworkinformation.dylib',
             'multimedia/libdarwinmediaplugin.dylib',
             'multimedia/libffmpegmediaplugin.dylib',
         ]) {
@@ -773,6 +775,18 @@ function deployApp(qt, config, existingBundle = '') {
             path.join(app, 'RHINE MUSIC DATABASE.exe'),
         ]);
         deployWindowsRuntime(app, config);
+        // 系统网络状态后端通过插件动态载入，不能仅依靠可执行文件依赖扫描。
+        const networkPlugins = path.join(qt, 'plugins/networkinformation');
+        if (fs.existsSync(networkPlugins)) {
+            const destination = path.join(app, 'networkinformation');
+            fs.mkdirSync(destination, { recursive: true });
+            for (const file of fs.readdirSync(networkPlugins)) {
+                const isDebug = file.endsWith('d.dll');
+                if (file.endsWith('.dll') && isDebug === (config === 'Debug')) {
+                    fs.copyFileSync(path.join(networkPlugins, file), path.join(destination, file));
+                }
+            }
+        }
         // windeployqt 默认只带 Windows 平台插件；离线发布包测试也需要 offscreen 插件。
         const offscreen = config === 'Debug' ? 'qoffscreend.dll' : 'qoffscreen.dll';
         fs.mkdirSync(path.join(app, 'platforms'), {
