@@ -16,7 +16,7 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
 find_package(
-    Qt6 6.8 REQUIRED
+    Qt6 6.12 REQUIRED
     COMPONENTS Core
                Gui
                Qml
@@ -371,6 +371,12 @@ endif()
 add_test(NAME qt_platform_regression COMMAND RhinePlatformRegression
                                              "${CMAKE_CURRENT_BINARY_DIR}/platform-regression")
 set_tests_properties(qt_platform_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+qt_add_executable(RhineAudioPlaybackRegression Qt/tests/AudioPlaybackChecks.cpp)
+target_link_libraries(RhineAudioPlaybackRegression PRIVATE Qt6::Core Qt6::Multimedia)
+if(MSVC)
+    target_compile_options(RhineAudioPlaybackRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_audio_playback_regression COMMAND RhineAudioPlaybackRegression)
 add_test(NAME qt_offline COMMAND RhineMusicDatabase --self-test)
 set_tests_properties(
     qt_offline

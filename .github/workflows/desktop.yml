@@ -75,7 +75,7 @@ jobs:
             sudo apt-get install --yes --no-install-recommends libfuse2 || true
       - uses: jurplel/install-qt-action@v4
         with:
-          version: '6.8.3'
+          version: '6.12.0'
           arch: ${{ matrix.qt-arch }}
           # Wayland 客户端插件 (libqwayland-*.so) 随 linux_gcc_64 基础包提供，
           # 由 aqt 的 --autodesktop 一并安装，不能写进 --modules。

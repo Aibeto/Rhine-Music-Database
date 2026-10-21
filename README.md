@@ -133,7 +133,7 @@ macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_
 
 ## 从源码构建
 
-需要包含 Shader Tools 和 Multimedia 的 Qt **6.8+** desktop kit、CMake 3.24+、Ninja、Python 3、Node.js / npm，以及平台 C++ 编译器。建议各平台固定相同 Qt 补丁版本；自动构建使用 Qt 6.8.3 与 Node.js 22.14.0。Linux 还需要 Qt 的私有开发头文件（发行版包名通常是 `qt6-base-private-dev`、`qt6-multimedia-private-dev`）。
+需要包含 Shader Tools 和 Multimedia 的 Qt **6.12+** desktop kit、CMake 3.24+、Ninja、Python 3、Node.js / npm，以及平台 C++ 编译器。本地与三平台自动构建统一使用 Qt 6.12.0，自动构建使用 Node.js 22.14.0。Linux 还需要 Qt 的私有开发头文件（发行版包名通常是 `qt6-base-private-dev`、`qt6-multimedia-private-dev`）。
 
 `QT_ROOT` 指向 Qt kit 根目录。`RHINE_NODE_BINARY` 和 `RHINE_NODE_LICENSE` 指向官方独立 Node 分发包中的可执行文件与对应许可证；该运行时会随应用打包，不提交到源码仓库。
 
@@ -142,7 +142,7 @@ macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_
 安装 Xcode Command Line Tools 和匹配处理器的 Qt kit，在项目目录执行：
 
 ```sh
-export QT_ROOT="$HOME/Qt/6.8.3/macos"
+export QT_ROOT="$HOME/Qt/6.12.0/macos"
 export RHINE_NODE_BINARY="/absolute/path/to/node/bin/node"
 export RHINE_NODE_LICENSE="/absolute/path/to/node/LICENSE"
 npm ci
@@ -158,7 +158,7 @@ npm run share
 安装 Visual Studio 2022 的“使用 C++ 的桌面开发”组件、Windows SDK 和 Qt MSVC 2022 64 位 kit。在 **Developer PowerShell for VS 2022** 中进入项目目录：
 
 ```powershell
-$env:QT_ROOT = 'C:\Qt\6.8.3\msvc2022_64'
+$env:QT_ROOT = 'C:\Qt\6.12.0\msvc2022_64'
 $env:RHINE_NODE_BINARY = 'C:\tools\node-v22.14.0-win-x64\node.exe'
 $env:RHINE_NODE_LICENSE = 'C:\tools\node-v22.14.0-win-x64\LICENSE'
 npm ci
@@ -171,7 +171,7 @@ npm run share
 
 ### Linux x86_64（AppImage）
 
-安装发行版的 Qt 6.8+ 开发包（含 Shader Tools、Multimedia 与私有头文件）、CMake、Ninja、GCC、Python 3 和 Node.js 22。Qt 由系统提供时 `QT_ROOT` 保持默认的 `/usr` 即可：
+安装 Qt 6.12.0 开发包（含 Shader Tools、Multimedia 与私有头文件）、CMake、Ninja、GCC、Python 3 和 Node.js 22；若发行版尚未提供此版本，使用官方 desktop kit 并设置 `QT_ROOT`。Qt 由系统提供时 `QT_ROOT` 保持默认的 `/usr` 即可：
 
 ```sh
 export RHINE_NODE_BINARY="/absolute/path/to/node-v22.14.0-linux-x64/bin/node"
