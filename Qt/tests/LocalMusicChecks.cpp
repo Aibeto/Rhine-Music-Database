@@ -81,6 +81,8 @@ class AudioPlayerRegression {
         AudioPlayer audio;
         audio.output.setVolume(0);
         audio.enableDiagnostics(true);
+        const auto loaded = audio.load(QUrl::fromLocalFile(path).toString(), false, false, "local");
+        // 创建独立媒体会话
         auto &capture = *audio.decodedOutput;
         int frames = 0;
         qint64 bufferPosition = -1;
@@ -94,7 +96,6 @@ class AudioPlayerRegression {
                                  nonzero |= byte != 0;
                              }
                          });
-        const auto loaded = audio.load(QUrl::fromLocalFile(path).toString(), false, false, "local");
         const auto decoded =
             loaded && waitFor([&] { return frames > 4000 && nonzero && audio.player->position() >= 200; });
         const auto position = audio.player->position();

@@ -19,6 +19,8 @@ AudioPlayer::AudioPlayer(std::function<void()> changed) : playbackChanged(std::m
     output.setVolume(.7f);
     decodeClock.start();
     createPlayer();
+    playbackWatchdog.setInterval(250);
+    QObject::connect(&playbackWatchdog, &QTimer::timeout, &devices, [this] { checkPlaybackHealth(); });
     QObject::connect(
         &devices, &QMediaDevices::audioOutputsChanged, &devices, [this] { followDefaultOutput(); },
         Qt::QueuedConnection);
@@ -94,6 +96,9 @@ void AudioPlayer::createPlayer() {
     QObject::connect(player.get(), &QMediaPlayer::positionChanged, player.get(), [this](qint64 position) {
         // 设备失效时原生后端可能先报 0；保留最后有效进度，主动换曲与跳转另行更新。
         if (!outputUnavailable && recoveryPosition < 0 && position > 0) {
+            if (position != lastPosition) {
+                progressClock.restart();
+            }
             lastPosition = position;
         }
     });
@@ -104,17 +109,99 @@ void AudioPlayer::createPlayer() {
         player.get(), &QMediaPlayer::seekableChanged, player.get(), [this] { restorePlaybackPosition(); },
         Qt::QueuedConnection);
     QObject::connect(player.get(), &QMediaPlayer::mediaStatusChanged, player.get(), [this](auto status) {
-        if (status == QMediaPlayer::EndOfMedia) {
+        if (status == QMediaPlayer::EndOfMedia && !sourceEnded) {
+            sourceEnded = true;
+            pendingFailure = false;
+            failureRecoverable = false;
+            error.clear();
             playbackRequested = false;
+            playbackWatchdog.stop();
             ++ended;
         }
     });
     QObject::connect(player.get(), &QMediaPlayer::errorOccurred, player.get(), [this](auto, const QString &) {
         // 不回显底层错误中的临时签名链接；只向界面反馈可操作的错误。
-        if (!outputUnavailable) {
-            error = QStringLiteral("音频读取失败，请重试或打开来源页面");
+        if (!outputUnavailable && !sourceEnded) {
+            pendingFailure = true;
         }
     });
+}
+
+/**
+ * 检查播放是否卡住
+ */
+void AudioPlayer::checkPlaybackHealth() {
+    if (outputUnavailable || recoveryPosition >= 0 || sourceEnded || !error.isEmpty() ||
+        player->source().isEmpty()) {
+        return;
+    }
+    const bool invalid = player->mediaStatus() == QMediaPlayer::InvalidMedia;
+    if (!invalid && (!playbackRequested || !progressClock.isValid())) {
+        return;
+    }
+    // 超时
+    constexpr qint64 failureStallMs = 4000;
+    constexpr qint64 networkStallMs = 15000;
+    const auto timeoutMs = pendingFailure ? failureStallMs : networkStallMs;
+    if (!invalid && progressClock.elapsed() < timeoutMs) {
+        return;
+    }
+    failureRecoverable = lastPosition > 0 && !invalid;
+    pendingFailure = false;
+    error = QStringLiteral("音频读取失败，请重试或打开来源页面");
+    playbackWatchdog.stop();
+    // 暂停后端，由控制层决定是否恢复。
+    player->pause();
+    diagnose("stalled");
+    if (playbackChanged) {
+        playbackChanged();
+    }
+}
+
+/** 在线音源使用可续传的字节流 */
+void AudioPlayer::startMediaSource(const QUrl &url) {
+    if (url.isLocalFile()) {
+        player->setSource(url);
+        if (playbackRequested && recoveryPosition < 0) {
+            player->play();
+        }
+        return;
+    }
+    pendingSource = url;
+    stream = std::make_unique<HttpAudioStream>(url);
+    stream->ready = [this, url] {
+        if (outputUnavailable) {
+            return;
+        }
+        pendingSource.clear();
+        progressClock.restart();
+        player->setSourceDevice(stream.get(), url);
+        if (playbackRequested && recoveryPosition < 0) {
+            player->play();
+        }
+        if (playbackChanged) {
+            playbackChanged();
+        }
+    };
+    stream->transportChanged = [this] { diagnose("media-transfer"); };
+    stream->failed = [this] {
+        pendingFailure = true;
+        if (player->source().isEmpty()) {
+            error = QStringLiteral("音频连接失败，请重试或打开来源页面");
+            pendingSource.clear();
+            playbackRequested = false;
+            playbackWatchdog.stop();
+        }
+        if (playbackChanged) {
+            playbackChanged();
+        }
+    };
+    if (!stream->start()) {
+        error = QStringLiteral("无法创建音频缓冲，请检查临时目录空间");
+        pendingSource.clear();
+        playbackRequested = false;
+        playbackWatchdog.stop();
+    }
 }
 /**
  * 等待新会话可跳转后恢复实际播放位置；FFmpeg 可能直接进入 BufferedMedia。
@@ -130,6 +217,7 @@ void AudioPlayer::restorePlaybackPosition() {
     const auto position = player->isSeekable() ? recoveryPosition : 0;
     recoveryPosition = -1;
     lastPosition = position;
+    progressClock.restart();
     if (player->isSeekable()) {
         player->setPosition(position);
     }
@@ -154,6 +242,7 @@ void AudioPlayer::followDefaultOutput() {
         if (!outputUnavailable) {
             recoveryPosition = std::max(lastPosition, player->position());
             outputUnavailable = true;
+            playbackWatchdog.stop();
             player->pause();
             player->setAudioOutput(nullptr);
             error.clear();
@@ -178,11 +267,15 @@ void AudioPlayer::followDefaultOutput() {
         player->setAudioOutput(&output);
     }
     outputUnavailable = false;
+    if (playbackRequested) {
+        progressClock.restart();
+        playbackWatchdog.start();
+    }
     if (wasUnavailable && !source.isEmpty()) {
         pendingSource.clear();
         error.clear();
         recoveryPosition = position;
-        player->setSource(source);
+        startMediaSource(source);
         // 先等新会话加载并恢复跳转，再开始播放，避免原生后端启动时覆盖待恢复的位置。
         return;
     }
@@ -237,7 +330,8 @@ bool AudioPlayer::load(QString input, bool offline, bool alternative, QString pr
     lastDecodedEndMs = -1;
     decodedFormat = {};
     decodeClock.restart();
-    player->stop();
+    // 每次加载隔离旧媒体会话，防止旧解码器的迟到错误污染新曲目。
+    createPlayer();
     if (diagnosticsEnabled) {
         observeDecodedBuffers();
     }
@@ -245,6 +339,10 @@ bool AudioPlayer::load(QString input, bool offline, bool alternative, QString pr
     lastPosition = 0;
     recoveryPosition = -1;
     error.clear();
+    pendingFailure = false;
+    failureRecoverable = false;
+    sourceEnded = false;
+    progressClock.restart();
     pendingSource.clear();
     followDefaultOutput();
     if (outputUnavailable) {
@@ -255,13 +353,13 @@ bool AudioPlayer::load(QString input, bool offline, bool alternative, QString pr
         diagnose("load");
         return true;
     }
-    player->setSource(url);
     playbackRequested = true;
+    startMediaSource(url);
+    if (playbackRequested) {
+        playbackWatchdog.start();
+    }
     diagnose("load");
     followDefaultOutput();
-    if (!outputUnavailable) {
-        player->play();
-    }
     return true;
 }
 void AudioPlayer::control(QString action, double value) {
@@ -276,22 +374,33 @@ void AudioPlayer::control(QString action, double value) {
     }
     if (action == "pause") {
         playbackRequested = false;
+        playbackWatchdog.stop();
         player->pause();
     } else if (action == "resume") {
         playbackRequested = true;
+        progressClock.restart();
+        playbackWatchdog.start();
+        if (sourceEnded) {
+            sourceEnded = false;
+        }
         followDefaultOutput();
         if (!outputUnavailable) {
             player->play();
         }
     } else if (action == "stop") {
         playbackRequested = false;
-        player->stop();
-        player->setSource({});
+        playbackWatchdog.stop();
+        // 先唤醒可能等待网络的解码线程，再释放媒体会话与临时缓存。
+        createPlayer();
         lastPosition = 0;
         recoveryPosition = -1;
         pendingSource.clear();
         error.clear();
+        pendingFailure = false;
+        failureRecoverable = false;
+        progressClock.invalidate();
     } else if (action == "seek" && player->isSeekable()) {
+        progressClock.restart();
         lastPosition = qint64(std::clamp(value, 0., double(player->duration())));
         if (recoveryPosition >= 0) {
             recoveryPosition = lastPosition;
@@ -310,7 +419,10 @@ QVariantMap AudioPlayer::state() const {
             {"volume", output.volume()},
             {"ended", ended},
             {"error", error},
+            {"recoverable", failureRecoverable},
+            {"requested", playbackRequested},
             {"buffering", player->mediaStatus() == QMediaPlayer::LoadingMedia ||
+                              (!pendingSource.isEmpty() && !outputUnavailable) ||
                               player->mediaStatus() == QMediaPlayer::StalledMedia}};
 }
 
@@ -344,42 +456,50 @@ QJsonObject AudioPlayer::diagnosticState() const {
         codec > int(QMediaFormat::AudioCodec::LastAudioCodec)) {
         codec = int(QMediaFormat::AudioCodec::Unspecified);
     }
-    return {{"sourceSerial", sourceSerial},
-            {"sourceKind", sourceKind},
-            {"provider", sourceProvider},
-            {"mediaStatus", int(player->mediaStatus())},
-            {"playbackState", int(player->playbackState())},
-            {"errorCode", int(player->error())},
-            {"backendFailureCategory", backendFailureCategory},
-            {"reportedHttpStatus", reportedHttpStatus},
-            {"playing", player->isPlaying()},
-            {"latchedError", !error.isEmpty()},
-            {"hasActiveSource", !player->source().isEmpty() || !pendingSource.isEmpty()},
-            {"positionMs", double(player->position())},
-            {"durationMs", double(player->duration())},
-            {"seekable", player->isSeekable()},
-            {"bufferProgress", double(player->bufferProgress())},
-            {"requested", playbackRequested},
-            {"volume", double(output.volume())},
-            {"muted", output.isMuted()},
-            {"endedSerial", ended},
-            {"recoveryPositionMs", double(recoveryPosition)},
-            {"outputUnavailable", outputUnavailable},
-            {"outputCount", QMediaDevices::audioOutputs().size()},
-            {"outputPreferredSampleRateHz", outputFormat.sampleRate()},
-            {"outputPreferredChannels", outputFormat.channelCount()},
-            {"outputPreferredSampleFormat", int(outputFormat.sampleFormat())},
-            {"outputChannelConfig", double(quint32(output.device().channelConfiguration()))},
-            {"codec", codec},
-            {"bitrate", metadata.value(QMediaMetaData::AudioBitRate).toDouble()},
-            {"sampleRateHz", decodedFormat.sampleRate()},
-            {"channels", decodedFormat.channelCount()},
-            {"sampleFormat", int(decodedFormat.sampleFormat())},
-            {"decodedBuffers", double(decodedBuffers)},
-            {"decodedBytes", double(decodedBytes)},
-            {"decodedFrames", double(decodedFrames)},
-            {"lastDecodedElapsedMs", double(lastDecodedElapsedMs)},
-            {"lastDecodedEndMs", double(lastDecodedEndMs)}};
+    auto values = stream ? stream->diagnosticState() : QJsonObject{};
+    const QJsonObject playback{
+        {"sourceSerial", sourceSerial},
+        {"sourceKind", sourceKind},
+        {"provider", sourceProvider},
+        {"mediaStatus", int(player->mediaStatus())},
+        {"playbackState", int(player->playbackState())},
+        {"errorCode", int(player->error())},
+        {"backendFailureCategory", backendFailureCategory},
+        {"reportedHttpStatus", reportedHttpStatus},
+        {"playing", player->isPlaying()},
+        {"latchedError", !error.isEmpty()},
+        {"pendingFailure", pendingFailure},
+        {"recoverable", failureRecoverable},
+        {"hasActiveSource", !player->source().isEmpty() || !pendingSource.isEmpty()},
+        {"positionMs", double(player->position())},
+        {"durationMs", double(player->duration())},
+        {"seekable", player->isSeekable()},
+        {"bufferProgress", double(player->bufferProgress())},
+        {"requested", playbackRequested},
+        {"volume", double(output.volume())},
+        {"muted", output.isMuted()},
+        {"endedSerial", ended},
+        {"recoveryPositionMs", double(recoveryPosition)},
+        {"outputUnavailable", outputUnavailable},
+        {"outputCount", QMediaDevices::audioOutputs().size()},
+        {"outputPreferredSampleRateHz", outputFormat.sampleRate()},
+        {"outputPreferredChannels", outputFormat.channelCount()},
+        {"outputPreferredSampleFormat", int(outputFormat.sampleFormat())},
+        {"outputChannelConfig", double(quint32(output.device().channelConfiguration()))},
+        {"codec", codec},
+        {"bitrate", metadata.value(QMediaMetaData::AudioBitRate).toDouble()},
+        {"sampleRateHz", decodedFormat.sampleRate()},
+        {"channels", decodedFormat.channelCount()},
+        {"sampleFormat", int(decodedFormat.sampleFormat())},
+        {"decodedBuffers", double(decodedBuffers)},
+        {"decodedBytes", double(decodedBytes)},
+        {"decodedFrames", double(decodedFrames)},
+        {"lastDecodedElapsedMs", double(lastDecodedElapsedMs)},
+        {"lastDecodedEndMs", double(lastDecodedEndMs)}};
+    for (auto it = playback.begin(); it != playback.end(); ++it) {
+        values[it.key()] = it.value();
+    }
+    return values;
 }
 
 /** 将后端错误映射为有限类别；禁止把错误原文传入诊断记录。 */
@@ -437,6 +557,7 @@ void AudioPlayer::observeDecodedBuffers() {
 }
 
 AudioPlayer::~AudioPlayer() {
+    playbackWatchdog.stop();
     releasePlayer();
 }
 
@@ -444,10 +565,14 @@ AudioPlayer::~AudioPlayer() {
 void AudioPlayer::releasePlayer() {
     ++decoderObservation;
     QObject::disconnect(decoderConnection);
+    if (stream) {
+        stream->cancel();
+    }
     if (player) {
         // 销毁旧会话期间不再发送状态快照，避免访问正在释放的成员。
         player->blockSignals(true);
     }
     decodedOutput.reset();
     player.reset();
+    stream.reset();
 }

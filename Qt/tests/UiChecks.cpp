@@ -1374,8 +1374,11 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
         const auto samples = document["samples"].toArray();
         check(document["schema"].toInt() == 2 && !samples.isEmpty(), "diagnostic has samples and schema");
         const auto audioReport = document["audioPlayback"].toObject();
-        check(!audioReport["events"].toArray().isEmpty() && !audioReport["mediaHttpStatusAvailable"].toBool(),
-              "performance export includes audio events and explicit transport limits");
+        check(!audioReport["events"].toArray().isEmpty() &&
+                  audioReport["mediaHttpStatusAvailable"].toBool() &&
+                  audioReport["mediaTransferBytesAvailable"].toBool() &&
+                  !audioReport["networkPacketLossAvailable"].toBool(),
+              "performance export includes media HTTP metrics without inventing packet loss");
         check(samples.first().toObject()["audio"].isObject(),
               "performance samples include synchronized audio state");
         check(!document["environment"].toObject()["graphicsApi"].toString().isEmpty(),

@@ -41,6 +41,17 @@ QJsonObject lyrics() {
 }
 }
 
+class AudioPlayerRegression {
+  public:
+    static void interrupt(Host &host) {
+        auto &audio = *host.audio;
+        audio.player->pause();
+        audio.playbackRequested = true;
+        audio.failureRecoverable = true;
+        audio.error = QStringLiteral("音频读取失败，请重试或打开来源页面");
+    }
+};
+
 /** 原生业务回归只调用 Qt 类型和本地响应，不用脚本对象充当资料库、播放器或歌词模型。 */
 bool runNativeMusicChecks(const QString &root) {
     QFile file(root + "/slots.json");
@@ -145,6 +156,7 @@ bool runNativeMusicChecks(const QString &root) {
     int nativeSearches = 0;
     int details = 0;
     int mutations = 0;
+    int playbackRequests = 0;
     bool rejectQQWrite = false;
     bool rejectLibrary = false;
     host.fixture = [&](QString route, QJsonObject parameters) {
@@ -181,6 +193,7 @@ bool runNativeMusicChecks(const QString &root) {
         } else if (route.endsWith("/wiki")) {
             value = "本地百科";
         } else if (route.endsWith("/playback") || route.endsWith("/preview")) {
+            ++playbackRequests;
             value = QJsonObject{
                 {"url", audioURL}, {"level", returnedQuality}, {"preview", route.endsWith("/preview")}};
         } else if (route.endsWith("/mutate")) {
@@ -379,9 +392,60 @@ bool runNativeMusicChecks(const QString &root) {
     }
     check(hasRequest && hasLoad, "audio diagnostics correlate real Host requests and decoder loads");
     check(!playbackBytes.contains(audioURL.toUtf8()) && !playbackBytes.contains("测试歌手") &&
-              !playbackBytes.contains("本地歌曲") && !playbackReport["mediaHttpStatusAvailable"].toBool(),
-          "playback report omits source identity and never invents media HTTP metrics");
+              !playbackBytes.contains("本地歌曲") && playbackReport["mediaHttpStatusAvailable"].toBool(),
+          "playback report omits source identity and exposes managed media HTTP metrics");
     host.enablePlaybackDiagnostics(false);
+    if (!QMediaDevices::defaultAudioOutput().isNull()) {
+        library.player.play(song("1"));
+        check(waitFor([&] {
+                  library.player.tick(104, true);
+                  return !library.player.loading && host.mediaState().value("seekable").toBool();
+              }),
+              "recovery fixture loads a seekable source");
+        host.mediaControl("seek", 1000);
+        const auto requestsBeforeRecovery = playbackRequests;
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            AudioPlayerRegression::interrupt(host);
+            library.player.tick(105 + attempt, true);
+            if (attempt == 2) {
+                check(library.player.failed && !library.player.loading &&
+                          !host.mediaState().value("playing").toBool() &&
+                          playbackRequests == requestsBeforeRecovery + 2,
+                      "persistent failures stop after two source refreshes without fake playback");
+                break;
+            }
+            check(library.player.loading && !library.player.failed, "stalls start bounded recovery");
+            if (attempt == 0) {
+                library.player.setPaused(true);
+            }
+            check(waitFor([&] {
+                      library.player.tick(105 + attempt, true);
+                      return !library.player.loading && host.mediaState().value("seekable").toBool() &&
+                             host.mediaState().value("position").toDouble() >= 900;
+                  }),
+                  "recovery reloads the source and restores position");
+            check(library.player.current["id"] == "1" && !library.player.failed,
+                  "recovery retains the selected song");
+            if (attempt == 0) {
+                check(!host.mediaState().value("playing").toBool(),
+                      "pausing while recovery is pending prevents automatic resume");
+                library.player.setPaused(false);
+            }
+        }
+        library.player.toggle();
+        check(library.player.loading && !library.player.failed, "manual retry resets the recovery budget");
+        check(waitFor([&] { return !library.player.loading; }), "manual retry resolves");
+        AudioPlayerRegression::interrupt(host);
+        library.player.tick(110, true);
+        check(library.player.loading, "new playback has an independent recovery budget");
+        library.player.stop();
+        check(waitFor([&] { return !host.mediaState().value("playing").toBool(); }) &&
+                  library.player.current.isEmpty(),
+              "stopping cancels an in-flight recovery");
+        library.player.play(song("2"));
+        check(waitFor([&] { return !library.player.loading; }) && library.player.current["id"] == "2",
+              "late recovery replies cannot restore an old song");
+    }
     library.player.stop();
     check(library.player.current.isEmpty() && library.player.lyrics.document().isEmpty() &&
               library.player.actualQuality.isEmpty(),

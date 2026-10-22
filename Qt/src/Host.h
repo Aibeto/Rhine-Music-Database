@@ -85,6 +85,7 @@ class Host : public QObject {
     void invalidated();
 
   private:
+    friend class AudioPlayerRegression;
     struct Waiter {
         JsonReply callback;
         int epoch;

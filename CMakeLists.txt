@@ -63,6 +63,8 @@ set(RHINE_APP_SOURCES
     Qt/src/AppUpdater.h
     Qt/src/AudioPlayer.cpp
     Qt/src/AudioPlayer.h
+    Qt/src/HttpAudioStream.cpp
+    Qt/src/HttpAudioStream.h
     Qt/src/PlaybackDiagnostics.cpp
     Qt/src/PlaybackDiagnostics.h
     Qt/src/AppStorage.cpp
@@ -349,9 +351,9 @@ endif()
 add_test(NAME qt_ui_motion_regression COMMAND RhineUiMotionRegression
                                               "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/ui-motion.qz")
 qt_add_executable(RhinePlatformRegression Qt/tests/PlatformRegression.cpp Qt/src/AppStorage.cpp
-                  Qt/src/AudioPlayer.cpp Qt/src/ProcessMetrics.cpp)
+                  Qt/src/AudioPlayer.cpp Qt/src/HttpAudioStream.cpp Qt/src/ProcessMetrics.cpp)
 target_include_directories(RhinePlatformRegression PRIVATE Qt/src)
-target_link_libraries(RhinePlatformRegression PRIVATE Qt6::Core Qt6::Gui Qt6::Multimedia
+target_link_libraries(RhinePlatformRegression PRIVATE Qt6::Core Qt6::Gui Qt6::Multimedia Qt6::Network
                                                       Qt6::MultimediaPrivate)
 if(WIN32)
     target_sources(RhinePlatformRegression PRIVATE Qt/src/PlatformWindows.cpp)
@@ -379,6 +381,14 @@ if(MSVC)
     target_compile_options(RhineAudioPlaybackRegression PRIVATE /utf-8)
 endif()
 add_test(NAME qt_audio_playback_regression COMMAND RhineAudioPlaybackRegression)
+qt_add_executable(RhineAudioStreamRegression Qt/tests/AudioStreamChecks.cpp Qt/src/AudioPlayer.cpp
+                  Qt/src/HttpAudioStream.cpp)
+target_include_directories(RhineAudioStreamRegression PRIVATE Qt/src)
+target_link_libraries(RhineAudioStreamRegression PRIVATE Qt6::Core Qt6::Multimedia Qt6::Network)
+if(MSVC)
+    target_compile_options(RhineAudioStreamRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_audio_stream_regression COMMAND RhineAudioStreamRegression)
 add_test(NAME qt_offline COMMAND RhineMusicDatabase --self-test)
 set_tests_properties(
     qt_offline

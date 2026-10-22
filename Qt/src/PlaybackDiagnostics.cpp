@@ -31,6 +31,15 @@ QJsonObject PlaybackDiagnostics::numericFields(const QJsonObject &values) {
                             "reportedHttpStatus",
                             "playing",
                             "latchedError",
+                            "pendingFailure",
+                            "recoverable",
+                            "mediaHttpStatus",
+                            "mediaNetworkError",
+                            "mediaTransferBytes",
+                            "mediaExpectedBytes",
+                            "mediaReconnects",
+                            "mediaTransferActive",
+                            "mediaTransferFailed",
                             "hasActiveSource",
                             "controllerFailed",
                             "controllerLoading",
@@ -98,9 +107,10 @@ void PlaybackDiagnostics::record(const QString &event, const QJsonObject &values
     if (!m_recording) {
         return;
     }
-    static const QStringList events{
-        "snapshot", "load",     "load-rejected", "control",       "media-status",   "playback-state", "error",
-        "buffer",   "metadata", "output",        "request-start", "request-finish", "upstream"};
+    static const QStringList events{"snapshot",     "load",           "load-rejected", "control",
+                                    "media-status", "playback-state", "error",         "buffer",
+                                    "metadata",     "output",         "request-start", "request-finish",
+                                    "upstream",     "stalled",        "media-transfer"};
     if (!events.contains(event)) {
         return;
     }
@@ -118,12 +128,12 @@ QJsonObject PlaybackDiagnostics::report() const {
     return {
         {"events", m_events},
         {"omittedEvents", m_omitted},
-        {"mediaHttpStatusAvailable", false},
+        {"mediaHttpStatusAvailable", true},
         {"upstreamHttpCoverage", "shared-axios-and-global-fetch; other SDK transports may be unavailable"},
         {"upstreamEventLimitPerRequest", 64},
         {"networkPacketLossAvailable", false},
         {"networkDnsTlsTimingAvailable", false},
-        {"mediaTransferBytesAvailable", false},
+        {"mediaTransferBytesAvailable", true},
         {"deviceOutputSamplesAvailable", false},
         {"notes", "Relative times only. Request success is not media transfer success. Decoded frames "
                   "do not prove audible device output. No raw errors, URLs, hosts, IPs, headers, "
@@ -136,6 +146,8 @@ QJsonObject PlaybackDiagnostics::report() const {
              {"backendFailureCategory", "Heuristic:0=unknown,1=timeout,2=dns,3=reset,4=invalid-data,5=codec,"
                                         "6=audio-device,7=permission,8=tls,9=eof,10=not-found,11=http"},
              {"reportedHttpStatus", "0=unavailable; otherwise extracted from an explicit backend HTTP error"},
+             {"mediaHttpStatus", "HTTP status from managed media stream; 0=unavailable"},
+             {"mediaNetworkError", "QNetworkReply::NetworkError"},
              {"sampleFormat", "QAudioFormat::SampleFormat"},
              {"bridgeState", "QProcess::ProcessState"},
              {"bridgeError", "QProcess::ProcessError; may reflect the last error"},

@@ -60,7 +60,7 @@ void NativeApplication::poll(double time, bool force) {
 }
 void NativeApplication::mediaAction(QString action) {
     if (action == "resume" || action == "pause") {
-        m_host->mediaControl(action);
+        music.player.setPaused(action == "pause");
     } else {
         hud.action("player:" + action);
     }

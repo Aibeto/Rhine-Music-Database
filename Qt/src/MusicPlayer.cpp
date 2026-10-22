@@ -124,6 +124,7 @@ void MusicPlayer::setQuality(const QString &value) {
         return;
     }
     quality = value;
+    m_recoveryAttempts = 0;
     m_host->setPreference("quality", value);
     if (current.isEmpty() || (loading && !m_resumePosition)) {
         emit changed();
@@ -247,6 +248,7 @@ void MusicPlayer::play(QJsonObject track, std::optional<QJsonArray> source, std:
     index = queueIndex.value_or(selected);
     const auto generation = ++m_generation;
     m_resumePosition.reset();
+    m_recoveryAttempts = 0;
     previewRequested = preview && m_api->provider == "qq";
     m_host->mediaControl("stop");
     current = track;
@@ -426,6 +428,21 @@ void MusicPlayer::fail(QString error) {
     emit changed();
 }
 
+/** 重新获取当前歌曲的地址并恢复位置 */
+void MusicPlayer::recoverPlayback() {
+    ++m_recoveryAttempts;
+    const auto generation = ++m_generation;
+    m_resumePosition = state["position"].toDouble();
+    m_resumePaused = !state["requested"].toBool();
+    loading = true;
+    failed = false;
+    actualQuality.clear();
+    status = QStringLiteral("正在恢复播放（%1/2）…").arg(m_recoveryAttempts);
+    m_host->mediaControl("stop");
+    emit changed();
+    prepare(current, generation, true);
+}
+
 void MusicPlayer::tick(double time, bool force) {
     if (!force && time - m_lastPoll < 0.1) {
         return;
@@ -445,13 +462,7 @@ void MusicPlayer::tick(double time, bool force) {
         }
     }
     lyrics.sync(state["position"].toDouble());
-    const auto playbackError = state["error"].toString();
-    if (!playbackError.isEmpty() && (!failed || !actualQuality.isEmpty() || status != playbackError)) {
-        // URL 获取成功不代表后续解码成功；失败后立即撤下旧音质，避免面板继续显示可用音源。
-        fail(playbackError);
-    } else if (state != previous) {
-        emit changed();
-    }
+    // 播放结束或错误状态只在播放中或加载完成后触发
     if (!current.isEmpty() && !loading && state.contains("ended") &&
         state["ended"].toInteger() != m_endSerial) {
         m_endSerial = state["ended"].toInteger();
@@ -460,16 +471,49 @@ void MusicPlayer::tick(double time, bool force) {
         } else {
             next(1, true);
         }
+        return;
+    }
+    const auto playbackError = state["error"].toString();
+    if (!loading && !current.isEmpty() && !playbackError.isEmpty() &&
+        (!failed || !actualQuality.isEmpty() || status != playbackError)) {
+        constexpr int maxRecoveryAttempts = 2;
+        if (!failed && state["recoverable"].toBool() && m_recoveryAttempts < maxRecoveryAttempts &&
+            current["provider"] != "local") {
+            recoverPlayback();
+            return;
+        }
+        fail(playbackError);
+    } else if (state != previous) {
+        emit changed();
     }
 }
 
 void MusicPlayer::toggle() {
+    if (m_resumePosition) {
+        setPaused(!m_resumePaused);
+        return;
+    }
+    if (failed && !current.isEmpty()) {
+        play(current, std::nullopt, index, previewRequested);
+        return;
+    }
     if (!loading && !current.isEmpty()) {
-        m_host->mediaControl(state["playing"].toBool() ? "pause" : "resume");
+        setPaused(state["playing"].toBool());
     }
 }
 
+void MusicPlayer::setPaused(bool paused) {
+    if (m_resumePosition) {
+        m_resumePaused = paused;
+    }
+    m_host->mediaControl(paused ? "pause" : "resume");
+}
+
 void MusicPlayer::seek(double fraction) {
+    if (m_resumePosition) {
+        m_resumePosition = std::clamp(fraction, 0., 1.) * state["duration"].toDouble();
+        return;
+    }
     if (state["seekable"].toBool()) {
         m_host->mediaControl("seek", std::clamp(fraction, 0., 1.) * state["duration"].toDouble());
     }
@@ -523,6 +567,7 @@ void MusicPlayer::clearUpcoming() {
 void MusicPlayer::stop() {
     ++m_generation;
     m_resumePosition.reset();
+    m_recoveryAttempts = 0;
     lyrics.clear();
     loading = false;
     failed = false;

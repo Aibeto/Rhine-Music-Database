@@ -11,6 +11,7 @@ class MusicPlayer : public QObject {
               std::optional<int> queueIndex = std::nullopt, bool preview = false);
     void tick(double time, bool force = false);
     void toggle();
+    void setPaused(bool paused);
     void seek(double fraction);
     void volume(double value);
     void next(int direction = 1, bool ended = false);
@@ -53,6 +54,8 @@ class MusicPlayer : public QObject {
     double m_lastPoll = -1;
     std::optional<double> m_resumePosition;
     bool m_resumePaused = false;
+    int m_recoveryAttempts = 0;
+    void recoverPlayback();
     MusicApi::Valid valid(quint64 generation);
     void prepare(QJsonObject track, quint64 generation, bool reload = false);
     void fail(QString error);
