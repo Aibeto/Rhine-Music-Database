@@ -68,7 +68,10 @@ void NativeHud::playerBar(double, double y, double width) {
         fill(center - 9, cy - 11, 6, 22, icon);
         fill(center + 3, cy - 11, 6, 22, icon);
     } else {
-        op({"fill-path", path({{center - 10, cy - 12}, {center + 10, cy}, {center - 10, cy + 12}}, true),
+        // 对齐播放键三角
+        const auto playCenter = center + 10.0 / 3;
+        op({"fill-path",
+            path({{playCenter - 10, cy - 12}, {playCenter + 10, cy}, {playCenter - 10, cy + 12}}, true),
             icon});
     }
     hit(center + 55, y + 14, 44, 56, "player:next", "下一首");
