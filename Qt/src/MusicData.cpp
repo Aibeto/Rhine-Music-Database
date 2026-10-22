@@ -144,7 +144,7 @@ int cursor(const QJsonArray &songs, const QJsonArray &ids) {
 }
 
 QString pad(int value, int width) {
-    return ("000000" + QString::number(value)).right(width);
+    return QString::number(value).rightJustified(width, QLatin1Char('0'));
 }
 
 QString time(const QJsonObject &track) {

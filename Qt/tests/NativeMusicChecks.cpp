@@ -187,7 +187,20 @@ bool runNativeMusicChecks(const QString &root) {
         } else if (route.endsWith("/detail")) {
             ++details;
             const auto entry = args.at(0).toObject();
-            if (entry["kind"] == "song") {
+            if (entry["id"] == "large-directory") {
+                auto info = entry;
+                info["trackCount"] = 235;
+                QJsonArray ids;
+                QJsonArray songs;
+                for (int index = 0; index < 235; ++index) {
+                    const auto id = QString::number(index + 10000);
+                    ids.append(id);
+                    if (index < 100) {
+                        songs.append(song(id));
+                    }
+                }
+                value = QJsonArray{info, songs, ids};
+            } else if (entry["kind"] == "song") {
                 value = QJsonArray{song(entry["id"].toString()), QJsonArray{}, QJsonArray{}};
             } else {
                 auto info = entry;
@@ -315,6 +328,43 @@ bool runNativeMusicChecks(const QString &root) {
     QCoreApplication::processEvents();
     check(!library.directory, "closed directory cannot reopen from a delayed response");
 
+    check(MusicData::pad(9) == "09" && MusicData::pad(99) == "99" &&
+              MusicData::pad(100) == "100" && MusicData::pad(1000) == "1000",
+          "minimum digit width never truncates library or queue numbering");
+    library.enterDirectory(MusicData::item("playlist", "large-directory", "分页回归"));
+    check(waitFor([&] { return !library.directoryLoading; }), "large directory opens first page");
+    library.selectDirectory(39);
+    const auto observeIndex = [&](int index) {
+        const auto cell = (index + library.directory->anchor) % 40;
+        library.observe(library.physicalSlots[cell / 8].at(cell % 8));
+    };
+    observeIndex(40);
+    check(library.libraryIndex() == 40, "mouse selection crosses the physical reel boundary");
+    library.selectDirectory(47);
+    const auto previousCell = (47 + library.directory->anchor) % 40;
+    library.observe(library.physicalSlots[previousCell / 8].at((previousCell % 8 + 1) % 8));
+    check(library.libraryIndex() == 48, "vertical drag crosses eight physical rows without wrapping songs");
+    library.selectDirectory(99);
+    observeIndex(100);
+    check(waitFor([&] { return !library.directoryLoading; }) && library.libraryIndex() == 100 &&
+              library.current["id"] == "10100",
+          "mouse selection loads beyond the first hundred instead of wrapping");
+    library.selectDirectory(199);
+    library.navigateDirectory(1);
+    check(waitFor([&] { return !library.directoryLoading; }) && library.libraryIndex() == 200,
+          "keyboard selection crosses the second page boundary");
+    check(library.directoryQueue().size() == 235, "large directory queue retains all song IDs");
+    library.leaveDirectory();
+    library.enterDirectory(MusicData::item("playlist", "large-directory", "跨页回归"));
+    check(waitFor([&] { return !library.directoryLoading; }), "large directory reopens first page");
+    library.navigateDirectory(234);
+    check(waitFor([&] { return !library.directoryLoading; }) && library.libraryIndex() == 234 &&
+              library.current["id"] == "10234",
+          "large scroll movement retains its target across multiple page requests");
+    library.navigateDirectory(1);
+    check(library.libraryIndex() == 0, "directory wraps only after its actual final song");
+    library.leaveDirectory();
+
     library.uid = "42";
     library.likedIDs.reset();
     library.hasMore[1] = true;
@@ -331,6 +381,38 @@ bool runNativeMusicChecks(const QString &root) {
     check(library.player.queue.size() == 3 && library.player.index == 0,
           "liked play all starts at the first song and replaces queue");
     library.player.stop();
+
+    const auto originalLikedIDs = library.likedIDs;
+    const auto originalLikedSongs = library.lists[1];
+    const auto originalLikedCursor = library.likedCursor;
+    const auto originalLikedTotal = library.totals[1];
+    QJsonArray largeLikedIDs;
+    QJsonArray firstLikedPage;
+    for (int index = 0; index < 235; ++index) {
+        const auto id = QString::number(20000 + index);
+        largeLikedIDs.append(id);
+        if (index < 100) {
+            firstLikedPage.append(song(id));
+        }
+    }
+    library.likedIDs = largeLikedIDs;
+    library.likedCursor = 100;
+    library.lists[1] = firstLikedPage;
+    library.totals[1] = 235;
+    library.hasMore[1] = true;
+    library.playDirectory();
+    check(waitFor([&] { return !library.personalLoading; }) && library.player.queue.size() == 235 &&
+              library.player.queue.last().toObject()["id"] == "20234" &&
+              std::none_of(library.player.queue.begin(), library.player.queue.end(),
+                           [](const QJsonValue &value) { return value.toObject()["deferred"].toBool(); }),
+          "NetEase liked play-all loads metadata beyond one hundred before creating its queue");
+    library.player.stop();
+    library.likedIDs = originalLikedIDs;
+    library.lists[1] = originalLikedSongs;
+    library.likedCursor = originalLikedCursor;
+    library.totals[1] = originalLikedTotal;
+    library.hasMore[1] = false;
+
     library.hasMore[2] = true;
     library.loadMoreSource(2);
     check(waitFor([&] { return !library.personalLoading; }), "playlists finish");

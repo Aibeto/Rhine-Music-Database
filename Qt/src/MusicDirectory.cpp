@@ -147,14 +147,36 @@ void MusicLibrary::observeDirectory(int physical) {
         return;
     }
     const auto row = int(physicalSlots[lane].indexOf(physical));
-    selectedPhysical = physical;
-    selectedLane = lane;
     if (folder->songs.isEmpty()) {
+        selectedPhysical = physical;
+        selectedLane = lane;
         folder->anchor = lane * 8 + row;
         return;
     }
-    folder->index = (folder->page + ((lane * 8 + row - folder->anchor + 40) % 40)) % folder->songs.size();
-    choose(folder->songs.at(folder->index).toObject());
+    // 拖动跨越槽位边界时继续逻辑索引，并复用分页入口。
+    const auto previousCell = (folder->index + folder->anchor) % 40;
+    const auto movement = lane == previousCell / 8
+                              ? (row - previousCell % 8 + 12) % 8 - 4
+                              : (lane * 8 + row - previousCell + 60) % 40 - 20;
+    if (movement != 0) {
+        const auto target = folder->index + movement;
+        const auto count = int(folder->songs.size());
+        const auto index = target >= count && folder->cursor < folder->ids.size()
+                               ? target
+                               : (target % count + count) % count;
+        // 行拖动重新对齐锚点
+        folder->anchor = (lane * 8 + row - index % 40 + 40) % 40;
+        selectedPhysical = physical;
+        selectedLane = lane;
+        if (target >= count && folder->cursor < folder->ids.size()) {
+            loadDirectoryPage(target);
+        } else {
+            // 选中槽位后不再通知
+            folder->index = index;
+            folder->page = index / 40 * 40;
+            choose(folder->songs.at(index).toObject());
+        }
+    }
 }
 
 void MusicLibrary::selectDirectory(int index, QString mode, QString axis, int direction) {
@@ -219,6 +241,12 @@ void MusicLibrary::loadDirectoryPage(std::optional<int> selectAfter) {
             folder->cursor += ids.size();
             if (selectAfter && *selectAfter >= 0 && *selectAfter < folder->songs.size()) {
                 selectDirectory(*selectAfter);
+            } else if (selectAfter && *selectAfter >= folder->songs.size() &&
+                       folder->cursor < folder->ids.size()) {
+                // 大步滚动可能跨过多页，不能只补一页就丢弃待选目标。
+                loadDirectoryPage(selectAfter);
+            } else if (selectAfter && *selectAfter >= 0 && !folder->songs.isEmpty()) {
+                selectDirectory(*selectAfter % folder->songs.size());
             } else {
                 changed();
             }

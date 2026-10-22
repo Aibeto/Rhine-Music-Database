@@ -897,8 +897,8 @@ void MusicLibrary::playDirectory() {
     if (!directory && selectedLane != 1) {
         return;
     }
-    // 网易云已有完整 ID，其他渠道先按分页补齐喜欢列表再建立完整队列。
-    if (!directory && !isLocal() && hasMore[1] && (provider != "netease" || !likedIDs)) {
+    // 补全喜欢的歌曲后再播放
+    if (!directory && !isLocal() && hasMore[1]) {
         m_playLiked = true;
         loadMoreSource(1);
         return;

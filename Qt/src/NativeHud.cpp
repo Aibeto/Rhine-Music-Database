@@ -356,8 +356,9 @@ void NativeHud::archive(double width) {
             aligned("点击打开 · ENTER 键也可打开", x, 771, 14);
         }
         text("TRACK / SELECT", 60, 865, 11);
-        rollingText("music-number", MusicData::pad(music.libraryIndex() + 1), 60, 901.2, 58, "regular", 0,
-                    true);
+        const auto number = MusicData::pad(music.libraryIndex() + 1);
+        const auto numberSize = std::min(58.0, 58.0 * 77 / std::max(1.0, m_glyphs->width(number, 58)));
+        rollingText("music-number", number, 60, 901.2, numberSize, "regular", 0, true);
         text("/", 141, 925, 32, "light");
         text(QString::number(music.libraryTotal()), 172, 932, 22);
     } else {

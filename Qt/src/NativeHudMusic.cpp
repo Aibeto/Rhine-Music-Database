@@ -28,9 +28,13 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
     if (name == "slot") {
         const auto directory = music.directory;
         if (directory && !directory->songs.isEmpty()) {
-            music.selectDirectory(
-                wrap(directory->page + wrap(music.selectedLane * 8 + last - directory->anchor, 40),
-                     directory->songs.size()));
+            const auto index =
+                directory->page + wrap(music.selectedLane * 8 + last - directory->anchor, 40);
+            if (index >= directory->songs.size() && directory->cursor < directory->ids.size()) {
+                music.loadDirectoryPage(index);
+            } else {
+                music.selectDirectory(wrap(index, directory->songs.size()));
+            }
             return;
         }
         const auto count = music.libraryItems().size();
