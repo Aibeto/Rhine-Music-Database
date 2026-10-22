@@ -87,6 +87,10 @@ bool runNativeMusicChecks(const QString &root) {
         ok &= value;
     };
 
+    library.choose({});
+    check(library.current.isEmpty() && !library.detailLoading,
+          "empty selection does not acquire null fields or request metadata");
+
     // 异常对象验证白名单
     PlaybackDiagnostics privacy;
     const QString privateMarker("PRIVATE_DIAGNOSTIC_SENTINEL");

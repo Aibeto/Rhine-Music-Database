@@ -679,6 +679,24 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     check(hud.frame["mode"] == "archive", "song detail background click returns");
     music.directory.reset();
     player.current = {};
+    const auto previousLane = music.selectedLane;
+    const auto previousItem = music.current;
+    const auto searchSongs = music.lists[0];
+    music.lists[0] = {};
+    music.showSource(0);
+    backend.scene.setMode("archive");
+    refresh();
+    check(music.current.isEmpty(), "empty selection remains empty after archive rendering");
+    QKeyEvent searchEnter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+    QCoreApplication::sendEvent(window, &searchEnter);
+    refresh();
+    check(hud.modal == "search", "Enter opens search from empty search collection");
+    hud.closeModal();
+    refresh();
+    music.lists[0] = searchSongs;
+    music.showSource(previousLane);
+    music.choose(previousItem);
+    refresh();
     backend.scene.reduced(true);
     for (const auto &kind : {QString("album"), QString("playlist"), QString("artist")}) {
         hud.openModal("search");

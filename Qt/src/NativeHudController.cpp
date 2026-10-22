@@ -263,7 +263,7 @@ void NativeHud::playerAction(const QStringList &parts) {
         m_lyricsBrowse.reset();
     } else if (name == "lyrics-earlier" || name == "lyrics-later") {
         player.lyrics.adjustOffset(name == "lyrics-earlier" ? 200 : -200);
-    } else if (name == "lyrics-sources" && music.isLocal() && player.current["provider"] == "local") {
+    } else if (name == "lyrics-sources" && music.isLocal() && player.current.value("provider") == "local") {
         if (modal == "lyrics-source" && !closing) {
             closeModal();
         } else {
@@ -354,7 +354,7 @@ void NativeHud::action(QString value) {
         trackOffset = 0;
         bodyOffset = 0;
         tab = value.mid(4);
-        if (music.current["kind"] == "song" && tab != "overview") {
+        if (music.current.value("kind") == "song" && tab != "overview") {
             music.sameAlbum();
         }
         return;
@@ -459,8 +459,10 @@ void NativeHud::action(QString value) {
         return;
     }
     if (value == "open") {
-        if (!music.current.isEmpty()) {
-            if (music.current["kind"] != "song") {
+        if (music.current.isEmpty() && !music.directory && music.selectedLane == 0) {
+            openModal("search");
+        } else if (!music.current.isEmpty()) {
+            if (music.current.value("kind") != "song") {
                 music.enterDirectory(music.current);
             } else {
                 m_scene.mode("detail");
@@ -609,7 +611,7 @@ void NativeHud::key(QString value, bool command) {
 
 bool NativeHud::supportsTrackList() const {
     return modal.isEmpty() && frame["mode"] == "archive" && !frame["viewer"].toBool() && !lyricsMode &&
-           m_music->current["kind"] == "song";
+           m_music->current.value("kind") == "song";
 }
 
 bool NativeHud::animating(double time) const {

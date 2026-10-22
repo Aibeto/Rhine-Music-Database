@@ -54,14 +54,14 @@ void NativeHud::wheel(double x, double y, double delta, std::optional<int> steps
         }
         return;
     }
-    if (lyricsMode && music.current["kind"] == "song" && x >= width * 0.56 && y >= 360 && y < 889) {
+    if (lyricsMode && music.current.value("kind") == "song" && x >= width * 0.56 && y >= 360 && y < 889) {
         const auto lastTop = m_lyricsLayout.isEmpty() ? 0 : m_lyricsLayout.constLast().top;
         const auto movement = distance.value_or((-delta / 120) * 65);
         m_lyricsBrowse = std::clamp(m_lyricsBrowse.value_or(m_lyricsScroll) + movement, 0.0, lastTop);
         m_lyricsPlainOffset = std::max(0, m_lyricsPlainOffset + step);
         return;
     }
-    if (frame["mode"] == "detail" && music.current["kind"] != "song") {
+    if (frame["mode"] == "detail" && music.current.value("kind") != "song") {
         const auto layout = containerLayout(width);
         if (x < layout.x || x > layout.x + layout.width || y < layout.rowsY ||
             y > layout.rowsY + layout.rowCount * layout.rowHeight) {

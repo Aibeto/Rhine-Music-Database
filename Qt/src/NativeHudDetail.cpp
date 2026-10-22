@@ -203,10 +203,10 @@ void NativeHud::lyricsPanel(double x, double width) {
     auto &lyrics = player.lyrics;
     auto muted = ink();
     muted[3] = 0.45;
-    limited(player.current["title"].toString(), x, 278, 20, width - 85, "demibold");
-    limited(player.current["artist"].toString(), x, 310, 13, width - 85);
+    limited(player.current.value("title").toString(), x, 278, 20, width - 85, "demibold");
+    limited(player.current.value("artist").toString(), x, 310, 13, width - 85);
     button("关闭", x + width - 60, 278, 60, 40, "player:lyrics-close", 14);
-    if (m_music->isLocal() && player.current["provider"] == "local") {
+    if (m_music->isLocal() && player.current.value("provider") == "local") {
         button("歌词来源 ⌃", x + width - 267, 914, 130, 32, "player:lyrics-sources", 13);
     }
     constexpr double top = 360;

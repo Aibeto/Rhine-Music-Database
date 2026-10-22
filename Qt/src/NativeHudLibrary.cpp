@@ -157,7 +157,7 @@ void NativeHud::discoverPanel(double x, double y, double width) {
         }
         const auto next = categories.at((selected + 1) % categories.size()).toObject();
         const auto current = selected < 0 ? QJsonObject() : categories.at(selected).toObject();
-        button("分类：" + current["name"].toString("全部") + " →", left, y + 244, usable, 33,
+        button("分类：" + current.value("name").toString("全部") + " →", left, y + 244, usable, 33,
                "discover:category:" + QString::fromUtf8(QUrl::toPercentEncoding(next["id"].toString())), 12);
     }
     if (discover.tab == "guess") {
@@ -174,7 +174,7 @@ void NativeHud::discoverPanel(double x, double y, double width) {
         }
         const auto next = discover.newSongAreas[(selected + 1) % discover.newSongAreas.size()].toObject();
         const auto current = discover.newSongAreas[selected].toObject();
-        button("地区：" + current["name"].toString() + " →", left, y + 244, usable, 33,
+        button("地区：" + current.value("name").toString() + " →", left, y + 244, usable, 33,
                "discover:area:" + QString::number(next["id"].toInt()), 12);
     }
     rule(left, y + 286, usable, 0.5);

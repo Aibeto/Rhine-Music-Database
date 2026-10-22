@@ -152,7 +152,7 @@ NativeHud::Layout NativeHud::containerLayout(double width) const {
     return layout;
 }
 QRectF NativeHud::detailBounds(double width) const {
-    if (m_music->current["kind"] == "song") {
+    if (m_music->current.value("kind") == "song") {
         const auto left = width * 0.56 - 24;
         return {left, 260, width - left - 35, 696};
     }
@@ -205,7 +205,7 @@ void NativeHud::draw(QJsonObject next, double stageWidth, double time) {
     playerSeekRect.reset();
     playerVolumeRect.reset();
     if (!trackListMode || frame["mode"] != "archive" || frame["viewer"].toBool() ||
-        m_music->current["kind"] != "song") {
+        m_music->current.value("kind") != "song") {
         m_trackListCurve.reset();
         m_trackListScope.clear();
     }
@@ -470,7 +470,7 @@ void NativeHud::archiveTrackList(double x, double width) {
             }
             color = QJsonArray{color.at(0), color.at(1), color.at(2), 1};
         }
-        const auto name = index == selected ? m_music->current["title"].toString()
+        const auto name = index == selected ? m_music->current.value("title").toString()
                                             : values.at(index).toObject()["title"].toString();
         const auto shown = fit(name, titleSize, textWidth, "bold");
         const auto left = x - m_glyphs->inset(shown, titleSize, "bold");

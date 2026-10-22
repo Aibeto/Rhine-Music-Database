@@ -24,9 +24,9 @@ void MusicLibrary::refreshLocal() {
             const auto song = entry.toObject();
             indexed.insert(song["path"].toString(), song);
         }
-        if (current["kind"] == "song" && indexed.contains(current["path"].toString())) {
-            const auto replacement = indexed.value(current["path"].toString());
-            if (current["fingerprint"] != replacement["fingerprint"]) {
+        if (current.value("kind") == "song" && indexed.contains(current.value("path").toString())) {
+            const auto replacement = indexed.value(current.value("path").toString());
+            if (current.value("fingerprint") != replacement["fingerprint"]) {
                 ++m_selectionGeneration;
                 current = replacement;
                 coverImage.clear();
@@ -54,7 +54,8 @@ void MusicLibrary::refreshLocal() {
             directory->index = std::min(directory->index, std::max(0, int(directory->songs.size()) - 1));
             directory->item["trackCount"] = directory->songs.size();
         }
-        if (!current.isEmpty() && current["kind"] == "song" && !local->contains(current["path"].toString())) {
+        if (!current.isEmpty() && current.value("kind") == "song" &&
+            !local->contains(current.value("path").toString())) {
             choose({});
         }
     }

@@ -182,7 +182,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         music.playOfficial();
     } else if (name == "copy") {
         if (!music.current.isEmpty()) {
-            m_host->copy(music.current["id"].toString());
+            m_host->copy(music.current.value("id").toString());
             music.status = "已复制" + music.providerName() + " ID";
             music.changed();
         }

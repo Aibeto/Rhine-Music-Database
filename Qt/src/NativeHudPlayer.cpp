@@ -25,12 +25,12 @@ void NativeHud::playerBar(double, double y, double width) {
         op({"ellipse", ink(), coverX + 28, coverY + 28, 8, 8});
     }
     const auto infoWidth = std::max(120.0, center - 280 - 116);
-    auto title = player.failed ? player.status : player.current["title"].toString();
+    auto title = player.failed ? player.status : player.current.value("title").toString();
     if (title.isEmpty() && !player.failed) {
         title = "尚未播放";
     }
     centeredText(fit(title, 20, infoWidth, "demibold"), 116, y + 34, 20, "demibold");
-    auto artist = player.current["artist"].toString();
+    auto artist = player.current.value("artist").toString();
     if (artist.isEmpty()) {
         artist = "RHINE LAB / MUSIC DATABASE";
     }
@@ -99,12 +99,12 @@ void NativeHud::playerPanel(double x, double y, double width) {
     const auto left = x + 53;
     const auto usable = width - 106;
     rule(left, y + 216, usable);
-    auto title = player.current["title"].toString();
+    auto title = player.current.value("title").toString();
     if (title.isEmpty()) {
         title = "选择歌曲开始播放";
     }
     limited(title, left, y + 240, 25, usable, "bold");
-    limited(player.current["artist"].toString(), left, y + 278, 15, usable);
+    limited(player.current.value("artist").toString(), left, y + 278, 15, usable);
     text("QUEUE / " + QString::number(player.queue.size()) + " 首", left, y + 326, 15);
     button("清空待播", left + usable - 140, y + 311, 140, 44, "player:clear", 16);
     queueOffset = std::min(queueOffset, std::max(0, int(player.queue.size()) - 7));

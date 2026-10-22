@@ -54,12 +54,12 @@ MusicLibrary::MusicLibrary(Host *host, const QJsonObject &content, QObject *pare
     discover = std::make_unique<MusicDiscover>(this);
     // 播放进度与歌词通知只刷新可见播放界面，不作废资源库场景。
     connect(&player, &MusicPlayer::changed, this, [this] {
-        if (isLocal() && current["key"] == player.current["key"] &&
-            current["fingerprint"] == player.current["fingerprint"] && !player.coverImage.isEmpty() &&
-            coverImage != player.coverImage) {
+        if (isLocal() && current.value("key") == player.current.value("key") &&
+            current.value("fingerprint") == player.current.value("fingerprint") &&
+            !player.coverImage.isEmpty() && coverImage != player.coverImage) {
             coverImage = player.coverImage;
-            coverKey = current["key"].toString();
-            current["cover"] = player.current["cover"];
+            coverKey = current.value("key").toString();
+            current["cover"] = player.current.value("cover");
             details[coverKey] = current;
             changed();
         }
@@ -237,10 +237,10 @@ void MusicLibrary::choose(QJsonObject input, bool containerDetails, std::optiona
     trackCursor = 0;
     trackLoad = false;
     current = input;
-    emit musicIdentityRequested(input["key"].toString());
+    emit musicIdentityRequested(input.value("key").toString());
     tracks = {};
     trackIDs = {};
-    if (coverKey != input["key"].toString()) {
+    if (coverKey != input.value("key").toString()) {
         coverImage.clear();
         coverKey.clear();
     }
@@ -249,25 +249,25 @@ void MusicLibrary::choose(QJsonObject input, bool containerDetails, std::optiona
     if (input.isEmpty()) {
         return;
     }
-    current = details.value(input["key"].toString(), input);
+    current = details.value(input.value("key").toString(), input);
     loadCover(current);
     if (isLocal()) {
         detailLoading = false;
-        details[input["key"].toString()] = current;
+        details[input.value("key").toString()] = current;
         changed();
         return;
     }
     loadSubscriptionStatus(current);
     detailLoading = true;
-    if (input["kind"] != "song" && !containerDetails) {
+    if (input.value("kind") != "song" && !containerDetails) {
         detailLoading = false;
         changed();
         return;
     }
-    if (input["kind"] == "song" && current["duration"].toDouble() > 0 &&
-        !current["albumID"].toString().isEmpty() &&
-        (!current["cover"].toString().isEmpty() || details.contains(input["key"].toString()))) {
-        details[input["key"].toString()] = current;
+    if (input.value("kind") == "song" && current.value("duration").toDouble() > 0 &&
+        !current.value("albumID").toString().isEmpty() &&
+        (!current.value("cover").toString().isEmpty() || details.contains(input.value("key").toString()))) {
+        details[input.value("key").toString()] = current;
         detailLoading = false;
         if (wantsSongDetails) {
             loadSongWiki();
@@ -295,15 +295,15 @@ void MusicLibrary::choose(QJsonObject input, bool containerDetails, std::optiona
                 if (value["kind"] == "song") {
                     value["description"] = current.value("description").isUndefined()
                                                ? value["description"]
-                                               : current["description"];
-                    value["wiki"] = current["wiki"].toString();
+                                               : current.value("description");
+                    value["wiki"] = current.value("wiki").toString();
                 }
-                if (!current["date"].toString().isEmpty()) {
-                    value["date"] = current["date"];
+                if (!current.value("date").toString().isEmpty()) {
+                    value["date"] = current.value("date");
                 }
-                details[input["key"].toString()] = value;
+                details[input.value("key").toString()] = value;
                 for (qsizetype i = 0; i < lists[0].size(); ++i) {
-                    if (lists[0].at(i).toObject()["key"] == input["key"]) {
+                    if (lists[0].at(i).toObject()["key"] == input.value("key")) {
                         lists[0].replace(i, value);
                         break;
                     }
@@ -328,7 +328,7 @@ void MusicLibrary::choose(QJsonObject input, bool containerDetails, std::optiona
                             current["wiki"] = wiki.ok() ? wiki.value.toString()
                                                         : QStringLiteral("百科暂时无法读取：") + wiki.error;
                             if (wiki.ok()) {
-                                details[input["key"].toString()] = current;
+                                details[input.value("key").toString()] = current;
                             }
                             changed();
                         },
@@ -563,7 +563,7 @@ void MusicLibrary::selectResult(int index, int lane, bool open) {
     emit modeRequested(mode);
     frame["mode"] = mode;
     observe(physical);
-    if (open && current["kind"] != "song") {
+    if (open && current.value("kind") != "song") {
         enterDirectory(current);
     }
 }
@@ -790,7 +790,7 @@ void MusicLibrary::loadTrackPage(int start) {
 
 void MusicLibrary::sameAlbum() {
     if (isLocal()) {
-        tracks = local->tracks({{"kind", "album"}, {"id", current["albumID"]}});
+        tracks = local->tracks({{"kind", "album"}, {"id", current.value("albumID")}});
         albumLoaded = true;
         changed();
         return;
@@ -848,7 +848,7 @@ void MusicLibrary::loadSongWiki() {
 }
 
 void MusicLibrary::play() {
-    if (current["kind"] != "song") {
+    if (current.value("kind") != "song") {
         status = QStringLiteral("请先选择一首歌曲");
         changed();
         return;

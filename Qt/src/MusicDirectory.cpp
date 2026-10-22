@@ -114,7 +114,7 @@ void MusicLibrary::loadArtistAlbums() {
 
 void MusicLibrary::openSongArtist(int index) {
     if (isLocal()) {
-        const auto artist = current["artists"].toArray().at(index).toObject();
+        const auto artist = current.value("artists").toArray().at(index).toObject();
         enterDirectory({{"provider", "local"},
                         {"kind", "artist"},
                         {"id", artist["id"]},
@@ -122,7 +122,7 @@ void MusicLibrary::openSongArtist(int index) {
                         {"title", artist["name"]}});
         return;
     }
-    const auto artists = current["artists"].toArray();
+    const auto artists = current.value("artists").toArray();
     const auto artist = artists.at(index).toObject();
     static const QRegularExpression identifier(QStringLiteral("^[a-zA-Z0-9_-]{1,80}$"));
     if (!artist.isEmpty() && identifier.match(artist["id"].toString()).hasMatch()) {
@@ -293,7 +293,7 @@ void MusicLibrary::leaveDirectory(bool restore) {
             return;
         }
         if (!current.isEmpty()) {
-            emit musicIdentityRequested(current["key"].toString());
+            emit musicIdentityRequested(current.value("key").toString());
             loadCover(current);
         }
     }
@@ -303,7 +303,7 @@ void MusicLibrary::leaveDirectory(bool restore) {
 
 /** 切歌沿用原物理选中与取出顺序，队列外曲目建立可返回的播放队列目录。 */
 void MusicLibrary::followPlayback(QJsonObject value) {
-    if (current["key"] == value["key"] && current["id"] == value["id"]) {
+    if (current.value("key") == value["key"] && current.value("id") == value["id"]) {
         return;
     }
     const auto previous = current;

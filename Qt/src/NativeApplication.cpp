@@ -38,7 +38,8 @@ void NativeApplication::initialize() {
     music.restoreIdentityName();
 }
 QJsonObject NativeApplication::step(double time, double width, bool reuseScene) {
-    const auto viewChanged = m_scene->setTrackListView(hud.trackListMode && music.current["kind"] == "song");
+    const auto viewChanged =
+        m_scene->setTrackListView(hud.trackListMode && music.current.value("kind") == "song");
     const auto frame = reuseScene && !viewChanged ? music.frame : m_scene->sample(time);
     if (frame.isEmpty()) {
         return {};
@@ -103,14 +104,14 @@ void NativeApplication::pointer(QString type, double x, double y) {
         if (isClick && !hud.frame["viewer"].toBool() && hud.frame["mode"] == "detail") {
             const auto bounds = hud.detailBounds(hud.width);
             const bool isInspectingSong =
-                music.current["kind"] == "song" && picked && m_scene->isSelectedCell(*picked);
+                music.current.value("kind") == "song" && picked && m_scene->isSelectedCell(*picked);
             // 详情卡片外的完整点击复用返回路径；封面检查和拖动继续交给场景。
             if (!bounds.contains(m_down) && !bounds.contains(x, y) && !isInspectingSong) {
                 hud.action("back");
             }
         } else if (isClick && hud.frame["mode"] == "archive" && picked) {
             music.observe(m_scene->selection());
-            if (!music.current.isEmpty() && music.current["kind"] != "song") {
+            if (!music.current.isEmpty() && music.current.value("kind") != "song") {
                 music.enterDirectory(music.current);
             }
         }
