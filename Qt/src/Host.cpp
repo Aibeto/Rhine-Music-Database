@@ -350,7 +350,8 @@ void Host::send(QString key) {
         env.insert("RHINE_KUGOU_DEVICE_STATE_PATH", AppStorage::dataDirectory() + "/kugou-device.json");
         env.insert("RHINE_KUGOU_EDITION", kugouEdition);
         child.setProcessEnvironment(env);
-        child.setWorkingDirectory(root + "/MusicBridge");
+        // 子进程的工作目录改到应用自己的系统临时目录
+        child.setWorkingDirectory(temporary->path());
         child.setStandardErrorFile(QProcess::nullDevice());
         // 平台选择放在宏调用外，避免 MSVC 将条件编译指令当作宏参数。
 #ifdef Q_OS_WIN
