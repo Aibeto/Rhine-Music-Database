@@ -147,6 +147,8 @@ class Engine : public QObject {
     double m_wheelDelta = 0;
     double m_wheelSteps = 0;
     double m_wheelDistance = 0;
+    // 鼠标滚轮一格的距离，按帧衰减送入，触控板不经过这里。
+    double m_wheelRemainingDistance = 0;
     qint64 m_lastTick = 0, m_lastInput = 0;
     double m_animationTime = 0;
     double m_discAngle = 0;

@@ -49,6 +49,12 @@ bool Engine::ready() const {
     return scene.ready();
 }
 namespace {
+// 鼠标滚轮一格的距离按设置页与歌词的行高换算，约一行内容；触控板保留系统给出的连续像素距离。
+constexpr double WHEEL_DISTANCE_PER_NOTCH = 80;
+// 鼠标滚轮的离散事件按帧衰减送出，约 0.1 秒内收束，避免整格内容瞬间跳变。
+constexpr double WHEEL_SMOOTHING = 0.5;
+// 尾段直接送出，避免浮点衰减无限拖延最后一次画面更新。
+constexpr double WHEEL_DISTANCE_TAIL = 6;
 // 只有低于实际显示精度的浮点尾差才可视为收束，时间和诊断计数不参与画面失效。
 bool equivalent(const QJsonValue &a, const QJsonValue &b) {
     if (a.type() != b.type()) {
@@ -206,6 +212,7 @@ void Engine::setVisible(bool value) {
         m_pressed = m_wheelPending = false;
         m_wheelDelta = m_wheelSteps = 0;
         m_wheelDistance = 0;
+        m_wheelRemainingDistance = 0;
         timer.stop();
         m_sleeping = true;
     } else {
@@ -276,6 +283,15 @@ void Engine::tick() {
     m_animationTime += qMin<qint64>(now - m_lastTick, 50) / 1000.;
     m_lastTick = now;
     flushPointer();
+    // 鼠标滚轮一格的连续距离按帧衰减送出；列表行数仍按格立即推进。
+    if (m_wheelRemainingDistance != 0) {
+        const auto portion = std::abs(m_wheelRemainingDistance) < WHEEL_DISTANCE_TAIL
+                                 ? m_wheelRemainingDistance
+                                 : m_wheelRemainingDistance * WHEEL_SMOOTHING;
+        m_wheelDistance += portion;
+        m_wheelRemainingDistance -= portion;
+        m_wheelPending = true;
+    }
     if (m_wheelPending) {
         const int steps = int(m_wheelSteps);
         app->hud.wheel(m_wheelX, m_wheelY, m_wheelDelta, steps, m_wheelDistance);
@@ -447,9 +463,20 @@ void Engine::wheel(double x, double y, double delta, bool pixels) {
     m_wheelX = x;
     m_wheelY = y;
     m_wheelDelta += delta;
-    m_wheelSteps += pixels ? -delta / 15. : (delta < 0 ? 1 : -1);
-    // 单独保留连续舞台位移，避免触控板不足一行的输入被整数行索引吞掉。
-    m_wheelDistance += pixels ? -delta / (m_height / 1080.) : -delta / 120. * 65;
+    if (pixels) {
+        m_wheelSteps += -delta / 15.;
+        // 单独保留连续舞台位移，避免触控板不足一行的输入被整数行索引吞掉。
+        m_wheelDistance += -delta / (m_height / 1080.);
+    } else {
+        // 列表按格立即推进一行，只有设置页和歌词需要平滑的连续距离。
+        m_wheelSteps += delta < 0 ? 1 : -1;
+        const auto distance = -delta / 15. * WHEEL_DISTANCE_PER_NOTCH;
+        if (app->hud.reduced) {
+            m_wheelDistance += distance;
+        } else {
+            m_wheelRemainingDistance += distance;
+        }
+    }
     m_wheelPending = true;
     wake();
 }

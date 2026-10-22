@@ -236,6 +236,14 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                 ok = false;
             }
 
+            // 平滑滚轮的后续帧只补送距离，不再带有角度增量，仍需继续滚动。
+            hud.wheel(bounds.center().x(), bounds.top() + 500, 0, 0, 75.);
+            if (hud.settingsScroll != 75.) {
+                qCritical() << "Settings smoothed wheel frame failed" << provider
+                            << (dark ? "dark" : "light") << "scroll:" << hud.settingsScroll;
+                ok = false;
+            }
+
             // 测试滚动按钮
             hud.action("settings:scroll-down");
             const bool scrolledDown = hud.settingsScroll > 0;
