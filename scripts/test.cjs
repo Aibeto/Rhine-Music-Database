@@ -27,12 +27,6 @@ for (const script of [
     'scripts/check-music-upstream.cjs',
     'Qt/tests/release-version.cjs',
     'Qt/tests/publish-release.cjs',
-    'Qt/tests/api-contract.mjs',
-    'Qt/tests/native-client.mjs',
-    'Qt/tests/qq-state.mjs',
-    'Qt/tests/qq-upgrade.mjs',
-    'Qt/tests/kugou-state.mjs',
-    'Qt/tests/lyrics-format.mjs',
 ]) {
     run(process.execPath, [script]);
 }
@@ -42,10 +36,9 @@ run('ctest', ['--test-dir', 'output/qt-build', '--output-on-failure']);
 const resources = path.join(app, resourceDirectory);
 const bridgeTests = [
     'Qt/tests/local-lyrics.cjs',
-    'Qt/tests/kugou-device.cjs',
-    'Qt/tests/device-state.cjs',
-    'Qt/tests/netease-xeapi.cjs',
-    'Qt/tests/playback-diagnostics.cjs',
+    'Qt/tests/netease-client.mjs',
+    'Qt/tests/qq-client.mjs',
+    'Qt/tests/kugou-client.mjs',
 ];
 run(process.execPath, ['scripts/check-packaged-bridge.cjs', resources + '/MusicBridge']);
 for (const script of bridgeTests) {

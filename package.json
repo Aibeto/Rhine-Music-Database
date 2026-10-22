@@ -8,6 +8,7 @@
         "build": "node scripts/build.cjs",
         "package:cmake": "node scripts/build.cjs --cmake-package",
         "test": "node scripts/test.cjs",
+        "test:visual": "node scripts/test-visual.cjs",
         "share": "node scripts/share.cjs",
         "format": "node scripts/format.cjs",
         "preview": "node scripts/preview-qt.cjs",
