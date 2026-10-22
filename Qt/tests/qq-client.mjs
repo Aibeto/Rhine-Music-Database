@@ -30,6 +30,15 @@ const song = {
     file: { media_mid: 'mediaMID' },
     interval: 123,
 };
+// 新专辑接口
+const album = {
+    id: 105084474,
+    mid: 'newAlbumMID',
+    name: '解答',
+    singers: [{ mid: 'singerMID', name: '文夫' }],
+    release_time: '2026-10-22',
+    data: { int0: 0, str0: '' },
+};
 
 // 平台客户端的读取默认响应；测试按需覆盖，未覆盖的路由会直接失败。
 const readRoutes = {
@@ -72,6 +81,12 @@ const readRoutes = {
     },
     '/qq/user/guess-you-like': { songs: [song] },
     '/qq/recommend/new-songs': { songs: [song] },
+    '/qq/getRecommend': {
+        response: {
+            code: 0,
+            new_album: { code: 0, data: { albums: [album] } },
+        },
+    },
 };
 
 function createQQClient(overrides = {}) {
@@ -135,6 +150,9 @@ test('账号、歌单、喜欢列表与发现结果归一化', async () => {
     for (const tab of ['daily', 'guess', 'new-songs']) {
         assert.equal((await client.discover(tab)).items[0].id, 'songMID');
     }
+    const albums = await client.discover('albums');
+    assert.equal(albums.items.length, 1);
+    assert.equal(albums.items[0].title, '解答');
     assert.equal((await client.discover('categories', 30, '8')).more, true);
     assert.deepEqual(lastCall('/qq/recommend/category-playlists').params, { id: '8', page: 2, limit: 30 });
     assert.equal((await client.discover('playlists')).more, false);

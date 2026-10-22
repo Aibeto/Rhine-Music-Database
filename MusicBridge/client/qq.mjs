@@ -10,8 +10,25 @@ function unconfirmedWrite(message) {
 }
 const art = (mid) =>
     mid ? 'https://y.gtimg.cn/music/photo_new/T002R500x500M000' + encodeURIComponent(mid) + '.jpg' : '';
+// 部分接口把条目包在 songInfo、musicData 或 data 外层，只在外层对象确实含条目标识时拆包。
+const itemIdentityKeys = [
+    'mid',
+    'songmid',
+    'albumMid',
+    'albumMID',
+    'albummid',
+    'album_mid',
+    'tid',
+    'dissid',
+    'disstid',
+    'topId',
+    'singermid',
+    'id',
+];
+const hasItemIdentity = (value) => Boolean(value) && itemIdentityKeys.some((key) => value[key] !== undefined);
 export function qqItem(raw, kind = 'song') {
-    const d = raw.songInfo || raw.musicData || raw.data || raw;
+    const wrapped = [raw.songInfo, raw.musicData, raw.data].find((value) => hasItemIdentity(value));
+    const d = wrapped || raw;
     const album = d.album || {};
     const singers = array(d.singer || d.singers);
     // 保持原有判断顺序，仅计算当前需要的分支结果。
