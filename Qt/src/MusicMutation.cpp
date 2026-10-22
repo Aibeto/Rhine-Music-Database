@@ -54,7 +54,8 @@ bool MusicLibrary::canEditPlaylist(const QJsonObject &value) const {
 /** 按当前账号与选中条目读取三态收藏信息。 */
 void MusicLibrary::loadSubscriptionStatus(const QJsonObject &value) {
     const auto kind = value["kind"].toString();
-    if (provider != "qq" || uid.isEmpty() || !QStringList{"song", "album", "playlist"}.contains(kind)) {
+    if (provider != "qq" || uid.isEmpty() || value["virtual"].toBool() ||
+        !QStringList{"song", "album", "playlist"}.contains(kind)) {
         return;
     }
     const auto key = value["key"].toString();

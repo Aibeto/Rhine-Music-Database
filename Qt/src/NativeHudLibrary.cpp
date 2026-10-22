@@ -148,6 +148,38 @@ void NativeHud::discoverPanel(double x, double y, double width) {
         for (const auto &category : discover.categories) {
             categories.append(category);
         }
+        if (categoryPicker) {
+            constexpr int columns = 5;
+            const auto pages =
+                std::max(1, (int(categories.size()) + CategoryPageSize - 1) / CategoryPageSize);
+            categoryPage = std::clamp(categoryPage, 0, pages - 1);
+            text("选择歌单分类", left, y + 244, 15);
+            button("← 返回列表", x + width - 220, y + 244, 167, 33, "discover:categories", 12);
+            constexpr double gap = 8;
+            const auto cellWidth = (usable - gap * (columns - 1)) / columns;
+            const auto top = y + 286;
+            for (int index = 0; index < CategoryPageSize; ++index) {
+                const auto at = categoryPage * CategoryPageSize + index;
+                if (at >= categories.size()) {
+                    break;
+                }
+                const auto category = categories.at(at).toObject();
+                const auto id = category["id"].toString();
+                const auto row = index / columns;
+                const auto column = index % columns;
+                const auto label = (id == discover.category ? "✓ " : "") + category["name"].toString();
+                button(label, left + column * (cellWidth + gap), top + row * 44, cellWidth, 38,
+                       "discover:category:" + QString::fromUtf8(QUrl::toPercentEncoding(id)), 12);
+            }
+            if (categories.size() <= 1) {
+                limited("正在读取分类…", left, top + 46, 14, usable);
+            }
+            limited(QString::number(categoryPage + 1) + " / " + QString::number(pages), left, y + 706, 12,
+                    usable - 350);
+            button("↑ 上一页", x + width - 340, y + 748, 95, 32, "discover:category-page:prev", 12);
+            button("下一页 ↓", x + width - 225, y + 748, 95, 32, "discover:category-page:next", 12);
+            return;
+        }
         int selected = -1;
         for (int index = 0; index < categories.size(); ++index) {
             if (categories.at(index).toObject()["id"] == discover.category) {
@@ -155,27 +187,27 @@ void NativeHud::discoverPanel(double x, double y, double width) {
                 break;
             }
         }
-        const auto next = categories.at((selected + 1) % categories.size()).toObject();
         const auto current = selected < 0 ? QJsonObject() : categories.at(selected).toObject();
         button("分类：" + current.value("name").toString("全部") + " →", left, y + 244, usable, 33,
-               "discover:category:" + QString::fromUtf8(QUrl::toPercentEncoding(next["id"].toString())), 12);
+               "discover:categories", 12);
     }
     if (discover.tab == "guess") {
         button("换一批推荐", left, y + 244, 170, 33, "discover:tab:guess", 12);
     }
+    if (discover.tab == "daily") {
+        button("在资料库打开", left, y + 244, 170, 33, "discover:open", 12);
+    }
     if (discover.tab == "new-songs" && !discover.newSongAreas.isEmpty()) {
-        int selected = 0;
-        for (int index = 0; index < discover.newSongAreas.size(); ++index) {
-            if (QString::number(discover.newSongAreas[index].toObject()["id"].toInt()) ==
-                discover.newSongArea) {
-                selected = index;
-                break;
+        const auto count = int(discover.newSongAreas.size());
+        for (int index = 0; index < count; ++index) {
+            const auto area = discover.newSongAreas.at(index).toObject();
+            const auto id = QString::number(area["id"].toInt());
+            const auto xx = left + index * usable / count;
+            button(area["name"].toString(), xx, y + 244, usable / count - 4, 33, "discover:area:" + id, 12);
+            if (id == discover.newSongArea) {
+                rule(xx, y + 281, usable / count - 15, 1);
             }
         }
-        const auto next = discover.newSongAreas[(selected + 1) % discover.newSongAreas.size()].toObject();
-        const auto current = discover.newSongAreas[selected].toObject();
-        button("地区：" + current.value("name").toString() + " →", left, y + 244, usable, 33,
-               "discover:area:" + QString::number(next["id"].toInt()), 12);
     }
     rule(left, y + 286, usable, 0.5);
     listOffset = std::min(listOffset, std::max(0, int(discover.items.size()) - 6));

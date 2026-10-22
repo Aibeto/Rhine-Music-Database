@@ -365,7 +365,11 @@ void NativeHud::container(double width, double opacity) {
     limited(item["artist"].toString(), sx, coverSize + 410, 14, sideWidth);
     const QHash<QString, QString> prefixes{
         {"qq", "QQ MID / "}, {"kugou", "KUGOU ID / "}, {"netease", "NETEASE ID / "}};
-    text(prefixes.value(music.provider) + item["id"].toString(), sx, coverSize + 449, 11);
+    if (item["virtual"].toBool()) {
+        text(music.providerName() + " / " + item["title"].toString(), sx, coverSize + 449, 11);
+    } else {
+        text(prefixes.value(music.provider) + item["id"].toString(), sx, coverSize + 449, 11);
+    }
     const auto ids = music.directory ? music.directory->ids.size() : 0;
     text(QString::number(std::max({item["trackCount"].toInt(), int(ids), int(songs.size())})) +
              " TRACKS / 曲目",
@@ -383,7 +387,7 @@ void NativeHud::container(double width, double opacity) {
     }
     const auto subscribeRoute =
         item["kind"] == "playlist" ? "/playlist/subscribe" : "/" + item["kind"].toString() + "/sub";
-    if (music.canMutate(subscribeRoute)) {
+    if (!item["virtual"].toBool() && music.canMutate(subscribeRoute)) {
         QString label = "收藏 / 取消";
         if (music.provider == "qq") {
             const auto state = music.subscriptionStates.value(item["key"].toString(), "unknown");
@@ -396,7 +400,7 @@ void NativeHud::container(double width, double opacity) {
         }
         button(label, sx, 913, sideWidth / 2, 32, "music:subscribe", 12);
     }
-    if (!music.isLocal()) {
+    if (!music.isLocal() && !item["virtual"].toBool()) {
         button(music.providerName() + " ↗", sx + sideWidth / 2, 913, sideWidth / 2, 32, "music:source", 12);
     }
     limited(item["title"].toString(), x, 279, 30, usable - 155, "bold");

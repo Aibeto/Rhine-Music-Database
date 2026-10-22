@@ -1,5 +1,6 @@
 #include "MusicLibrary.h"
 #include "MusicData.h"
+#include "MusicDiscover.h"
 #include <QRegularExpression>
 #include <algorithm>
 #include <cmath>
@@ -85,6 +86,73 @@ void MusicLibrary::enterDirectory(QJsonObject value) {
             }
         },
         valid(token, &m_directoryGeneration));
+}
+
+/**
+ * 在资料库发现页的每日推荐
+ */
+bool MusicLibrary::openDaily() {
+    if (!discover) {
+        return false;
+    }
+    QJsonArray songs;
+    for (const auto &value : discover->items) {
+        if (value.toObject()["kind"] == "song") {
+            songs.append(value);
+        }
+    }
+    if (songs.isEmpty()) {
+        status = QStringLiteral("每日推荐暂无可打开的歌曲");
+        changed();
+        return false;
+    }
+    ++m_directoryGeneration;
+    ++m_selectionGeneration;
+    ++m_wikiGeneration;
+    const auto physical = selectedPhysical >= 0
+                              ? selectedPhysical
+                              : frame["selected"].toInt(physicalSlots[selectedLane].value(0, -1));
+    auto next = std::make_shared<MusicDirectory>();
+    next->parent = directory;
+    next->item = QJsonObject{
+        {"provider", provider},
+        {"kind", "playlist"},
+        {"virtual", true},
+        {"id", "daily"},
+        {"key", provider + ":playlist:daily"},
+        {"title", provider == "qq" ? QStringLiteral("每日 30 首") : QStringLiteral("每日推荐")},
+        {"artist", providerName()},
+        {"cover", songs.first().toObject()["cover"].toString()},
+        {"description", QStringLiteral("来自发现音乐的每日推荐，打开后不会同步到账号歌单。")},
+        {"trackCount", int(songs.size())},
+    };
+    next->songs = songs;
+    for (const auto &value : songs) {
+        next->ids.append(value.toObject()["id"]);
+    }
+    next->cursor = next->ids.size();
+    next->parentPhysical = physical;
+    next->parentLane = selectedLane;
+    next->parentItem = current;
+    directory = next;
+    directoryInfo = false;
+    directoryLoading = false;
+    wantsSongDetails = false;
+    current = {};
+    tracks = {};
+    trackIDs = {};
+    coverImage.clear();
+    coverKey.clear();
+    detailLoading = false;
+    emit modeRequested("archive");
+    emit navigationRequested("lane", 1);
+    const auto destination = (selectedLane + 1) % 5;
+    next->anchor = destination * 8 + rowMemory[destination];
+    selectedPhysical = -1;
+    status = QStringLiteral("已打开：") + next->item["title"].toString();
+    next->index = 0;
+    choose(next->songs.first().toObject());
+    return true;
 }
 
 void MusicLibrary::loadArtistAlbums() {

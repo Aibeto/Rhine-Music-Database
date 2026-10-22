@@ -95,6 +95,7 @@ class MusicLibrary : public QObject {
     void playlistForm(QString kind, QString name, QString id = {}, Completion done = {});
     void playlistTrack(QString id, QJsonObject value = {}, bool remove = false, Completion done = {});
     void enterDirectory(QJsonObject value);
+    bool openDaily();
     void loadArtistAlbums();
     void openSongArtist(int index = 0);
     void observeDirectory(int physical);

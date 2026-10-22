@@ -70,6 +70,9 @@ class NativeHud : public QObject {
     QString groupBy = "none";
     QString activeGroup;
     QString artistTab = "songs";
+    bool categoryPicker = false;
+    int categoryPage = 0;
+    static constexpr int CategoryPageSize = 40;
     QString themeMode;
     int listOffset = 0;
     int musicCollection = 1;

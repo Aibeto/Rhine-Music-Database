@@ -60,6 +60,8 @@ void NativeHud::openModal(QString kind) {
     settingsScroll = 0;
     activeGroup.clear();
     artistTab = "songs";
+    categoryPicker = false;
+    categoryPage = 0;
     if (kind == "saved") {
         musicCollection = std::max(1, m_music->selectedLane);
         if (m_music->provider == "kugou" && musicCollection == 4) {
@@ -432,6 +434,8 @@ void NativeHud::action(QString value) {
         const auto name = parts.value(1);
         if (name == "tab") {
             listOffset = 0;
+            categoryPicker = false;
+            categoryPage = 0;
             discover.load(parts.value(2));
             if (parts.value(2) == "categories" && discover.categories.isEmpty()) {
                 discover.loadCategories();
@@ -439,12 +443,28 @@ void NativeHud::action(QString value) {
         } else if (name == "item") {
             discover.open(parts.value(2).toInt());
             closeModal();
+        } else if (name == "open") {
+            if (music.openDaily()) {
+                closeModal();
+            }
         } else if (name == "area" && music.provider == "qq") {
             listOffset = 0;
             discover.newSongArea = parts.value(2);
             discover.load("new-songs");
+        } else if (name == "categories") {
+            categoryPicker = !categoryPicker;
+            categoryPage = 0;
+            if (categoryPicker && discover.categories.size() <= 1) {
+                discover.loadCategories();
+            }
+        } else if (name == "category-page") {
+            const auto pages =
+                std::max(1, (int(discover.categories.size()) + CategoryPageSize - 1) / CategoryPageSize);
+            const auto step = parts.value(2) == "prev" ? -1 : 1;
+            categoryPage = std::clamp(categoryPage + step, 0, pages - 1);
         } else if (name == "category") {
             listOffset = 0;
+            categoryPicker = false;
             discover.category = decode(parts.value(2));
             discover.load("categories");
         } else if (name == "more") {

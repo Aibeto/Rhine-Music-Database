@@ -40,17 +40,6 @@ QJsonObject getHit(const QJsonArray &hits, const QString &action) {
     return QJsonObject();
 }
 
-// 辅助函数：统计指定类型的 hits 数量
-int countHitsByPrefix(const QJsonArray &hits, const QString &prefix) {
-    int count = 0;
-    for (const auto &value : hits) {
-        if (value.toObject()["action"].toString().startsWith(prefix)) {
-            ++count;
-        }
-    }
-    return count;
-}
-
 // 创建测试用的 MusicLibrary
 MusicLibrary *createTestMusicLibrary(Host *host, const QString &provider, const QJsonObject &content) {
     MusicLibrary *music = new MusicLibrary(host, content);
@@ -285,6 +274,44 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                                 << (dark ? "dark" : "light");
                     ok = false;
                 }
+            }
+
+            // === 测试 7: 每日推荐资料库入口 ===
+            music->discover->tab = "daily";
+            hud.openModal("discover");
+            hud.draw(archiveFrame, 1920, 50);
+            if (!hasAction(hud.hits, "discover:open")) {
+                qCritical() << provider << "daily discover missing library button"
+                            << (dark ? "dark" : "light");
+                ok = false;
+            }
+            hud.action("discover:open");
+            if (!music->directory || music->directory->songs.size() != music->discover->items.size()) {
+                qCritical() << provider << "daily discover did not open as playlist directory"
+                            << (dark ? "dark" : "light");
+                ok = false;
+            }
+            music->leaveDirectory(false);
+
+            // === 测试 8: 分类歌单列表选择 ===
+            music->discover->tab = "categories";
+            music->discover->category = "1";
+            music->discover->categories = QJsonArray{
+                QJsonObject{{"id", "1"}, {"name", "甲"}},
+                QJsonObject{{"id", "2"}, {"name", "乙"}},
+            };
+            hud.openModal("discover");
+            hud.draw(archiveFrame, 1920, 50);
+            if (!hasAction(hud.hits, "discover:categories")) {
+                qCritical() << provider << "category selector missing" << (dark ? "dark" : "light");
+                ok = false;
+            }
+            hud.action("discover:categories");
+            hud.draw(archiveFrame, 1920, 50);
+            if (!hasAction(hud.hits, "discover:category:1") ||
+                !hasAction(hud.hits, "discover:category:2")) {
+                qCritical() << provider << "category list missing choices" << (dark ? "dark" : "light");
+                ok = false;
             }
 
             delete music;
