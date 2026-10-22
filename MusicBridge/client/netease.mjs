@@ -291,21 +291,29 @@ export class API {
     }
 
     async likedIDs(uid, valid = () => true) {
-        return (
-            (
-                await this.request(
-                    '/likelist',
-                    {
-                        uid,
-                        timestamp: Date.now(),
-                    },
-                    [200],
-                    valid,
-                )
-            ).ids || []
-        )
-            .filter((x) => typeof x === 'number')
-            .map(String);
+        const response = await this.request(
+            '/user/playlist',
+            {
+                uid,
+                limit: 2000,
+                timestamp: Date.now(),
+            },
+            [200],
+            valid,
+        );
+        const playlist = (response.playlist || []).find(
+            (entry) => entry.specialType === 5 && String(entry.creator?.userId) === String(uid),
+        );
+        if (!playlist) {
+            throw new Error('未找到喜欢的歌曲歌单，请刷新个人音乐');
+        }
+        const detail = await this.request('/playlist/detail', { id: playlist.id }, [200], valid);
+        if (!Array.isArray(detail.playlist?.trackIds)) {
+            throw new Error('喜欢的歌曲顺序暂时无法读取，请重试');
+        }
+        return detail.playlist.trackIds
+            .filter((entry) => typeof entry.id === 'number')
+            .map((entry) => String(entry.id));
     }
 
     async likedAlbums(offset = 0, valid = () => true) {
