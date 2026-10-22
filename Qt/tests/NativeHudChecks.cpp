@@ -133,6 +133,11 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs, const QString &fixt
                 auto revisedCommands = expected["commands"].toArray();
                 for (int index = 0; index < revisedCommands.size(); ++index) {
                     auto command = revisedCommands.at(index).toArray();
+                    // 检索移至最后一栏，冻结夹具仍使用逻辑检索栏。
+                    if (command.at(0) == "text" && command.at(1).toString().startsWith("COLLECTION 01")) {
+                        command[1] = provider == "kugou" ? "COLLECTION 04 / 04" : "COLLECTION 05 / 05";
+                        revisedCommands[index] = command;
+                    }
                     if (command.at(0) == "text" && command.at(1) == "→" &&
                         command.at(2).toDouble() == 1920 * 0.5234375 + 233 &&
                         command.at(3).toDouble() == 908) {

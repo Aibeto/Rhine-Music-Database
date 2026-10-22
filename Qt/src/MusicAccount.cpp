@@ -215,6 +215,7 @@ void MusicLibrary::switchProvider(QString source, QString edition, Completion do
     restoreCachedAccount();
     restoringAccount = false;
     m_pendingLane = -1;
+    m_playLiked = false;
     m_accountError.clear();
     m_sourceErrors.fill({});
     loginStatus.clear();
@@ -609,6 +610,7 @@ void MusicLibrary::logout() {
     ++m_accountGeneration;
     restoringAccount = false;
     m_pendingLane = -1;
+    m_playLiked = false;
     m_accountError.clear();
     m_sourceErrors.fill({});
     host->logout();

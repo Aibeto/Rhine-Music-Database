@@ -324,6 +324,11 @@ void NativeHud::archive(double width) {
             }
             control(label, 59, 265, 310, "music:directory-info");
         }
+        if ((music.directory &&
+             QStringList{"playlist", "album", "folder"}.contains(music.directory->item["kind"].toString())) ||
+            (!music.directory && music.selectedLane == 1)) {
+            control("播放全部 →", 59, music.directory ? 319 : 211, 310, "music:play-loaded");
+        }
         const bool showTrackList = trackListMode && item["kind"] == "song";
         if (!showTrackList) {
             roll("music-source", "MUSIC DATABASE / " + music.libraryName(), x, 471, 12, width - x - 59);
@@ -377,7 +382,7 @@ void NativeHud::archive(double width) {
     const auto col = width * 0.5234375;
     button("←", col, 903, 46, 46, "column-prev", 28);
     if (!music.directory) {
-        text("COLLECTION " + MusicData::pad(music.selectedLane + 1) + " / " +
+        text("COLLECTION " + MusicData::pad(music.sourceOrder().indexOf(music.selectedLane) + 1) + " / " +
                  MusicData::pad(music.provider == "kugou" ? 4 : 5),
              col + 70, 904, 10);
         roll("music-column", music.libraryName(), col + 70, 925, 15, width - col - 360);

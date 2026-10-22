@@ -491,10 +491,7 @@ void NativeHud::action(QString value) {
         return;
     }
     if (value == "column-prev" || value == "column-next") {
-        QVector<int> sources{0, 1, 2, 3, 4};
-        if (music.provider == "kugou") {
-            sources = {0, 1, 2, 3};
-        }
+        const auto sources = music.sourceOrder();
         const auto index = sources.indexOf(music.selectedLane);
         music.showSource(sources.at(wrap(index + (value == "column-next" ? 1 : -1), sources.size())));
         return;

@@ -138,6 +138,10 @@ QString MusicLibrary::identityName() const {
     return {};
 }
 
+QVector<int> MusicLibrary::sourceOrder() const {
+    return provider == "kugou" ? QVector<int>{1, 2, 3, 0} : QVector<int>{1, 2, 3, 4, 0};
+}
+
 QString MusicLibrary::libraryName() const {
     if (directory) {
         return directory->item["title"].toString();
@@ -612,6 +616,12 @@ void MusicLibrary::completePersonal(int lane, QString error) {
     if (pending > 0 && pending != lane && !samePlaylists && lists[pending].isEmpty()) {
         loadMoreSource(pending);
     }
+    if (lane == 1 && m_playLiked) {
+        m_playLiked = false;
+        if (error.isEmpty() && selectedLane == 1 && !directory) {
+            playDirectory();
+        }
+    }
     changed();
 }
 
@@ -857,15 +867,21 @@ void MusicLibrary::play() {
 }
 
 QJsonArray MusicLibrary::directoryQueue() const {
-    if (!directory || directory->ids.isEmpty()) {
+    QJsonArray ids;
+    if (directory) {
+        ids = directory->ids;
+    } else if (selectedLane == 1 && likedIDs) {
+        ids = *likedIDs;
+    }
+    if (ids.isEmpty()) {
         return libraryItems();
     }
     QHash<QString, QJsonObject> loaded;
-    for (const auto &value : directory->songs) {
+    for (const auto &value : libraryItems()) {
         loaded[value.toObject()["id"].toString()] = value.toObject();
     }
     QJsonArray queue;
-    for (const auto &id : directory->ids) {
+    for (const auto &id : ids) {
         auto value = loaded.value(id.toString());
         if (value.isEmpty()) {
             value = MusicData::item("song", id.toString(), "待读取曲目", {}, provider);
@@ -876,9 +892,20 @@ QJsonArray MusicLibrary::directoryQueue() const {
     return queue;
 }
 
+/** 一键播放 */
 void MusicLibrary::playDirectory() {
-    if (directory && !directory->songs.isEmpty()) {
-        player.play(directory->songs.first().toObject(), directoryQueue());
+    if (!directory && selectedLane != 1) {
+        return;
+    }
+    // 网易云已有完整 ID，其他渠道先按分页补齐喜欢列表再建立完整队列。
+    if (!directory && !isLocal() && hasMore[1] && (provider != "netease" || !likedIDs)) {
+        m_playLiked = true;
+        loadMoreSource(1);
+        return;
+    }
+    const auto queue = directoryQueue();
+    if (!queue.isEmpty()) {
+        player.play(queue.first().toObject(), queue);
     }
 }
 

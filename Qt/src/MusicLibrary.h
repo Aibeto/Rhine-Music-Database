@@ -62,6 +62,7 @@ class MusicLibrary : public QObject {
     QJsonArray sourceItems(int lane) const;
     QJsonArray libraryItems() const;
     QString libraryName() const;
+    QVector<int> sourceOrder() const;
     int libraryTotal() const;
     int libraryIndex() const;
     QString providerName() const;
@@ -206,6 +207,7 @@ class MusicLibrary : public QObject {
     void loadLikedIDs(int lane, quint64 token, QString user);
     void completePersonal(int lane, QString error = {});
     int m_pendingLane = -1;
+    bool m_playLiked = false;
     QString m_accountError;
     std::array<QString, 5> m_sourceErrors;
     void restoreCachedAccount();

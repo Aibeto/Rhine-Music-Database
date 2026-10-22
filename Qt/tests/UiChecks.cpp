@@ -516,6 +516,14 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     }
     check(parentY && infoY && *infoY == *parentY + 54,
           "directory info sits immediately below parent navigation");
+    std::optional<double> playAllY;
+    for (const auto &value : hud.hits) {
+        const auto hit = value.toObject();
+        if (hit["action"] == "music:play-loaded") {
+            playAllY = hit["y"].toDouble();
+        }
+    }
+    check(infoY && playAllY && *playAllY == *infoY + 54, "directory play all sits immediately below details");
     capture("directory-navigation");
     // 列表使用真实 QML 键盘与点击路径；临时目录避免改变后续既有导航夹具。
     const auto originalDirectory = music.directory;
@@ -693,6 +701,14 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     check(hud.modal == "search", "Enter opens search from empty search collection");
     hud.closeModal();
     refresh();
+    for (const auto lane : music.sourceOrder()) {
+        hud.action("column-next");
+        check(music.selectedLane == lane, "collection navigation ends with search");
+    }
+    music.showSource(1);
+    refresh();
+    check(hasAction("music:play-loaded"), "liked library exposes play all");
+    capture("liked-play-all");
     music.lists[0] = searchSongs;
     music.showSource(previousLane);
     music.choose(previousItem);

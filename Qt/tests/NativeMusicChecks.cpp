@@ -10,6 +10,7 @@
 #include <QThread>
 #include <QTemporaryDir>
 #include <QUrl>
+#include <algorithm>
 
 namespace {
 bool waitFor(const std::function<bool()> &ready, int timeout = 3000) {
@@ -211,6 +212,17 @@ bool runNativeMusicChecks(const QString &root) {
             value = QJsonObject{{"liked", true}, {"subscribed", true}};
         } else if (route.endsWith("/account")) {
             value = QJsonArray{"42", "本地账号"};
+        } else if (route.endsWith("/likedSongs")) {
+            const auto offset = args.at(0).toInt();
+            QJsonArray page;
+            for (int index = offset; index < std::min(offset + 2, 3); ++index) {
+                auto track = song(QString::number(90 + index));
+                track["provider"] = "qq";
+                track["key"] = "qq:song:" + track["id"].toString();
+                page.append(track);
+            }
+            value = QJsonObject{
+                {"items", page}, {"total", 3}, {"rawCount", page.size()}, {"more", offset + page.size() < 3}};
         } else if (route.endsWith("/likedIDs")) {
             value = QJsonArray{"1", "missing", "2"};
         } else if (route.endsWith("/userPlaylists")) {
@@ -310,6 +322,15 @@ bool runNativeMusicChecks(const QString &root) {
     check(waitFor([&] { return !library.personalLoading; }), "liked songs finish");
     check(library.totals[1] == 3 && library.lists[1].size() == 2 && !library.hasMore[1],
           "unavailable liked IDs do not cause retry loops");
+    library.showSource(1);
+    const auto likedQueue = library.directoryQueue();
+    check(likedQueue.size() == 3 && likedQueue.at(1).toObject()["id"] == "missing" &&
+              likedQueue.at(1).toObject()["deferred"].toBool(),
+          "liked play-all queue retains full ordered IDs beyond loaded songs");
+    library.playDirectory();
+    check(library.player.queue.size() == 3 && library.player.index == 0,
+          "liked play all starts at the first song and replaces queue");
+    library.player.stop();
     library.hasMore[2] = true;
     library.loadMoreSource(2);
     check(waitFor([&] { return !library.personalLoading; }), "playlists finish");
@@ -472,6 +493,15 @@ bool runNativeMusicChecks(const QString &root) {
     check(library.provider == "qq" && library.player.queue.isEmpty() && library.directory == nullptr,
           "provider switch clears old native state");
     library.uid = "42";
+    library.showSource(1);
+    library.playDirectory();
+    check(waitFor([&] { return !library.personalLoading && library.player.queue.size() == 3; }),
+          "QQ liked play all waits for every page");
+    check(library.player.queue.first().toObject()["id"] == "90" &&
+              library.player.queue.last().toObject()["id"] == "92" && !library.hasMore[1],
+          "QQ liked queue preserves pagination order");
+    library.player.stop();
+    library.leaveDirectory(false);
     auto qqSong = song("songMID");
     qqSong["provider"] = "qq";
     qqSong["key"] = "qq:song:songMID";
