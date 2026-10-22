@@ -405,6 +405,8 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"OFFICIAL PLAYER / 官方窗口", m_host->activates() ? "播放时显示" : "尽量保持后台",
                      "music:activate"});
     }
+    rows.append({"ENTER AUTOPLAY / 进入详情自动播放",
+                 m_host->preference("detail-autoplay") == "on" ? "开启" : "关闭", "detail-autoplay"});
     for (int index = 0; index < rows.size(); ++index) {
         const auto &row = rows.at(index);
         const auto yy = y + 377 + index * 50;
@@ -412,8 +414,10 @@ void NativeHud::settings(double x, double y, double width) {
         text(row.at(0), left + 12, yy + 12, 15, "demibold");
         button(row.at(1), left + usable - 235, yy + 4, 225, 36, row.at(2), 13);
     }
-    y += 50;
-    text("↑ ↓ 选曲 / ENTER 查看 / " + m_host->modifierKey() + " ENTER 播放 / ESC 返回", left, y + 704, 12);
+    y += 100;
+    const auto enterHint = m_host->preference("detail-autoplay") == "on" ? "ENTER 查看并播放" : "ENTER 查看";
+    text("↑ ↓ 选曲 / " + QString(enterHint) + " / " + m_host->modifierKey() + " ENTER 播放 / ESC 返回", left,
+         y + 704, 12);
     rule(left, y + 737, usable, 0.2);
     text("PROJECT / 项目与开源参考", left, y + 752, 10, "demibold");
     const QVector<QPair<QString, QString>> links{{"本项目 / Rhine Music Database ↗", "project-home"},

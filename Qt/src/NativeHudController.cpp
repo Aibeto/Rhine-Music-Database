@@ -468,6 +468,9 @@ void NativeHud::action(QString value) {
             } else {
                 m_scene.mode("detail");
                 music.loadSongWiki();
+                if (m_host->preference("detail-autoplay") == "on") {
+                    music.play();
+                }
             }
         }
         return;
@@ -557,6 +560,9 @@ void NativeHud::action(QString value) {
     } else if (value == "scene-enhancement") {
         sceneEnhancement = !sceneEnhancement;
         m_host->setPreference("scene-enhancement", sceneEnhancement ? "on" : "off");
+    } else if (value == "detail-autoplay") {
+        const bool enabled = m_host->preference("detail-autoplay") == "on";
+        m_host->setPreference("detail-autoplay", enabled ? "off" : "on");
     } else if (value == "startup-animation") {
         startupAnimation = !startupAnimation;
         m_host->setPreference("startup-animation", startupAnimation ? "on" : "off");
