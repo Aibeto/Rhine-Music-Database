@@ -30,6 +30,17 @@ NativeApplication::NativeApplication(Host *host, Glyphs *glyphs, NativeScene *sc
 void NativeApplication::initialize() {
     m_scene->theme(hud.dark);
     m_scene->reduced(hud.reduced);
+    const auto startupPreference = m_host->preference("startup-animation");
+    // 仅首次启动展示动画
+    const bool firstLaunch = startupPreference.isEmpty() && m_host->preference("theme").isEmpty() &&
+                             m_host->preference("provider").isEmpty() &&
+                             m_host->preference("volume").isEmpty();
+    if (startupPreference.isEmpty()) {
+        m_host->setPreference("startup-animation", "off");
+    }
+    if (!firstLaunch && !hud.startupAnimation) {
+        m_scene->setMode("archive");
+    }
     const auto saved = m_host->preference("volume");
     bool valid = false;
     const auto volume = saved.toDouble(&valid);

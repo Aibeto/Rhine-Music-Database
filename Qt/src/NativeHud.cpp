@@ -274,9 +274,8 @@ void NativeHud::footer(double width) {
         }
     }
     text(session, 75, 967, 10, "regular", 0.9);
-    limited(m_music->status, width - 361.203, 967, 10, 195);
-    button("REINITIALIZE ↗", width - 145.57, 965, 86.57, 20, "replay", 10);
-    text("POWERED BY RHINE LAB", width / 2 - 85, 967, 10, "demibold");
+    const auto credit = QStringLiteral("POWERED BY RHINE LAB");
+    text(credit, width - 59 - m_glyphs->width(credit, 10, "demibold"), 967, 10, "demibold");
 }
 void NativeHud::empty(double width) {
     const auto x = width * 0.50520833;

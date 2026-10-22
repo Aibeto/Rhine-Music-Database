@@ -30,6 +30,7 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     }
     dark = themeMode == "system" ? host->systemDark() : themeMode == "dark";
     reduced = host->preference("motion") == "reduced";
+    startupAnimation = host->preference("startup-animation") == "on";
     discRotation = host->preference("disc-rotation") == "on";
     sceneEnhancement = host->preference("scene-enhancement") != "off";
     connect(&host->updater, &AppUpdater::updateAvailable, this, [this] {
@@ -556,6 +557,9 @@ void NativeHud::action(QString value) {
     } else if (value == "scene-enhancement") {
         sceneEnhancement = !sceneEnhancement;
         m_host->setPreference("scene-enhancement", sceneEnhancement ? "on" : "off");
+    } else if (value == "startup-animation") {
+        startupAnimation = !startupAnimation;
+        m_host->setPreference("startup-animation", startupAnimation ? "on" : "off");
     } else if (value == "motion") {
         reduced = !reduced;
         m_scene.reduced(reduced);

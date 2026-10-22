@@ -389,10 +389,12 @@ void NativeHud::settings(double x, double y, double width) {
     if (themeMode == "system") {
         theme = "跟随系统";
     }
-    QVector<QStringList> rows{{"COLOR THEME / 界面配色", theme, "theme"},
-                              {"RhineLab Enhance", sceneEnhancement ? "开启" : "关闭", "scene-enhancement"},
-                              {"REDUCED MOTION / 动态效果", reduced ? "减少动态效果" : "完整动效", "motion"},
-                              {"AUDIO QUALITY / 音质", qualities.value(music.player.quality), "quality"}};
+    QVector<QStringList> rows{
+        {"COLOR THEME / 界面配色", theme, "theme"},
+        {"RhineLab Enhance", sceneEnhancement ? "开启" : "关闭", "scene-enhancement"},
+        {"REDUCED MOTION / 动态效果", reduced ? "减少动态效果" : "完整动效", "motion"},
+        {"STARTUP ANIMATION / 初始化动画", startupAnimation ? "开启" : "关闭", "startup-animation"},
+        {"AUDIO QUALITY / 音质", qualities.value(music.player.quality), "quality"}};
     if (music.provider == "netease") {
         rows.append({"ALTERNATE SOURCE / 替代音源",
                      music.player.alternative ? "开启（音质由来源决定）" : "关闭", "alternative"});
@@ -410,6 +412,7 @@ void NativeHud::settings(double x, double y, double width) {
         text(row.at(0), left + 12, yy + 12, 15, "demibold");
         button(row.at(1), left + usable - 235, yy + 4, 225, 36, row.at(2), 13);
     }
+    y += 50;
     text("↑ ↓ 选曲 / ENTER 查看 / " + m_host->modifierKey() + " ENTER 播放 / ESC 返回", left, y + 704, 12);
     rule(left, y + 737, usable, 0.2);
     text("PROJECT / 项目与开源参考", left, y + 752, 10, "demibold");
@@ -427,7 +430,6 @@ void NativeHud::settings(double x, double y, double width) {
                linkWidth, 25, "music:" + links.at(index).second, 11);
     }
     button("切换全屏 / F11", left + usable - 260, y + 775, 260, 36, "window:fullscreen", 13);
-    button("REINITIALIZE SYSTEM ↻", left + usable - 260, y + 819, 260, 36, "replay", 13);
     rule(left, y + 911, usable, 0.2);
     text("PERFORMANCE / 性能与诊断", left, y + 928, 12, "demibold");
     fill(left, y + 960, usable, 44, tint);

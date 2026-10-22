@@ -117,6 +117,75 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs, const QString &fixt
                 hud.motion.set(true, 0, true);
                 const auto key = provider + ":" + panel + (dark ? ":dark" : ":light");
                 auto expected = references.value(key);
+                auto layoutCommands = expected["commands"].toArray();
+                QJsonArray updatedCommands;
+                bool shiftSettings = false;
+                for (int index = 0; index < layoutCommands.size(); ++index) {
+                    auto command = layoutCommands.at(index).toArray();
+                    const auto type = command.at(0).toString();
+                    const auto label = type == "text" ? command.at(1).toString() : QString();
+                    if ((label == "离线固定时间校验" && command.at(3).toDouble() == 967) ||
+                        label == "REINITIALIZE ↗") {
+                        continue;
+                    }
+                    if (label == "POWERED BY RHINE LAB") {
+                        command[2] = 1920 - 59 - glyphs.width(label, 10, "demibold");
+                    }
+                    if (panel == "settings") {
+                        if (type == "fill" && index + 1 < layoutCommands.size() &&
+                            layoutCommands.at(index + 1).toArray().at(1) == "AUDIO QUALITY / 音质") {
+                            for (int offset = 0; offset < 4; ++offset) {
+                                auto rowCommand = layoutCommands.at(index + offset).toArray();
+                                if (offset == 1) {
+                                    rowCommand[1] = "STARTUP ANIMATION / 初始化动画";
+                                } else if (offset == 3) {
+                                    rowCommand[1] = "关闭";
+                                }
+                                updatedCommands.append(rowCommand);
+                            }
+                            shiftSettings = true;
+                        }
+                        if (type == "restore") {
+                            shiftSettings = false;
+                        }
+                        if (label == "REINITIALIZE SYSTEM ↻" ||
+                            (type == "fill" && index + 1 < layoutCommands.size() &&
+                             layoutCommands.at(index + 1).toArray().at(1) == "REINITIALIZE SYSTEM ↻")) {
+                            continue;
+                        }
+                        if (shiftSettings && (type == "text" || type == "fill")) {
+                            command[3] = command.at(3).toDouble() + 50;
+                        }
+                    }
+                    updatedCommands.append(command);
+                }
+                expected["commands"] = updatedCommands;
+                QJsonArray updatedHits;
+                bool shiftSettingsHits = false;
+                for (const auto &value : expected["hits"].toArray()) {
+                    auto hit = value.toObject();
+                    if (hit["action"] == "replay") {
+                        continue;
+                    }
+                    if (panel == "settings" && hit["action"] == "quality") {
+                        auto toggle = hit;
+                        toggle["action"] = "startup-animation";
+                        toggle["label"] = "关闭";
+                        updatedHits.append(toggle);
+                        shiftSettingsHits = true;
+                    }
+                    if (panel == "settings" && shiftSettingsHits && !hit.value("fixed").toBool()) {
+                        const auto top = hit["y"].toDouble() + 50;
+                        const auto bottom = hud.modalBounds(1920).top() + NativeHud::SettingsViewportBottom;
+                        if (top >= bottom) {
+                            continue;
+                        }
+                        hit["y"] = top;
+                        hit["height"] = std::min(hit["height"].toDouble(), bottom - top);
+                    }
+                    updatedHits.append(hit);
+                }
+                expected["hits"] = updatedHits;
 #ifndef Q_OS_MACOS
                 // 固定帧以 macOS 的修饰键录制，其他平台渲染同一份动作时换成 Ctrl。
                 auto commands = expected["commands"].toArray();
@@ -216,6 +285,14 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs, const QString &fixt
                     }
                 }
                 if (panel == "settings") {
+                    const bool initiallyEnabled = hud.startupAnimation;
+                    hud.action("startup-animation");
+                    const bool enabled = hud.startupAnimation;
+                    hud.action("startup-animation");
+                    if (initiallyEnabled || !enabled || hud.startupAnimation) {
+                        qCritical() << "Startup animation preference toggle regression";
+                        ok = false;
+                    }
                     const auto bounds = hud.modalBounds(1920);
                     hud.wheel(bounds.center().x(), bounds.top() + 500, -120, 1, 10000.);
                     hud.draw(frame, 1920, 50);
