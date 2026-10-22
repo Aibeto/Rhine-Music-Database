@@ -199,6 +199,8 @@ void MusicDiscover::open(int index) {
     }
     const auto value = items.at(index).toObject();
     m_store->privateSelection = tab == "daily" || tab == "artists";
+    // 发现页条目作为单曲打开时，替换队列
+    m_store->playContext = items;
     if (value["kind"] == "song") {
         m_store->player.play(value, items);
         m_store->choose(value);

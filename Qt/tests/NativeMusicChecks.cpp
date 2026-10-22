@@ -226,7 +226,22 @@ bool runNativeMusicChecks(const QString &root) {
     check(waitFor([&] { return !library.personalLoading; }), "collection loads");
     check(library.lists[1].size() == 2, "collection filters missing songs");
 
-    // === 测试 11: 音乐数据规范化 ===
+    // === 测试 11: 主动播放与自动播放的队列行为 ===
+    library.playContext = library.lists[1];
+    library.choose(library.lists[1].at(1).toObject());
+    const auto queuedSong = song("9");
+    library.player.queue = QJsonArray{queuedSong};
+    library.player.index = 0;
+    library.play();
+    check(library.player.queue.size() == 3, "active play replaces queue with current song list");
+    check(MusicData::indexOfId(library.player.queue, "2") >= 0, "active play keeps selected song");
+    library.player.queue = QJsonArray{queuedSong};
+    library.player.index = 0;
+    library.play(false);
+    check(library.player.queue.size() == 2 && library.player.queue.first().toObject()["id"] == "9",
+          "automatic play keeps existing queue");
+
+    // === 测试 12: 音乐数据规范化 ===
     auto normalizedSong = MusicData::item("song", "test-id", "测试标题", "测试歌手");
     check(normalizedSong.contains("id") && normalizedSong.contains("title"),
           "music data structure");

@@ -226,6 +226,8 @@ void MusicLibrary::observe(int selected) {
     selectedLane = lane;
     rowMemory[lane] = row;
     const auto values = sourceItems(lane);
+    // 当前栏目选中单曲，替换队列。
+    playContext = values;
     choose(values.isEmpty() ? QJsonObject{} : values.at(wrap(offsets[lane] + row, values.size())).toObject());
     if (lane > 0 && values.isEmpty()) {
         loadMoreSource(lane);
@@ -561,6 +563,8 @@ void MusicLibrary::selectResult(int index, int lane, bool open) {
     }
     offsets[lane] = viewIndex / 8 * 8;
     selectedPhysical = -1;
+    // 点击结果列表时同步播放上下文
+    playContext = sourceItems(lane);
     const auto physical = physicalSlots[lane].value(viewIndex % 8, -1);
     emit selectionRequested(physical, {});
     const auto mode = open && lists[lane].at(index).toObject()["kind"] == "song" ? "detail" : "archive";
@@ -857,13 +861,35 @@ void MusicLibrary::loadSongWiki() {
         [selected, wiki] { return selected() && wiki(); });
 }
 
-void MusicLibrary::play() {
+/**
+ * 播放当前单曲。
+ * 用当前单曲所在的歌曲列表替换播放队列；
+ */
+void MusicLibrary::play(bool byUser) {
     if (current.value("kind") != "song") {
         status = QStringLiteral("请先选择一首歌曲");
         changed();
         return;
     }
+    const bool replaceQueue = byUser && host->preference("single-play-mode") != "append";
+    if (replaceQueue) {
+        player.play(current, currentSongList());
+        return;
+    }
     player.play(current);
+}
+
+/** 当前单曲所在的歌曲列表 */
+QJsonArray MusicLibrary::currentSongList() const {
+    const auto id = current.value("id").toString();
+    const auto queue = directoryQueue();
+    if (MusicData::indexOfId(queue, id) >= 0) {
+        return queue;
+    }
+    if (!playContext.isEmpty() && MusicData::indexOfId(playContext, id) >= 0) {
+        return playContext;
+    }
+    return libraryItems();
 }
 
 QJsonArray MusicLibrary::directoryQueue() const {

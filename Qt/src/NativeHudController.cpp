@@ -489,7 +489,8 @@ void NativeHud::action(QString value) {
                 m_scene.mode("detail");
                 music.loadSongWiki();
                 if (m_host->preference("detail-autoplay") == "on") {
-                    music.play();
+                    // 自动播放不触发“替换播放列表”
+                    music.play(false);
                 }
             }
         }
@@ -583,6 +584,9 @@ void NativeHud::action(QString value) {
     } else if (value == "detail-autoplay") {
         const bool enabled = m_host->preference("detail-autoplay") == "on";
         m_host->setPreference("detail-autoplay", enabled ? "off" : "on");
+    } else if (value == "single-play-mode") {
+        const bool append = m_host->preference("single-play-mode") == "append";
+        m_host->setPreference("single-play-mode", append ? "replace" : "append");
     } else if (value == "startup-animation") {
         startupAnimation = !startupAnimation;
         m_host->setPreference("startup-animation", startupAnimation ? "on" : "off");

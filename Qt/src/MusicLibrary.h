@@ -53,10 +53,11 @@ class MusicLibrary : public QObject {
     void loadTrackPage(int start);
     void sameAlbum();
     void loadSongWiki();
-    void play();
+    void play(bool byUser = true);
     void playDirectory();
     void playOfficial(QJsonObject value = {});
     QJsonArray directoryQueue() const;
+    QJsonArray currentSongList() const;
     QString sourceURL(QJsonObject value = {}) const;
     void setGroupView(QString name, QVector<int> indices = {}, int lane = 0);
     QJsonArray sourceItems(int lane) const;
@@ -120,6 +121,8 @@ class MusicLibrary : public QObject {
     QJsonObject current;
     QJsonArray tracks;
     QJsonArray trackIDs;
+    // 记录当前单曲被选中时所在的歌曲列表
+    QJsonArray playContext;
     QHash<QString, QJsonObject> details;
     QString searchKind = "song";
     QString keyword;

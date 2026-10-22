@@ -67,6 +67,8 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         if (music.directory && last >= 0 && last < music.directory->songs.size()) {
             music.selectDirectory(last, "detail");
         } else if (last >= 0 && last < music.tracks.size()) {
+            // 详情页曲目列表就是当前单曲所在的歌曲列表。
+            music.playContext = music.tracks;
             music.choose(music.tracks.at(last).toObject());
         }
         tab = "overview";
@@ -91,6 +93,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         }
     } else if (name == "first-track") {
         if (trackOffset >= 0 && trackOffset < music.tracks.size()) {
+            music.playContext = music.tracks;
             music.choose(music.tracks.at(trackOffset).toObject());
         }
         tab = "overview";

@@ -407,6 +407,9 @@ void NativeHud::settings(double x, double y, double width) {
     }
     rows.append({"ENTER AUTOPLAY / 进入详情自动播放",
                  m_host->preference("detail-autoplay") == "on" ? "开启" : "关闭", "detail-autoplay"});
+    rows.append({"PLAYLIST ON PLAY / 点击播放单曲",
+                 m_host->preference("single-play-mode") == "append" ? "仅添加当前单曲" : "替换为所在列表",
+                 "single-play-mode"});
     for (int index = 0; index < rows.size(); ++index) {
         const auto &row = rows.at(index);
         const auto yy = y + 377 + index * 50;
@@ -414,7 +417,8 @@ void NativeHud::settings(double x, double y, double width) {
         text(row.at(0), left + 12, yy + 12, 15, "demibold");
         button(row.at(1), left + usable - 235, yy + 4, 225, 36, row.at(2), 13);
     }
-    y += 100;
+    // 多出一行设置，后续区块使用相同的行距整体下移。
+    y += 150;
     const auto enterHint = m_host->preference("detail-autoplay") == "on" ? "ENTER 查看并播放" : "ENTER 查看";
     text("↑ ↓ 选曲 / " + QString(enterHint) + " / " + m_host->modifierKey() + " ENTER 播放 / ESC 返回", left,
          y + 704, 12);

@@ -130,8 +130,9 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             }
 
             // 验证关键设置项存在（顶部配置区域）
-            const QStringList requiredSettings = {"theme", "motion", "startup-animation", "detail-autoplay",
-                                                  "scene-enhancement", "quality"};
+            const QStringList requiredSettings = {"theme",           "motion",           "startup-animation",
+                                                  "detail-autoplay", "single-play-mode", "scene-enhancement",
+                                                  "quality"};
             for (const auto &setting : requiredSettings) {
                 if (!hasAction(hud.hits, setting)) {
                     qCritical() << "Missing setting toggle:" << setting << provider
