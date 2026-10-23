@@ -96,7 +96,6 @@ if (!fs.existsSync(tokenPath)) {
 }
 // 上游诊断可能包含 URL 或 Cookie，禁止混入 IPC 消息和日志。
 console.log = console.info = console.warn = console.error = console.debug = () => {};
-const apiRoot = path.join(__dirname, 'node_modules', '@neteasecloudmusicapienhanced', 'api');
 const routes = Object.freeze({
     '/login/qr/key': 'login_qr_key',
     '/login/qr/check': 'login_qr_check',
@@ -135,9 +134,8 @@ const routes = Object.freeze({
     '/lyric': 'lyric',
 });
 // 沿用上游 main.js 的函数适配方式，只加载允许的接口。
-// 接口和加密文件保持上游原始字节内容。
-const { cookieToJson, generateDeviceId } = require(path.join(apiRoot, 'util'));
-const { getXeapiPublicKey } = require(path.join(apiRoot, 'util', 'xeapiKey'));
+const { cookieToJson, generateDeviceId } = require('./node_modules/@neteasecloudmusicapienhanced/api/util');
+const { getXeapiPublicKey } = require('./node_modules/@neteasecloudmusicapienhanced/api/util/xeapiKey');
 const xeapiKeyPath = path.join(require('node:os').tmpdir(), 'xeapi_public_key');
 global.deviceId = generateDeviceId();
 let xeapiPublicKey;
@@ -175,10 +173,20 @@ async function prepareXeapiKey() {
             }
             fs.writeFileSync(xeapiKeyPath, JSON.stringify(publicKey), { mode: 0o600 });
             xeapiPublicKey = publicKey;
-            // 上游 request 在模块内缓存密钥和会话，刷新后重新载入以使用新密钥。
-            const requestPath = require.resolve(path.join(apiRoot, 'util', 'request'));
-            delete require.cache[requestPath];
-            requestModule = undefined;
+            // 上游 request 在模块内缓存密钥和会话，刷新后必须重新读取。
+            // 打包后的模块实例常驻，改用上游模块上的构建钩子清空密钥缓存；
+            const upstreamRequest = require('./node_modules/@neteasecloudmusicapienhanced/api/util/request.js');
+            if (typeof upstreamRequest.__rhineResetXeapiKeyCache === 'function') {
+                upstreamRequest.__rhineResetXeapiKeyCache();
+                requestModule = upstreamRequest;
+            } else {
+                const requestPath = path.join(
+                    __dirname,
+                    'node_modules/@neteasecloudmusicapienhanced/api/util/request.js',
+                );
+                delete require.cache[requestPath];
+                requestModule = undefined;
+            }
         } catch {
             // 初始化错误不得悄悄改成旧版码率接口，否则母带等档位会丢失。
             const error = new Error('网易云音源初始化失败，请重试');
@@ -190,9 +198,32 @@ async function prepareXeapiKey() {
     })();
     return xeapiInitializing;
 }
+
+// 随包放置占位文件满足存在性检查，并把真实模块预置到 require 缓存。
+const Module = require('node:module');
+const unblockModules = require('./unblock-modules.cjs');
+for (const [name, exported] of Object.entries(unblockModules)) {
+    let filename;
+    try {
+        filename = require.resolve(path.join(__dirname, '..', 'modules', name + '.js'));
+    } catch {
+        // 未打包开发运行时没有占位目录，继续沿用上游的按目录加载。
+        continue;
+    }
+    const cached = new Module(filename);
+    cached.filename = filename;
+    cached.loaded = true;
+    cached.exports = exported;
+    require.cache[filename] = cached;
+}
+// 生成文件只包含 routes 引用的接口
+const neteaseEndpoints = require('./netease-endpoints.cjs');
 const api = Object.fromEntries(
     Object.values(routes).map((name) => {
-        const endpoint = require(path.join(apiRoot, 'module', name + '.js'));
+        const endpoint = neteaseEndpoints[name];
+        if (typeof endpoint !== 'function') {
+            throw new Error('Missing NetEase endpoint module: ' + name);
+        }
         return [
             name,
             (data = {}) =>
@@ -206,7 +237,7 @@ const api = Object.fromEntries(
                         if (args[2]?.crypto === 'xeapi') {
                             await prepareXeapiKey();
                         }
-                        requestModule ||= require(path.join(apiRoot, 'util', 'request'));
+                        requestModule ||= require('./node_modules/@neteasecloudmusicapienhanced/api/util/request.js');
                         return requestModule(...args);
                     },
                 ),
@@ -356,6 +387,14 @@ async function dispatch(message) {
 
 function send(value) {
     process.stdout.write(JSON.stringify(value) + '\n');
+}
+// 离线测试通过预加载脚本注入上游传输替身；发布运行不设置该变量。
+if (process.env.RHINE_TEST_BRIDGE) {
+    globalThis.__rhineBridgeTestSetup?.({
+        axios,
+        upstreamCrypto: require('./node_modules/@neteasecloudmusicapienhanced/api/util/crypto.js'),
+        kugouConfig: require('./node_modules/kugoumusicapi/util/config.json'),
+    });
 }
 readline
     .createInterface({

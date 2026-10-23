@@ -1,6 +1,4 @@
 // 发布包测试使用本地 HTTP 响应，保持真实上游协议模块参与执行。
-const path = require('node:path');
-const bridge = process.env.RHINE_TEST_BRIDGE;
 const originalFetch = global.fetch;
 // 新的共用 QQ 接口使用 Fetch；本地桥接 HTTP 仍走真实回环服务。
 global.fetch = async (input, init) => {
@@ -45,32 +43,43 @@ global.fetch = async (input, init) => {
     }
     return Response.json(response);
 };
-const axios = require(
-    require.resolve('axios', {
-        paths: [bridge],
-    }),
-);
-const upstreamCrypto = require(
-    path.join(bridge, 'node_modules/@neteasecloudmusicapienhanced/api/util/crypto'),
-);
+// 发布包不再携带 node_modules，由打包后的 worker 把上游模块实例交进来。
+let axios;
+let upstreamCrypto;
+let kugouConfig;
+globalThis.__rhineBridgeTestSetup = (internals) => {
+    axios = internals.axios;
+    upstreamCrypto = internals.upstreamCrypto;
+    kugouConfig = internals.kugouConfig;
+    const originalXeapi = upstreamCrypto.xeapi;
+    upstreamCrypto.xeapi = (uri, payload, options) => {
+        const encrypted = originalXeapi(uri, payload, options);
+        xeapiRequests.set(encrypted.C, { payload, version: options.publicKeyState.version });
+        return encrypted;
+    };
+    axios.defaults.adapter = fixtureAdapter;
+};
 // 本地响应使用测试密钥加密；请求仍经过上游注册校验、加密和响应解密。
 const crypto = require('node:crypto');
 const keyPair = crypto.generateKeyPairSync('x25519');
 const publicKey = keyPair.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32).toString('base64');
 let keyRegistrations = 0;
 const xeapiRequests = new Map();
-const originalXeapi = upstreamCrypto.xeapi;
-upstreamCrypto.xeapi = (uri, payload, options) => {
-    const encrypted = originalXeapi(uri, payload, options);
-    xeapiRequests.set(encrypted.C, { payload, version: options.publicKeyState.version });
-    return encrypted;
-};
 function encryptFixture(value, key) {
     const cipher = crypto.createCipheriv(`aes-${key.length * 8}-ecb`, key, null);
     return Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final()]);
 }
-axios.defaults.adapter = async (settings) => {
+async function fixtureAdapter(settings) {
     const destination = (settings.baseURL || '') + settings.url;
+    // 替代音源模块在打包后从 require 缓存加载，这里验证它仍能完成真实请求。
+    if (/api\.byfuns\.top/.test(destination)) {
+        return {
+            status: 302,
+            data: '',
+            headers: { location: 'https://example.test/unblock.flac' },
+            config: settings,
+        };
+    }
     if (/\.kugou\.com/.test(destination)) {
         if (destination.endsWith('/v1/search')) {
             return {
@@ -104,8 +113,8 @@ axios.defaults.adapter = async (settings) => {
         }
         let data = { status: 1, data: { info: [{ rankid: 1, rankname: '本地榜单' }] } };
         if (destination.endsWith('/v2/qrcode')) {
-            const config = require(path.join(bridge, 'node_modules/kugoumusicapi/util/config.json'));
-            const appid = process.env.RHINE_KUGOU_EDITION === 'lite' ? config.liteAppid : config.appid;
+            const appid =
+                process.env.RHINE_KUGOU_EDITION === 'lite' ? kugouConfig.liteAppid : kugouConfig.appid;
             if (!settings.params.qrcode_txt.includes('appid=' + appid + '&')) {
                 throw new Error('Kugou QR used the wrong edition appid');
             }
@@ -283,4 +292,4 @@ axios.defaults.adapter = async (settings) => {
         headers: {},
         config: settings,
     };
-};
+}

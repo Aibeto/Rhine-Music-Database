@@ -144,9 +144,8 @@ function initialize() {
     } else {
         delete process.env.platform;
     }
-    const root = path.dirname(require.resolve('kugoumusicapi/package.json'));
-    const util = require(path.join(root, 'util/util'));
-    const { cryptoMd5 } = require(path.join(root, 'util/crypto'));
+    const util = require('./node_modules/kugoumusicapi/util/util');
+    const { cryptoMd5 } = require('./node_modules/kugoumusicapi/util/crypto');
     const location = process.env.RHINE_KUGOU_DEVICE_STATE_PATH;
     let device;
     if (location && fs.existsSync(location)) {
@@ -171,7 +170,7 @@ function initialize() {
     }
     // 相同固定设备可选择版本，但账号令牌由父进程分开保存。
     device.KUGOU_API_PLATFORM = process.env.platform || 'standard';
-    return createBridge(require('kugoumusicapi'), device);
+    return createBridge(require('./kugou-package.cjs'), device);
 }
 module.exports = {
     ROUTES,

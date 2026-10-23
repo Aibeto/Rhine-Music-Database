@@ -149,6 +149,8 @@ function prepareResources() {
     fs.copyFileSync(binary, path.join(bridge, nodeName));
     fs.copyFileSync(license, path.join(bridge, 'NODE-LICENSE'));
     fs.chmodSync(path.join(bridge, nodeName), 0o755);
+    // 桥接在部署前打成单文件
+    run(process.execPath, ['scripts/bundle-bridge.cjs']);
     for (const name of ['dfg-lut.bin', 'ao-kernel.bin', 'ao-noise.bin']) {
         fs.copyFileSync(path.join('Assets/lighting', name), path.join('output/resources', name));
     }

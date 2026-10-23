@@ -12,7 +12,7 @@ import format from '../../MusicBridge/lyrics-format.cjs';
 import { createClientHarness } from './fixtures/client-harness.mjs';
 
 const require = createRequire(import.meta.url);
-const { bridgeRuntime } = require('./fixtures/bridge-runtime.cjs');
+const { bridgeRuntime, bridgeSourceDirectory } = require('./fixtures/bridge-runtime.cjs');
 const bridgeDirectory = process.argv[2];
 const message = (operation, args, cookies = {}) => ({
     route: '/native/qq/' + operation,
@@ -463,7 +463,7 @@ test('设备身份跨进程复用且不写入登录凭据', () => {
     const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'rhine-device-state-'));
     const devicePath = path.join(temporaryDirectory, 'qq-device.json');
     const modulePath = path.join(
-        bridge,
+        bridgeSourceDirectory(),
         'node_modules/@yakult-green-tea/qq-music-api/dist/src/services/auth/deviceContext.js',
     );
     const source = `

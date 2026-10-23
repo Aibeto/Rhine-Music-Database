@@ -6,6 +6,7 @@
     "license": "MIT",
     "scripts": {
         "build": "node scripts/build.cjs",
+        "bundle:bridge": "node scripts/bundle-bridge.cjs",
         "package:cmake": "node scripts/build.cjs --cmake-package",
         "test": "node scripts/test.cjs",
         "test:visual": "node scripts/test-visual.cjs",
@@ -16,6 +17,7 @@
         "lint": "eslint ."
     },
     "devDependencies": {
+        "esbuild": "0.28.2",
         "eslint": "10.12.0",
         "prettier": "3.9.10"
     }

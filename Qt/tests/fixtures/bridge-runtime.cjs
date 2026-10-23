@@ -9,11 +9,16 @@ function bridgeRuntime(directory = process.argv[2]) {
     }
     const bridge = path.resolve(directory);
     const runtime = path.join(bridge, process.platform === 'win32' ? 'node.exe' : 'node');
-    for (const file of [runtime, path.join(bridge, 'worker.cjs'), path.join(bridge, 'node_modules')]) {
+    for (const file of [runtime, path.join(bridge, 'worker.cjs'), path.join(bridge, 'upstream')]) {
         if (!fs.existsSync(file)) {
             throw new Error('Missing packaged bridge resource; run npm run build first: ' + file);
         }
     }
     return { bridge, runtime };
 }
-module.exports = { bridgeRuntime };
+
+/** 返回构建期的桥接依赖目录；发布包已不携带 node_modules，夹具从这里读取纯函数模块。 */
+function bridgeSourceDirectory() {
+    return path.resolve(__dirname, '../../../output/resources/MusicBridge');
+}
+module.exports = { bridgeRuntime, bridgeSourceDirectory };

@@ -1,6 +1,5 @@
 const http = require('node:http');
 const crypto = require('node:crypto');
-const path = require('node:path');
 const allowed = new Set([
     '/login/qr/key',
     '/login/qr/create',
@@ -94,8 +93,8 @@ function safeQrDiagnostics(body, includePrevious = true) {
 async function charts(route, params) {
     // 沿用原包的 HTTP 传输与榜单操作，仅传递 GetAll 返回的真实周期。
     // 原 getRanks 控制器把日榜周期强制转成周数，会使日榜返回空列表。
-    const root = path.dirname(require.resolve('@yakult-green-tea/qq-music-api'));
-    const common = require(path.join(root, 'services/UCommon/UCommon.js')).default;
+    const common =
+        require('./node_modules/@yakult-green-tea/qq-music-api/dist/src/services/UCommon/UCommon.js').default;
     const list = route === '/getTopLists';
     if (
         !list &&
@@ -177,8 +176,7 @@ async function start(cookies) {
     process.env.QQ_AUTH_STATE_PATH = process.env.RHINE_QQ_DEVICE_STATE_PATH || 'memory';
     process.env.QQ_ENABLE_UPDATE_CHECK = 'false';
     // 首次启用持久设备配置时优先复用已保存账号的设备，避免升级额外注册设备。
-    const apiRoot = path.dirname(require.resolve('@yakult-green-tea/qq-music-api'));
-    const deviceContext = require(path.join(apiRoot, 'services/auth/deviceContext.js'));
+    const deviceContext = require('./node_modules/@yakult-green-tea/qq-music-api/dist/src/services/auth/deviceContext.js');
     const repository = deviceContext.createDefaultDeviceContextRepository();
     if (!repository.load()) {
         const previousSession = (Array.isArray(cookies.__qqSessions) ? cookies.__qqSessions : []).find(

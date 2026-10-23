@@ -3,12 +3,16 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { bridgeRuntime } = require('../Qt/tests/fixtures/bridge-runtime.cjs');
+const { bridgeRuntime, bridgeSourceDirectory } = require('../Qt/tests/fixtures/bridge-runtime.cjs');
 const { bridge, runtime } = bridgeRuntime();
 const temp = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'rhine-package-check-'));
 const hook = path.resolve(__dirname, '../Qt/tests/fixtures/bridge-http.cjs');
+
 const deviceContext = require(
-    path.join(bridge, 'node_modules/@yakult-green-tea/qq-music-api/dist/src/services/auth/deviceContext.js'),
+    path.join(
+        bridgeSourceDirectory(),
+        'node_modules/@yakult-green-tea/qq-music-api/dist/src/services/auth/deviceContext.js',
+    ),
 );
 async function main() {
     let child;
@@ -125,6 +129,14 @@ async function main() {
             unblock: false,
         });
         assert.equal(denied.body.code, 403);
+        // 替代音源模块按目录动态加载，验证单文件包仍能走到真实模块。
+        const unblocked = await request('unblock', '/song/url/v1', {
+            id: '1',
+            level: 'standard',
+            unblock: true,
+        });
+        assert.equal(unblocked.body.code, 200, JSON.stringify(unblocked.body));
+        assert.equal(unblocked.body.data[0].url, 'https://example.test/unblock.flac');
         const savedDevice = deviceContext.createAndroidDevice();
         const qq = await request(
             'qq',

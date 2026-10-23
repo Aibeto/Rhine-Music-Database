@@ -47,56 +47,37 @@ for (const name of files) {
     fs.copyFileSync(path.join(root, name), path.join(out, name));
 }
 const bridge = path.join(root, 'MusicBridge');
+const bundle = path.resolve('output/bridge-build');
 const target = path.join(out, 'MusicBridge');
 fs.mkdirSync(target, {
     recursive: true,
 });
-for (const name of [
-    'worker.cjs',
-    'qq.cjs',
-    'kugou.cjs',
-    'lyrics-format.cjs',
-    'lyrics-source.json',
-    'LyricsKit-LICENSE',
-    'NODE-LICENSE',
-]) {
+// 发布包只放单文件桥接；上游脚本和运行时数据保持可读。
+fs.copyFileSync(path.join(bundle, 'MusicBridge/worker.cjs'), path.join(target, 'worker.cjs'));
+fs.copyFileSync(path.join(bundle, 'MusicBridge/xhr-sync-worker.js'), path.join(target, 'xhr-sync-worker.js'));
+for (const name of ['lyrics-source.json', 'LyricsKit-LICENSE', 'NODE-LICENSE']) {
     fs.copyFileSync(path.join(bridge, name), path.join(target, name));
 }
 const nodeName = process.platform === 'win32' ? 'node.exe' : 'node';
 fs.copyFileSync(path.join(bridge, nodeName), path.join(target, nodeName));
 fs.chmodSync(path.join(target, nodeName), 0o755);
-fs.cpSync(path.join(bridge, 'upstream'), path.join(target, 'upstream'), {
+fs.cpSync(path.join(bundle, 'MusicBridge/upstream'), path.join(target, 'upstream'), {
     recursive: true,
 });
-fs.cpSync(path.join(bridge, 'client'), path.join(target, 'client'), {
+// 上游按相对位置读取中国 IP 段和替代音源占位模块，目录必须与桥接同级。
+fs.cpSync(path.join(bundle, 'data'), path.join(out, 'data'), {
+    recursive: true,
+});
+fs.cpSync(path.join(bundle, 'modules'), path.join(out, 'modules'), {
     recursive: true,
 });
 const worker = fs.readFileSync(path.join(bridge, 'worker.cjs'), 'utf8');
 const routeBlock = worker.match(/const routes = Object.freeze\(\{([\s\S]*?)\}\);/)[1];
 const endpoints = [...routeBlock.matchAll(/:\s*'([^']+)'/g)].map((m) => m[1]);
-// 解析已安装依赖的闭包，保留运行时资源和许可证。
-// 排除说明文档、开发指令、测试源码、类型声明及 source map，保留许可证。
+// 生成文件只包含 routes 引用的接口，避免把整个上游模块目录装进发布包。
 const visited = new Set();
-const excludedDirs = new Set([
-    'test',
-    'tests',
-    '__tests__',
-    'example',
-    'examples',
-    'docs',
-    '.github',
-    '.git',
-    '.bin',
-]);
-function filter(file) {
-    const parts = path.relative(bridge, file).split(path.sep);
-    return (
-        !parts.some((p) => excludedDirs.has(p) || p === '.DS_Store') &&
-        !/\.(?:map|d\.ts|tsbuildinfo)$/.test(file)
-    );
-}
 
-function copyPackage(name, from, optional = false) {
+function collectPackage(name, from, optional = false) {
     if (name.startsWith('node:')) {
         return;
     }
@@ -117,20 +98,16 @@ function copyPackage(name, from, optional = false) {
     }
     visited.add(location);
     const manifest = JSON.parse(fs.readFileSync(path.join(location, 'package.json'), 'utf8'));
-    fs.cpSync(location, path.join(target, path.relative(bridge, location)), {
-        recursive: true,
-        filter,
-    });
     const optionalDeps = manifest.optionalDependencies || {};
     for (const dep of Object.keys({
         ...manifest.dependencies,
         ...optionalDeps,
     })) {
-        copyPackage(dep, location, dep in optionalDeps);
+        collectPackage(dep, location, dep in optionalDeps);
     }
 }
 for (const name of ['@neteasecloudmusicapienhanced/api', '@yakult-green-tea/qq-music-api', 'kugoumusicapi']) {
-    copyPackage(name, bridge);
+    collectPackage(name, bridge);
 }
 fs.copyFileSync('NOTICE', path.join(out, 'NOTICE'));
 // 许可证原样复制，不转换字体或替换资源。
