@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QMatrix4x4>
 #include <QPainter>
+#include <QPointer>
 #include <QSGTexture>
 #include <QSGTextureProvider>
 // Qt 6.8+ 的 qrhi.h 已提供各后端初始化参数，无需引用不存在的后端头文件。
@@ -1097,9 +1098,12 @@ class ItemRenderer : public QQuickRhiItemRenderer {
     QImage cover;
     QString root;
     QQuickItem *originalSource = nullptr;
+    QMetaObject::Connection originalTextureChanged;
+    QPointer<QSGTextureProvider> originalProvider;
 
   public:
     ~ItemRenderer() override {
+        QObject::disconnect(originalTextureChanged);
         if (backend) {
             backend->recordOpticalRelease();
         }
@@ -1109,6 +1113,24 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         auto engine = scene->engine();
         backend = engine;
         originalSource = scene->originalSource();
+        auto provider = originalSource && originalSource->isTextureProvider()
+                            ? originalSource->textureProvider()
+                            : nullptr;
+        if (provider != originalProvider) {
+            QObject::disconnect(originalTextureChanged);
+            originalProvider = provider;
+            if (provider) {
+                // 纹理更新后再合成一次。
+                originalTextureChanged = QObject::connect(
+                    provider, &QSGTextureProvider::textureChanged, provider,
+                    [this] {
+                        if (frame["originalActorBlend"].toDouble() > 0) {
+                            update();
+                        }
+                    },
+                    Qt::DirectConnection);
+            }
+        }
         if (engine) {
             frame = engine->frame();
             frame["opticalLightEnabled"] = scene->lightingEnabled();
