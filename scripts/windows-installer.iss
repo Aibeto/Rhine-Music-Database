@@ -10,6 +10,7 @@
 AppId=rhine.music.database
 AppName=RHINE MUSIC DATABASE
 AppVersion={#AppVersion}
+VersionInfoVersion={#NumericVersion}
 AppVerName=RHINE MUSIC DATABASE {#AppVersion}
 AppPublisher=RhineMusicDatabase
 AppPublisherURL=https://github.com/MikeQu223/Rhine-Music-Database

@@ -29,8 +29,8 @@
 | 平台    | 程序                                                           |
 | ------- | -------------------------------------------------------------- |
 | macOS   | `output/RHINE MUSIC DATABASE.app`                              |
-| Windows | `output/RhineMusicDatabase-v<版本>-Windows-x64-Setup.exe`       |
-| Linux   | `output/RhineMusicDatabase-Linux-x86_64.AppImage`              |
+| Windows | `output/RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe`       |
+| Linux   | `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`              |
 
 **macOS 若提示应用已损坏，需要执行**
 
@@ -38,14 +38,14 @@
 
 并且在设置-隐私中允许运行；
 
-Windows 运行 `RhineMusicDatabase-v<版本>-Windows-x64-Setup.exe` 安装程序。
+Windows 运行 `RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe` 安装程序。
 Qt、MSVC 运行库和 Node 桥接均已随包提供，无需另行安装。
 
 Linux 赋予执行权限后直接运行 AppImage，Qt 运行时、QML 模块、FFmpeg 与 Node 桥接都已随包提供：
 
 ```sh
-chmod +x RhineMusicDatabase-Linux-x86_64.AppImage
-./RhineMusicDatabase-Linux-x86_64.AppImage
+chmod +x 'RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage'
+./'RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage'
 ```
 
 没有 FUSE 的环境（容器、部分滚动发行版）加上 `--appimage-extract-and-run` 参数同样可以启动。
@@ -171,7 +171,7 @@ npm run share
 ```
 
 Windows 的 `npm run share` 使用 [Inno Setup 6.3+ 或 7](https://jrsoftware.org/isdl.php)，
-只生成 `output/RhineMusicDatabase-v<版本>-Windows-x64-Setup.exe` 安装程序。
+只生成 `output/RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe` 安装程序。
 安装器默认安装到 `%LOCALAPPDATA%\Programs\RhineMusicDatabase`，无需管理员权限，提供开始菜单快捷方式、可选桌面快捷方式和卸载入口。
 应用在安装目录的 `data` 中保存账号、设置和缓存，请选择当前用户可写的目录。安装包排除构建机上的运行数据，覆盖安装和卸载保留用户的 `data`；彻底清理时可手动删除。
 
@@ -188,13 +188,17 @@ npm test
 npm run share
 ```
 
-`npm run build` 先按依赖闭包收集 Qt 库、平台插件、图像与 TLS 插件和 QML 模块到 `output/RhineMusicDatabase.AppDir`，再用 `appimagetool` 生成 `output/RhineMusicDatabase-Linux-x86_64.AppImage`。`appimagetool` 需自行安装并出现在 `PATH` 中，也可用 `APPIMAGE_TOOL` 指定路径；没有 FUSE 时脚本自动改用 `--appimage-extract-and-run`。
+`npm run build` 先按依赖闭包收集 Qt 库、平台插件、图像与 TLS 插件和 QML 模块到 `output/RhineMusicDatabase.AppDir`，再用 `appimagetool` 生成 `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`。`appimagetool` 需自行安装并出现在 `PATH` 中，也可用 `APPIMAGE_TOOL` 指定路径；没有 FUSE 时脚本自动改用 `--appimage-extract-and-run`。
 
 随包的 Node 必须是官方独立分发包：构建脚本会检查 `ldd` 结果，只依赖 glibc 运行库的构建才会被打进 AppImage，发行版自己的 `/usr/bin/node` 动态链接了系统 ICU 等库，会被拒绝。
 
 ### 开发与测试
 
 默认构建类型为 `Release`。设置 `RHINE_BUILD_TYPE=Debug` 可构建调试版本；`PYTHON` 可覆盖 Python 命令。Qt 6.12+ 安装包含官方 QML Live Preview 工具时，可使用 `npm run preview` 进行热预览。
+
+设置 `RHINE_VERSION=vX.Y.Z` 时构建正式版，分发包的构建标识为 `vX.Y.Z`。
+未指定版本时为开发版：设置中显示最后一次提交标题、12 位短 SHA 和“开发版”，三平台分发包均以短 SHA 作为构建标识。
+检查更新仅获取发布信息；点击“前往更新”会打开 [GitHub releases 页面](https://github.com/MikeQu223/Rhine-Music-Database/releases)，由浏览器下载，不在应用内下载文件。
 
 `npm test` 使用本地响应验证场景、拾取、音乐状态、账号隔离、锁定上游、打包通信和部署资源。设置 `RHINE_GPU_TEST=1` 可额外执行真实 GPU 离线渲染检查；Windows 设置 `RHINE_SOFTWARE_GPU=1` 可使用软件 GPU。离线测试不替代真实账号、在线音源、显示缩放与系统集成的实机检查。
 

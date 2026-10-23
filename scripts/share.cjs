@@ -1,6 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
-const { buildVersion } = require('./release-version.cjs');
+const { packageIdentity } = require('./release-version.cjs');
 const { app } = require('./app-layout.cjs');
 const { spawnSync } = require('node:child_process');
 process.chdir(path.resolve(__dirname, '..'));
@@ -25,24 +25,21 @@ function run(cmd, args) {
     }
 }
 if (win) {
-    // Windows 
+    // Windows
     require('./installer-windows.cjs').createInstaller();
     process.exit(0);
 }
 run(python, ['scripts/audit-qt.py', app]);
 if (linux) {
     // Linux 直接交付已构建的 AppImage，不再额外压缩，避免二次解包目录。
-    const image = path.resolve('output/RhineMusicDatabase-Linux-x86_64.AppImage');
+    const image = path.resolve(`output/RhineMusicDatabase-${packageIdentity()}-Linux-x86_64.AppImage`);
     if (!fs.existsSync(image)) {
         throw Error('AppImage was not built; run npm run build first');
     }
     console.log(image);
     process.exit(0);
 }
-const version = buildVersion();
-const name = version.release
-    ? `RhineMusicDatabase-v${version.version}-macOS-arm64`
-    : `RhineMusicDatabase-macOS-${Date.now()}`;
+const name = `RhineMusicDatabase-${packageIdentity()}-macOS-arm64`;
 const archive = path.resolve(`output/${name}.zip`);
 run('codesign', ['--verify', '--deep', '--strict', app]);
 run('ditto', ['-c', '-k', '--sequesterRsrc', '--keepParent', app, archive]);

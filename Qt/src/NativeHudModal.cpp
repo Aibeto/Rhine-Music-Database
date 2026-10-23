@@ -465,18 +465,19 @@ void NativeHud::settings(double x, double y, double width) {
     const auto &updater = m_host->updater;
     const auto buildLabel = RHINE_RELEASE_BUILD ? QString() : QString(" · 开发版");
     text("当前版本 / " + AppUpdater::currentVersion() + buildLabel, left, y + 1220, 15, "demibold");
+    if (!RHINE_RELEASE_BUILD) {
+        limited(AppUpdater::commitTitle(), left, y + 1243, 12, usable);
+    }
     button(m_host->preference("auto-update") == "off" ? "启动检查 / 关闭" : "启动检查 / 开启",
            left + usable - 235, y + 1208, 225, 36, "update:auto", 13);
     limited(updater.status(), left, y + 1260, 13, usable);
     button(updater.busy() ? "取消" : "检查更新", left, y + 1293, 160, 36,
            updater.busy() ? "update:cancel" : "update:check", 13);
     if (!updater.busy() && updater.available()) {
-        const bool downloaded = !updater.downloadedPath().isEmpty();
-        button(downloaded ? "打开下载目录" : "下载新版本", left + 175, y + 1293, 200, 36,
-               downloaded ? "update:open" : "update:download", 13);
+        button("前往更新 ↗", left + 175, y + 1293, 200, 36, "update:release", 13);
     }
     button("发布说明 ↗", left + usable - 200, y + 1293, 200, 36, "update:release", 13);
-    text("下载校验后退出并替换完整应用；Windows 请保留原 data 文件夹。", left, y + 1355, 12);
+    text("更新将打开 GitHub 发布页面，请在浏览器中下载并安装。", left, y + 1355, 12);
     restore();
     // QML 的透明输入层不会继承绘制裁切，必须同步裁剪命中区域，避免隐藏按钮拦截点击。
     QJsonArray clippedHits;

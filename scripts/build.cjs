@@ -4,7 +4,7 @@ const path = require('node:path');
 const os = require('node:os');
 const { createHash } = require('node:crypto');
 const { app: defaultAppPath, resourceDirectory } = require('./app-layout.cjs');
-const { buildVersion } = require('./release-version.cjs');
+const { buildVersion, packageIdentity } = require('./release-version.cjs');
 const { spawnSync } = require('node:child_process');
 const root = path.resolve(__dirname, '..');
 process.chdir(root);
@@ -617,7 +617,9 @@ function resolveAppImageTool(architecture) {
 
 function packageAppImage(app) {
     const architecture = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
-    const image = path.resolve(`output/RhineMusicDatabase-Linux-${architecture}.AppImage`);
+    const image = path.resolve(
+        `output/RhineMusicDatabase-${packageIdentity()}-Linux-${architecture}.AppImage`,
+    );
     fs.rmSync(image, {
         force: true,
     });
@@ -837,10 +839,6 @@ function deployApp(qt, config, existingBundle = '') {
     }
     if (linux) {
         const image = packageAppImage(app);
-        const version = buildVersion();
-        if (version.release) {
-            fs.copyFileSync(image, `output/RhineMusicDatabase-v${version.version}-Linux-x86_64.AppImage`);
-        }
         return image;
     }
     return app;

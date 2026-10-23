@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const { spawnSync } = require('node:child_process');
-const { buildVersion } = require('./release-version.cjs');
+const { buildVersion, packageIdentity } = require('./release-version.cjs');
 
 /** 优先使用显式编译器路径，再查找 Inno Setup 7/6 的系统及当前用户安装目录和 PATH。 */
 function findCompiler(environment = process.env) {
@@ -62,8 +62,9 @@ function createInstaller() {
     if (!fs.existsSync(path.join(source, 'RHINE MUSIC DATABASE.exe'))) {
         throw new Error('Run npm run build on Windows before creating the installer.');
     }
-    const { version } = buildVersion();
-    const name = `RhineMusicDatabase-v${version}-Windows-x64-Setup`;
+    const version = buildVersion();
+    const identity = packageIdentity(version);
+    const name = `RhineMusicDatabase-${identity}-Windows-x64-Setup`;
     const output = path.join(root, 'output');
     const installer = path.join(output, name + '.exe');
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rhine-installer-'));
@@ -75,7 +76,8 @@ function createInstaller() {
         run(findCompiler(), [
             '/Qp',
             `/DAppSource=${staged}`,
-            `/DAppVersion=${version}`,
+            `/DAppVersion=${version.release ? version.version : identity + ' 开发版'}`,
+            `/DNumericVersion=${version.version}`,
             `/O${output}`,
             `/F${name}`,
             path.join(__dirname, 'windows-installer.iss'),

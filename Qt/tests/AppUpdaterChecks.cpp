@@ -5,7 +5,7 @@
 #include <QDebug>
 #include <QDateTime>
 #include <QEventLoop>
-#include <QFile>
+#include <QDesktopServices>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QNetworkReply>
@@ -14,13 +14,11 @@
 #include <cstring>
 
 namespace {
-const QByteArray PACKAGE = "offline update archive fixture";
 const QString TAG = "v9.99.0";
 const QString BASE = "https://github.com/MikeQu223/Rhine-Music-Database/releases/";
 
 QJsonObject release(const QString &platform) {
     const auto name = "RhineMusicDatabase-" + TAG + '-' + platform;
-    const auto digest = QCryptographicHash::hash(PACKAGE, QCryptographicHash::Sha256).toHex();
     return {
         {"tag_name", TAG},
         {"html_url", BASE + "tag/" + TAG},
@@ -28,8 +26,7 @@ QJsonObject release(const QString &platform) {
         {"prerelease", false},
         {"assets", QJsonArray{QJsonObject{{"name", name},
                                           {"state", "uploaded"},
-                                          {"size", PACKAGE.size()},
-                                          {"digest", "sha256:" + QString::fromLatin1(digest)},
+                                          {"size", 1024},
                                           {"browser_download_url", BASE + "download/" + TAG + '/' + name}}}}};
 }
 
@@ -89,7 +86,7 @@ class Reply : public QNetworkReply {
 class Network : public QNetworkAccessManager {
   public:
     QJsonObject metadata = release(AppUpdater::platformAsset());
-    QByteArray package = PACKAGE;
+    bool onlyMetadataRequests = true;
     QByteArray responseOverride;
     int status = 200;
     int feedStatus = 200;
@@ -101,11 +98,21 @@ class Network : public QNetworkAccessManager {
         ++requests;
         const bool isFeed = request.url().path().endsWith("/update.json");
         const bool isMetadata = isFeed || request.url().host() == "api.github.com";
+        onlyMetadataRequests = onlyMetadataRequests && isMetadata;
         const auto response =
-            isMetadata ? (responseOverride.isEmpty() ? QJsonDocument(metadata).toJson() : responseOverride)
-                       : package;
+            responseOverride.isEmpty() ? QJsonDocument(metadata).toJson() : responseOverride;
         const auto responseStatus = isFeed && feedStatus != 200 ? feedStatus : status;
         return new Reply(request, response, responseStatus, headers, this);
+    }
+};
+// 捕获浏览器跳转，验证固定发布地址而不真正打开浏览器。
+class ReleasePage : public QObject {
+    Q_OBJECT
+  public:
+    QUrl opened;
+  public slots:
+    void openUrl(const QUrl &url) {
+        opened = url;
     }
 };
 bool awaitIdle(AppUpdater &updater) {
@@ -127,7 +134,7 @@ bool awaitIdle(AppUpdater &updater) {
 }
 }
 
-/** 验证真实更新控制器的版本、资产选择、网络失败、取消和落盘校验，不访问外网。 */
+/** 验证真实更新控制器的版本、平台产物、网络失败与发布页跳转，不访问外网。 */
 int main(int argc, char **argv) {
     QGuiApplication application(argc, argv);
     QTemporaryDir directory;
@@ -148,7 +155,14 @@ int main(int argc, char **argv) {
     check(!AppUpdater::isNewer("v999999999999999999999.0.0", "1.0.0"), "overflow rejected");
     check(!AppUpdater::isNewer("v2.0.0\n", "1.0.0"), "trailing newline rejected");
     check(!AppUpdater::isNewer("v01.0.0", "1.0.0"), "invalid version rejected");
-    for (const auto &platform : {"macOS-arm64.zip", "Windows-x64.zip", "Linux-x86_64.AppImage"}) {
+    check(AppUpdater::isNewer("v1.0.0", ""), "development build can discover the latest stable release");
+    {
+        QString error;
+        check(AppUpdater::selectRelease(release("Windows-x64.zip"), "Windows-x64-Setup.exe", "1.0.0", &error)
+                  .isEmpty(),
+              "Windows update must require the installer instead of the old ZIP");
+    }
+    for (const auto &platform : {"macOS-arm64.zip", "Windows-x64-Setup.exe", "Linux-x86_64.AppImage"}) {
         QString error;
         auto metadata = release(platform);
         check(!AppUpdater::selectRelease(metadata, platform, "0.4.0", &error).isEmpty(), "platform asset");
@@ -157,11 +171,6 @@ int main(int argc, char **argv) {
               "prerelease rejected");
         metadata = release(platform);
         auto asset = metadata["assets"].toArray().first().toObject();
-        asset["digest"] = "";
-        metadata["assets"] = QJsonArray{asset};
-        check(AppUpdater::selectRelease(metadata, platform, "0.4.0", &error).isEmpty(),
-              "missing hash rejected");
-        asset["digest"] = "sha256:" + QString(64, 'a');
         asset["browser_download_url"] = "https://example.com/archive.zip";
         metadata["assets"] = QJsonArray{asset};
         check(AppUpdater::selectRelease(metadata, platform, "0.4.0", &error).isEmpty(),
@@ -192,28 +201,13 @@ int main(int argc, char **argv) {
     updater.check();
     check(network.requests == 1, "duplicate checks are coalesced");
     check(awaitIdle(updater) && updater.available(), "release check succeeds");
-    updater.download();
-    check(awaitIdle(updater) && !updater.downloadedPath().isEmpty(), "verified file committed");
-    QFile file(updater.downloadedPath());
-    check(file.open(QIODevice::ReadOnly) && file.readAll() == PACKAGE, "download bytes preserved");
-    file.close();
-    file.remove();
-    network.package = QByteArray(PACKAGE.size(), 'x');
-    updater.download();
-    check(awaitIdle(updater) && updater.downloadedPath().isEmpty(), "hash mismatch discarded");
-    check(QDir(directory.path() + "/data/updates").entryList(QDir::Files).isEmpty(), "no corrupt files");
-    network.package = PACKAGE.left(PACKAGE.size() - 1);
-    updater.download();
-    check(awaitIdle(updater) && updater.downloadedPath().isEmpty(), "truncated package discarded");
-    network.package = PACKAGE + "extra";
-    updater.download();
-    check(awaitIdle(updater) && updater.downloadedPath().isEmpty(), "oversized package discarded");
-    updater.download();
-    updater.cancel();
-    check(!updater.busy() && updater.status().contains("取消"), "download cancellation");
-    network.package = PACKAGE;
-    updater.download();
-    check(awaitIdle(updater) && !updater.downloadedPath().isEmpty(), "retry after cancellation");
+    check(network.onlyMetadataRequests, "update check must only request release metadata");
+    ReleasePage page;
+    QDesktopServices::setUrlHandler("https", &page, "openUrl");
+    updater.openRelease();
+    QDesktopServices::unsetUrlHandler("https");
+    check(page.opened == QUrl("https://github.com/MikeQu223/Rhine-Music-Database/releases"),
+          "update action opens the releases page");
     network.status = 403;
     updater.check();
     check(awaitIdle(updater) && updater.status().contains("拒绝") && !updater.status().contains("额度"),
@@ -226,10 +220,9 @@ int main(int argc, char **argv) {
     updater.check();
     check(awaitIdle(updater) && updater.status().contains("无效"), "invalid JSON rejected");
     network.responseOverride.clear();
-    network.metadata["tag_name"] = "v0.0.0";
+    network.metadata["draft"] = true;
     updater.check();
-    check(awaitIdle(updater) && !updater.available() && updater.downloadedPath().isEmpty(),
-          "old release clears stale update and downloaded file selection");
+    check(awaitIdle(updater) && !updater.available(), "invalid release clears stale update selection");
     network.metadata = release(AppUpdater::platformAsset());
     updater.check();
     updater.cancel();
@@ -271,3 +264,5 @@ int main(int argc, char **argv) {
     qInfo() << "App updater regressions:" << failures << "failures";
     return failures ? 1 : 0;
 }
+
+#include "AppUpdaterChecks.moc"

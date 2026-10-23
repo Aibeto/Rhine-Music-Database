@@ -18,6 +18,7 @@ const configuration = new Set([
     'share.sh',
     'Qt/Info.plist.in',
     'Qt/WindowsIcon.rc.in',
+    'Qt/BuildIdentity.h.in',
     '.editorconfig',
     '.clang-format',
     '.prettierignore',

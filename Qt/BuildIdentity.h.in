@@ -1,0 +1,5 @@
+#pragma once
+
+// 构建时从当前仓库读取，运行时不依赖 Git 或源码目录。
+#define RHINE_COMMIT_SHA "@RHINE_COMMIT_SHA@"
+#define RHINE_COMMIT_TITLE "@RHINE_COMMIT_TITLE@"

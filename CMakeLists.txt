@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
-# 发布版本在构建前由 Action 注入；本地默认版本保持可独立构建。
+# 正式版本在构建前注入；开发版仅保留系统资源所需的数字占位。
 set(RHINE_VERSION
-    "0.4.0"
+    "0.0.0"
     CACHE STRING "Application release version")
 option(RHINE_RELEASE_BUILD "Build a versioned public release" OFF)
 if(NOT RHINE_VERSION MATCHES "^(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$")
@@ -12,6 +12,29 @@ project(
     VERSION ${RHINE_VERSION}
     LANGUAGES CXX)
 set(RHINE_APPLICATION_ID "rhine.music.database")
+find_package(Git QUIET)
+set(RHINE_COMMIT_SHA "unknown")
+set(RHINE_COMMIT_TITLE "未知提交")
+if(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" log -1 --format=%h --abbrev=12
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE commitSha
+        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -c i18n.logOutputEncoding=UTF-8 log -1 --format=%s
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE commitTitle
+        OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET ENCODING UTF-8)
+    if(commitSha AND commitTitle)
+        set(RHINE_COMMIT_SHA "${commitSha}")
+        set(RHINE_COMMIT_TITLE "${commitTitle}")
+    endif()
+endif()
+# 提交标题可能包含引号和反斜杠，写入生成头文件前先转义 C++ 字符串。
+string(REPLACE "\\" "\\\\" RHINE_COMMIT_TITLE "${RHINE_COMMIT_TITLE}")
+string(REPLACE "\"" "\\\"" RHINE_COMMIT_TITLE "${RHINE_COMMIT_TITLE}")
+configure_file(Qt/BuildIdentity.h.in "${CMAKE_CURRENT_BINARY_DIR}/BuildIdentity.h" @ONLY)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_AUTOMOC ON)
@@ -166,8 +189,8 @@ add_library(RhineCore STATIC ${RHINE_CORE_SOURCES})
 target_include_directories(
     RhineCore
     PUBLIC Qt/src
-    PRIVATE vendor/qrcodegen "${taglib_SOURCE_DIR}/taglib" "${taglib_SOURCE_DIR}/taglib/toolkit"
-            "${taglib_BINARY_DIR}")
+    PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" vendor/qrcodegen "${taglib_SOURCE_DIR}/taglib"
+            "${taglib_SOURCE_DIR}/taglib/toolkit" "${taglib_BINARY_DIR}")
 target_compile_definitions(
     RhineCore PUBLIC RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}" RHINE_VERSION="${PROJECT_VERSION}"
                      RHINE_RELEASE_BUILD=$<BOOL:${RHINE_RELEASE_BUILD}>)
@@ -346,7 +369,8 @@ if(MSVC)
 endif()
 if(RHINE_VISUAL_TESTS)
     add_test(NAME qt_scene_motion_regression
-             COMMAND RhineSceneMotionRegression "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/scene-motion.qz")
+             COMMAND RhineSceneMotionRegression
+                     "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/scene-motion.qz")
 endif()
 qt_add_executable(RhineUiMotionRegression Qt/tests/UiMotionRegression.cpp Qt/src/UiMotion.cpp)
 target_include_directories(RhineUiMotionRegression PRIVATE Qt/src)
@@ -355,8 +379,8 @@ if(MSVC)
     target_compile_options(RhineUiMotionRegression PRIVATE /utf-8)
 endif()
 if(RHINE_VISUAL_TESTS)
-    add_test(NAME qt_ui_motion_regression COMMAND RhineUiMotionRegression
-                                                  "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/ui-motion.qz")
+    add_test(NAME qt_ui_motion_regression
+             COMMAND RhineUiMotionRegression "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/ui-motion.qz")
 endif()
 qt_add_executable(RhinePlatformRegression Qt/tests/PlatformRegression.cpp Qt/src/AppStorage.cpp
                   Qt/src/AudioPlayer.cpp Qt/src/HttpAudioStream.cpp Qt/src/ProcessMetrics.cpp)
@@ -430,8 +454,8 @@ target_link_libraries(RhineNativeHudRegression PRIVATE RhineCore)
 if(MSVC)
     target_compile_options(RhineNativeHudRegression PRIVATE /utf-8)
 endif()
-add_test(NAME qt_native_hud_regression
-         COMMAND RhineNativeHudRegression "${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
+add_test(NAME qt_native_hud_regression COMMAND RhineNativeHudRegression
+                                               "${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
 set_tests_properties(qt_native_hud_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 qt_add_executable(RhineUpdaterRegression Qt/tests/AppUpdaterChecks.cpp)
