@@ -217,7 +217,7 @@ void MusicPlayer::enqueue(const QJsonObject &track, bool next) {
 
 /** 停止旧音源并推进代数，先完成元数据再交付播放；迟到的地址不能恢复旧曲目。 */
 void MusicPlayer::play(QJsonObject track, std::optional<QJsonArray> source, std::optional<int> queueIndex,
-                       bool preview) {
+                       bool preview, std::optional<QJsonObject> resume) {
     if (track["kind"] != "song" || (m_api->provider == "local" && track["provider"] != "local") ||
         (m_api->provider != "local" && track["provider"] == "local")) {
         return;
@@ -247,7 +247,9 @@ void MusicPlayer::play(QJsonObject track, std::optional<QJsonArray> source, std:
     }
     index = queueIndex.value_or(selected);
     const auto generation = ++m_generation;
-    m_resumePosition.reset();
+    m_resumePosition = resume ? std::optional<double>(resume->value("position").toDouble()) : std::nullopt;
+    m_resumePaused = resume && !resume->value("requested").toBool();
+    m_restoringSession = resume.has_value();
     m_recoveryAttempts = 0;
     previewRequested = preview && m_api->provider == "qq";
     m_host->mediaControl("stop");
@@ -322,7 +324,9 @@ void MusicPlayer::prepare(QJsonObject track, quint64 generation, bool reload) {
                 emit changed();
             });
         }
-        emit trackSelected(current);
+        if (!m_restoringSession) {
+            emit trackSelected(current);
+        }
         lyrics.load(current);
     }
     if (track["provider"] == "local") {
@@ -333,10 +337,12 @@ void MusicPlayer::prepare(QJsonObject track, quint64 generation, bool reload) {
         }
         m_host->mediaMetadata(track["title"].toString(), track["artist"].toString(),
                               track["album"].toString());
-        if (!m_host->mediaLoad(url.toString())) {
+        if (!m_host->mediaLoad(url.toString(), false, m_resumePosition.value_or(0),
+                               m_resumePosition && m_resumePaused)) {
             fail(QStringLiteral("本地音频无法加载"));
             return;
         }
+        m_resumePosition.reset();
         m_endSerial = m_host->mediaState().value("ended").toLongLong();
         actualQuality = localQuality(track);
         status = QStringLiteral("正在播放本地文件：") + track["format"].toString();
@@ -377,13 +383,12 @@ void MusicPlayer::prepare(QJsonObject track, quint64 generation, bool reload) {
             }
             m_host->mediaMetadata(track["title"].toString(), track["artist"].toString(),
                                   track["album"].toString());
-            if (!m_host->mediaLoad(url, m_api->provider == "netease" && alternative)) {
+            if (!m_host->mediaLoad(url, m_api->provider == "netease" && alternative,
+                                   m_resumePosition.value_or(0), m_resumePosition && m_resumePaused)) {
                 fail(QStringLiteral("音频地址不可用"));
                 return;
             }
-            if (m_resumePosition && m_resumePaused) {
-                m_host->mediaControl("pause");
-            }
+            m_resumePosition.reset();
             m_endSerial = m_host->mediaState().value("ended").toLongLong();
             auto entry = track;
             entry["wiki"] = "";
@@ -420,7 +425,9 @@ void MusicPlayer::prepare(QJsonObject track, quint64 generation, bool reload) {
 }
 
 void MusicPlayer::fail(QString error) {
-    m_resumePosition.reset();
+    if (!m_restoringSession) {
+        m_resumePosition.reset();
+    }
     failed = true;
     actualQuality.clear();
     status = error;
@@ -489,12 +496,13 @@ void MusicPlayer::tick(double time, bool force) {
 }
 
 void MusicPlayer::toggle() {
-    if (m_resumePosition) {
-        setPaused(!m_resumePaused);
+    if (failed && !current.isEmpty()) {
+        const auto resume = m_resumePosition ? std::optional<QJsonObject>(sessionState()) : std::nullopt;
+        play(current, std::nullopt, index, previewRequested, resume);
         return;
     }
-    if (failed && !current.isEmpty()) {
-        play(current, std::nullopt, index, previewRequested);
+    if (m_resumePosition) {
+        setPaused(!m_resumePaused);
         return;
     }
     if (!loading && !current.isEmpty()) {

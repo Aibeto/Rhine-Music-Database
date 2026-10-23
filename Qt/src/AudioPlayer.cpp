@@ -279,14 +279,18 @@ void AudioPlayer::followDefaultOutput() {
         // 先等新会话加载并恢复跳转，再开始播放，避免原生后端启动时覆盖待恢复的位置。
         return;
     }
-    if (playbackRequested) {
+    if (playbackRequested && recoveryPosition < 0) {
         player->play();
     }
 }
 /**
  * 校验音源并交给系统解码播放，沿用原生状态和错误反馈。
  */
-bool AudioPlayer::load(QString input, bool offline, bool alternative, QString provider) {
+bool AudioPlayer::load(QString input, bool offline, bool alternative, QString provider, double position,
+                       bool paused) {
+    if (!std::isfinite(position) || position < 0 || position > 1e12) {
+        return false;
+    }
     QUrl url(input);
     const auto host = url.host();
     const bool qq = provider == "qq" && (host == "qqmusic.qq.com" || host.endsWith(".qqmusic.qq.com"));
@@ -336,8 +340,8 @@ bool AudioPlayer::load(QString input, bool offline, bool alternative, QString pr
         observeDecodedBuffers();
     }
     playbackRequested = false;
-    lastPosition = 0;
     recoveryPosition = -1;
+    lastPosition = 0;
     error.clear();
     pendingFailure = false;
     failureRecoverable = false;
@@ -345,15 +349,17 @@ bool AudioPlayer::load(QString input, bool offline, bool alternative, QString pr
     progressClock.restart();
     pendingSource.clear();
     followDefaultOutput();
+    recoveryPosition = position > 0 ? qint64(position) : -1;
+    lastPosition = qint64(position);
     if (outputUnavailable) {
         // 没有设备时延后创建解码拓扑，避免启动后再连接耳机被误报为音源错误。
         pendingSource = url;
         player->setSource({});
-        playbackRequested = true;
+        playbackRequested = !paused;
         diagnose("load");
         return true;
     }
-    playbackRequested = true;
+    playbackRequested = !paused;
     startMediaSource(url);
     if (playbackRequested) {
         playbackWatchdog.start();
@@ -384,7 +390,7 @@ void AudioPlayer::control(QString action, double value) {
             sourceEnded = false;
         }
         followDefaultOutput();
-        if (!outputUnavailable) {
+        if (!outputUnavailable && recoveryPosition < 0) {
             player->play();
         }
     } else if (action == "stop") {

@@ -32,6 +32,8 @@ class MusicLibrary : public QObject {
     using Completion = std::function<void(bool)>;
     MusicLibrary(Host *host, const QJsonObject &content, QObject *parent = nullptr);
     ~MusicLibrary() override;
+    QJsonObject sessionState() const;
+    bool restoreSessionState(const QJsonObject &saved);
     void changed();
     bool isLocal() const {
         return provider == "local";

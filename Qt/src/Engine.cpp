@@ -24,6 +24,8 @@ Engine::Engine(QString path, bool offline, QObject *parent)
     connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
     connect(&app->hud, &NativeHud::localImportRequested, this, &Engine::localImportRequested);
     app->initialize();
+    connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this,
+            [this] { app->saveSession(); });
     connect(&host, &Host::invalidated, this, [this] { wake(false); });
     connect(&host, &Host::mediaChanged, this, &Engine::pollMedia, Qt::QueuedConnection);
     connect(&host, &Host::mediaAction, this, [this](QString value) {

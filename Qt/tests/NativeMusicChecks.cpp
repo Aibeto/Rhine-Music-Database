@@ -69,6 +69,8 @@ QString createTestAudio(QTemporaryDir &dir) {
 }
 }
 
+bool runNativeSessionChecks(const QString &root, const QString &audioURL);
+
 bool runNativeMusicChecks(const QString &root) {
     QFile file(root + "/slots.json");
     if (!file.open(QIODevice::ReadOnly)) {
@@ -251,6 +253,8 @@ bool runNativeMusicChecks(const QString &root) {
     check(normalizedSong.contains("id") && normalizedSong.contains("title"),
           "music data structure");
 
+    library.player.stop();
+    ok &= runNativeSessionChecks(root, audioURL);
     host.shutdown();
     qInfo() << "Native music core tests:" << testCount << (ok ? "passed" : "FAILED");
     return ok;

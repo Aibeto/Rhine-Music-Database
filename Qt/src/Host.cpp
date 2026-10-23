@@ -841,7 +841,7 @@ void Host::playOfficial(QString id, TextReply callback) {
         }
     });
 }
-bool Host::mediaLoad(QString url, bool alternative) {
+bool Host::mediaLoad(QString url, bool alternative, double position, bool paused) {
     if (!audio) {
         audio = std::make_unique<AudioPlayer>([this] { emit mediaChanged(); });
         audio->diagnosticEvent = [this](const QString &event, const QJsonObject &values) {
@@ -849,7 +849,7 @@ bool Host::mediaLoad(QString url, bool alternative) {
         };
         audio->enableDiagnostics(audioDiagnosticsEnabled);
     }
-    return audio->load(url, offline, alternative, provider);
+    return audio->load(url, offline, alternative, provider, position, paused);
 }
 void Host::mediaControl(QString action, double value) {
     if (!audio && action == "volume") {

@@ -7,6 +7,9 @@ class NativeApplication : public QObject {
     NativeApplication(Host *host, Glyphs *glyphs, NativeScene *scene, QJsonObject content,
                       QObject *parent = nullptr);
     void initialize();
+    QJsonObject sessionState() const;
+    bool restoreSessionState(const QJsonObject &saved);
+    void saveSession();
     QJsonObject step(double time, double width, bool reuseScene = false);
     void poll(double time, bool force = false);
     void mediaAction(QString action);

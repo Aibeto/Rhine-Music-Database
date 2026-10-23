@@ -39,7 +39,8 @@ class Host : public QObject {
     Q_INVOKABLE QString qr(QString key);
     Q_INVOKABLE QString qrImage(QString data);
     Q_INVOKABLE void mediaMetadata(QString title, QString artist, QString album);
-    Q_INVOKABLE bool mediaLoad(QString url, bool alternative = false);
+    Q_INVOKABLE bool mediaLoad(QString url, bool alternative = false, double position = 0,
+                               bool paused = false);
     Q_INVOKABLE void mediaControl(QString action, double value = 0);
     Q_INVOKABLE QVariantMap mediaState() const;
     Q_INVOKABLE void copy(QString text);

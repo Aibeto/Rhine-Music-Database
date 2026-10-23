@@ -85,6 +85,7 @@ set(RHINE_APP_SOURCES
     Qt/tests/SceneEnhancementChecks.cpp
     Qt/tests/NativeHostChecks.cpp
     Qt/tests/NativeMusicChecks.cpp
+    Qt/tests/SessionChecks.cpp
     Qt/src/Icon.cpp
     Qt/src/main.cpp
     Qt/src/Host.cpp
@@ -93,6 +94,7 @@ set(RHINE_APP_SOURCES
     Qt/src/MusicApi.h
     Qt/src/LyricsController.cpp
     Qt/src/LyricsController.h
+    Qt/src/MusicSession.cpp
     Qt/src/MusicPlayer.cpp
     Qt/src/MusicPlayer.h
     Qt/src/MusicData.cpp

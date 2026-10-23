@@ -1,4 +1,7 @@
 #include "NativeApplication.h"
+#include "AppStorage.h"
+#include <QFile>
+#include <QJsonDocument>
 #include <cmath>
 
 HudSceneActions NativeApplication::sceneActions(NativeScene *scene) {
@@ -45,6 +48,12 @@ void NativeApplication::initialize() {
     bool valid = false;
     const auto volume = saved.toDouble(&valid);
     music.player.volume(valid && std::isfinite(volume) ? volume : 0.7);
+    if (!m_host->offline) {
+        QFile file(AppStorage::dataDirectory() + "/session.json");
+        if (file.open(QIODevice::ReadOnly) && file.size() <= 64 * 1024 * 1024) {
+            restoreSessionState(QJsonDocument::fromJson(file.readAll()).object());
+        }
+    }
     music.restoreAccount();
     music.restoreIdentityName();
 }

@@ -8,7 +8,10 @@ class MusicPlayer : public QObject {
     MusicPlayer(Host *host, MusicApi *api, QObject *parent = nullptr);
     void enqueue(const QJsonObject &track, bool next = false);
     void play(QJsonObject track, std::optional<QJsonArray> source = std::nullopt,
-              std::optional<int> queueIndex = std::nullopt, bool preview = false);
+              std::optional<int> queueIndex = std::nullopt, bool preview = false,
+              std::optional<QJsonObject> resume = std::nullopt);
+    QJsonObject sessionState() const;
+    void restoreSessionState(const QJsonObject &saved);
     void tick(double time, bool force = false);
     void toggle();
     void setPaused(bool paused);
@@ -54,6 +57,7 @@ class MusicPlayer : public QObject {
     double m_lastPoll = -1;
     std::optional<double> m_resumePosition;
     bool m_resumePaused = false;
+    bool m_restoringSession = false;
     int m_recoveryAttempts = 0;
     void recoverPlayback();
     MusicApi::Valid valid(quint64 generation);
