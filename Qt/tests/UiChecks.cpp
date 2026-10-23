@@ -211,6 +211,31 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     settle();
     check(window->visibility() == initialVisibility, "fullscreen restore");
 
+    // Tab 仅切换信息展示；开关前后保持默认背景构图与实际投影完全一致。
+    const auto savedItem = music.current;
+    const auto savedTrackList = hud.trackListMode;
+    const auto savedLyrics = hud.lyricsMode;
+    const auto savedModal = hud.modal;
+    music.current = MusicData::item("song", "42", "构图回归", "离线测试");
+    hud.modal.clear();
+    hud.lyricsMode = false;
+    hud.trackListMode = false;
+    backend.scene.review("archive");
+    backend.step(90);
+    const QJsonValue defaultProjection = backend.frame()["projection"];
+    backend.action("archive:tab-mode");
+    backend.step(90.1);
+    check(hud.trackListMode, "tab list enabled");
+    check(backend.frame()["projection"] == defaultProjection, "tab keeps default composition");
+    backend.action("archive:tab-mode");
+    backend.step(90.2);
+    check(!hud.trackListMode, "tab list disabled");
+    check(backend.frame()["projection"] == defaultProjection, "tab exit keeps default composition");
+    music.current = savedItem;
+    hud.trackListMode = savedTrackList;
+    hud.lyricsMode = savedLyrics;
+    hud.modal = savedModal;
+
     // 场景增强使用同一真实窗口继续验收，不重复创建应用实例。
     ok &= runSceneEnhancementChecks(backend, window, output.isEmpty() ? QString() : output + "/enhancement");
 

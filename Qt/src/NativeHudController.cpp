@@ -33,6 +33,11 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     startupAnimation = host->preference("startup-animation") == "on";
     discRotation = host->preference("disc-rotation") == "on";
     sceneEnhancement = host->preference("scene-enhancement") != "off";
+    bool hasMaskStrength = false;
+    const auto savedMaskStrength = host->preference("archive-mask-strength").toInt(&hasMaskStrength);
+    if (hasMaskStrength) {
+        archiveMaskStrength = std::clamp(savedMaskStrength, 0, 100);
+    }
     connect(&host->updater, &AppUpdater::updateAvailable, this, [this] {
         m_music->status = "发现新版本 " + m_host->updater.latestVersion() + "，可在设置中下载更新";
     });
@@ -578,6 +583,13 @@ void NativeHud::action(QString value) {
         dark = themeMode == "system" ? m_host->systemDark() : themeMode == "dark";
         m_scene.theme(dark);
         m_host->setPreference("theme", themeMode);
+    } else if (value.startsWith("archive-mask:")) {
+        bool valid = false;
+        const auto strength = value.mid(13).toInt(&valid);
+        if (valid) {
+            archiveMaskStrength = std::clamp(strength, 0, 100);
+            m_host->setPreference("archive-mask-strength", QString::number(archiveMaskStrength));
+        }
     } else if (value == "scene-enhancement") {
         sceneEnhancement = !sceneEnhancement;
         m_host->setPreference("scene-enhancement", sceneEnhancement ? "on" : "off");

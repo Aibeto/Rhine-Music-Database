@@ -85,9 +85,7 @@ void NativeScene::emitFrame(double time) {
             returningKeys.append(actor.musicKey);
         }
     }
-    frame = {{"pendingAnimations",
-              m_viewer->pending() || std::abs(m_trackListBlend - (m_trackListView ? 1.0 : 0.0)) > 0.0001},
-             {"trackListBlend", m_trackListBlend},
+    frame = {{"pendingAnimations", m_viewer->pending()},
              {"pointerCursor", m_cursor},
              {"aoProjection", m_aoProjection.json()},
              {"reference", m_sceneFreeze.has_value()},

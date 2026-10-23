@@ -185,6 +185,7 @@ QJsonObject NativeHud::state() const {
             {"dark", dark},
             {"reduced", reduced},
             {"sceneEnhancement", sceneEnhancement},
+            {"archiveMaskStrength", archiveMaskStrength},
             {"trackListMode", trackListMode},
             {"mode", frame["mode"]},
             {"viewer", frame["viewer"]},
@@ -219,6 +220,9 @@ void NativeHud::draw(QJsonObject next, double stageWidth, double time) {
     } else if (frame["mode"] == "boot") {
         boot(width);
     } else {
+        if (frame["mode"] == "archive" && !(lyricsMode && !m_music->player.current.isEmpty())) {
+            archiveMask(width);
+        }
         brand();
         navigation(width);
         footer(width);
@@ -237,6 +241,21 @@ void NativeHud::draw(QJsonObject next, double stageWidth, double time) {
         playerBar(0, 984, width);
     }
 }
+void NativeHud::archiveMask(double width) {
+    if (archiveMaskStrength == 0) {
+        return;
+    }
+    // 遮罩设置
+    constexpr double FadeWidth = 300;
+    const auto opacity = archiveMaskStrength / 100.;
+    const auto color = dark ? QJsonArray{0.055, 0.075, 0.08, opacity} : QJsonArray{0.9, 0.89, 0.86, opacity};
+    const auto fadeEnd = navigationLeft(width);
+    const auto fadeStart = fadeEnd - FadeWidth;
+    save();
+    clip(0, 0, width, 984);
+    op({"right-mask", color, fadeStart, fadeEnd - fadeStart, width, 984});
+    restore();
+}
 void NativeHud::brand() {
     roll("music-brand", m_music->libraryName(), 59, 115.425, 44, std::min(720.0, width * 0.45), "bold");
     aligned("RHINE LAB / MUSIC DATABASE", 59, 173, 14, "demibold", 1);
@@ -251,8 +270,11 @@ void NativeHud::brandLine(int index) {
         text("INDEX / COLLECTION / TRACK", 59, 228, 11, "regular", 1.2);
     }
 }
+double NativeHud::navigationLeft(double width) {
+    return width - 789;
+}
 void NativeHud::navigation(double width) {
-    const auto x = width - 579;
+    const auto x = navigationLeft(width) + 210;
     if (m_music->isLocal()) {
         control("文件夹管理 ＋", x - 210, 118, 184, "discover");
     } else {
@@ -278,7 +300,7 @@ void NativeHud::footer(double width) {
     text(credit, width - 59 - m_glyphs->width(credit, 10, "demibold"), 967, 10, "demibold");
 }
 void NativeHud::empty(double width) {
-    const auto x = width * 0.50520833;
+    const auto x = navigationLeft(width);
     auto &music = *m_music;
     if (music.directory) {
         control("← 返回上一级", 59, 211, 280, "music:parent");
@@ -311,7 +333,7 @@ void NativeHud::archive(double width) {
     auto &music = *m_music;
     const auto item = music.current;
     if (!item.isEmpty() && !item["id"].toString().isEmpty()) {
-        const auto x = width * 0.50520833;
+        const auto x = navigationLeft(width);
         if (music.directory) {
             control("← 返回上一级", 59, 211, 280, "music:parent");
             const auto kind = music.directory->item["kind"].toString();

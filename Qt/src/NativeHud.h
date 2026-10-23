@@ -82,7 +82,7 @@ class NativeHud : public QObject {
     // 设置沿用原舞台坐标与行高，只在固定标题下滚动内容。
     static constexpr double SettingsViewportTop = 176;
     static constexpr double SettingsViewportBottom = 836;
-    static constexpr double SettingsContentBottom = 1550;
+    static constexpr double SettingsContentBottom = 1600;
     double settingsScroll = 0;
     double settingsScrollMaximum() const {
         return SettingsContentBottom - SettingsViewportBottom;
@@ -92,6 +92,7 @@ class NativeHud : public QObject {
     bool startupAnimation = false;
     bool discRotation = false;
     bool sceneEnhancement = true;
+    int archiveMaskStrength = 50;
     bool closing = false;
     bool lyricsMode = false;
     bool trackListMode = false;
@@ -180,6 +181,8 @@ class NativeHud : public QObject {
     void art(QString key, double x, double y, double size, int count = -1, double tracking = 0,
              QJsonArray color = {});
     void brand();
+    static double navigationLeft(double width);
+    void archiveMask(double width);
     void brandLine(int index);
     void navigation(double width);
     void footer(double width);

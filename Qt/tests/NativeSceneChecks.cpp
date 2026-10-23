@@ -102,8 +102,15 @@ bool runNativeSceneChecks(const QString &root, const QString &fixturePath) {
     }
     native.review("archive");
     bool ok = true;
+    const auto recordPath = qEnvironmentVariable("RHINE_NATIVE_SCENE_RECORD");
+    QJsonArray recordedFrames;
     const auto compare = [&](double time, const QString &name) {
         const auto actual = normalize(native.sample(time), native.drawBuffers);
+        // 仅显式录制时输出新基准；正常运行始终对照已保存的场景快照。
+        if (!recordPath.isEmpty()) {
+            recordedFrames.append(QJsonObject{{"name", name}, {"time", time}, {"frame", actual}});
+            return true;
+        }
         const auto expected = references.value(name)["frame"].toObject();
         bool same = true;
         for (auto entry = actual.begin(); entry != actual.end(); ++entry) {
@@ -222,21 +229,21 @@ bool runNativeSceneChecks(const QString &root, const QString &fixturePath) {
             }
         }
     }
-    shifted.setTrackListView(true);
-    const auto listFrame = shifted.sample(6.02);
-    bool shiftedPick = false;
-    if (pickedPoint) {
-        const auto cell = shifted.pick(pickedPoint->x() - 1920 * 0.08, pickedPoint->y() + 1080 * 0.10);
-        shiftedPick = cell && shifted.isSelectedCell(*cell);
-    }
-    shifted.setTrackListView(false);
-    const auto restored = shifted.sample(6.03);
-    const bool projectionRestored = restored["projection"] == baseline["projection"];
-    const bool listShifted = listFrame["trackListBlend"].toDouble() == 1;
-    if (!pickedPoint || !shiftedPick || !projectionRestored || !listShifted) {
-        qCritical() << "Tab archive shift and picking regression" << bool(pickedPoint) << shiftedPick
-                    << projectionRestored << listShifted;
+    const auto projection = baseline["projection"].toArray();
+    const auto aoProjection = baseline["aoProjection"].toArray();
+    const bool defaultShift = std::abs(projection.at(8).toDouble() - 0.16) < 1e-8 &&
+                              std::abs(projection.at(9).toDouble() - 0.20) < 1e-8;
+    const bool aoAligned = projection.at(8) == aoProjection.at(8) && projection.at(9) == aoProjection.at(9);
+    const auto stable = shifted.sample(6.02);
+    if (!pickedPoint || !defaultShift || !aoAligned || stable["projection"] != baseline["projection"]) {
+        qCritical() << "Default archive composition and picking regression" << bool(pickedPoint)
+                    << defaultShift << aoAligned;
         ok = false;
+    }
+    if (ok && !recordPath.isEmpty()) {
+        QFile output(recordPath);
+        const auto bytes = qCompress(QJsonDocument(recordedFrames).toJson(QJsonDocument::Compact));
+        ok = output.open(QIODevice::WriteOnly) && output.write(bytes) == bytes.size();
     }
     qInfo() << "Native scene camera, materials and frame buffers:" << (ok ? "passed" : "FAILED");
     return ok;

@@ -22,7 +22,6 @@ class NativeScene {
     bool ready() const;
     QJsonObject sample(double time, bool advance = true);
     void setMode(QString mode);
-    bool setTrackListView(bool enabled);
     void select(int index, QJsonObject navigation = {});
     void navigate(QString axis, int direction);
     int selection() const;
@@ -138,8 +137,6 @@ class NativeScene {
     double m_targetReveal = 0;
     double m_detail = 0;
     double m_targetDetail = 0;
-    double m_trackListBlend = 0;
-    bool m_trackListView = false;
     double m_rotation = 0;
     double m_targetRotation = 0;
     double m_scanTime = 29.1;

@@ -6,6 +6,8 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
+#include <QPainter>
+#include <cmath>
 
 namespace {
 QJsonObject song(int index) {
@@ -67,11 +69,8 @@ MusicLibrary *createTestMusicLibrary(Host *host, const QString &provider, const 
     music->player.queue = songs;
     music->player.current = music->current;
     music->player.index = 2;
-    music->player.state = {{"playing", true},
-                           {"position", 45678},
-                           {"duration", 180000},
-                           {"volume", 0.7},
-                           {"seekable", true}};
+    music->player.state = {
+        {"playing", true}, {"position", 45678}, {"duration", 180000}, {"volume", 0.7}, {"seekable", true}};
     music->player.status = "原生播放器";
     music->player.quality = "exhigh";
     music->player.alternative = false;
@@ -118,6 +117,95 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                 qCritical() << "Archive panel hits empty" << provider << (dark ? "dark" : "light");
                 ok = false;
             }
+
+            // 关闭遮罩必须恢复原绘制和命中；开启后只增加一个右侧遮罩。
+            hud.action("archive-mask:0");
+            hud.draw(archiveFrame, 1920, 50);
+            const auto unmaskedCommands = hud.commands;
+            const auto unmaskedHits = hud.hits;
+            hud.action("archive-mask:100");
+            hud.draw(archiveFrame, 1920, 50);
+            int maskCount = 0;
+            QJsonArray maskCommand;
+            for (const auto &command : hud.commands) {
+                const auto values = command.toArray();
+                if (values.first() == "right-mask") {
+                    ++maskCount;
+                    maskCommand = values;
+                }
+            }
+            if (maskCount == 1) {
+                const auto maskStart = maskCommand.at(2).toDouble();
+                const auto maskEnd = maskStart + maskCommand.at(3).toDouble();
+                const auto discoverLeft = getHit(hud.hits, "discover")["x"].toDouble() + 10;
+                const auto expectedEnd = discoverLeft;
+                const auto expectedStart = discoverLeft - 300;
+                QImage maskImage(1920, 1080, QImage::Format_ARGB32_Premultiplied);
+                maskImage.fill(Qt::transparent);
+                QPainter painter(&maskImage);
+                glyphs.commands(painter, QJsonArray{maskCommand}, [](QString) { return QImage(); });
+                painter.end();
+                const auto beforeAlpha = qAlpha(maskImage.pixel(int(maskStart) - 1, 400));
+                const auto endAlpha = qAlpha(maskImage.pixel(int(std::ceil(maskEnd)) + 1, 400));
+                const auto rightAlpha = qAlpha(maskImage.pixel(1919, 400));
+                const auto alphaAt = [&](double fraction) {
+                    const auto sampleX = int(maskStart + (maskEnd - maskStart) * fraction);
+                    return qAlpha(maskImage.pixel(sampleX, 400));
+                };
+                // 强度按平滑曲线提升：起点与终点附近变化很小，中段保持单调增强。
+                const auto earlyAlpha = alphaAt(0.1);
+                const auto middleAlpha = alphaAt(0.5);
+                const auto lateAlpha = alphaAt(0.9);
+                const auto rising = earlyAlpha < alphaAt(0.25) && alphaAt(0.25) < middleAlpha &&
+                                    middleAlpha < alphaAt(0.75) && alphaAt(0.75) < lateAlpha;
+                const auto eased = earlyAlpha <= 16 && std::abs(middleAlpha - 128) <= 10 &&
+                                   lateAlpha >= 238 && lateAlpha <= 252;
+                if (!rising || !eased) {
+                    qCritical() << "Mask strength must ease in and out" << earlyAlpha << middleAlpha
+                                << lateAlpha;
+                    ok = false;
+                }
+                const auto placed = std::abs(maskStart - expectedStart) <= 0.01 &&
+                                    std::abs(maskEnd - expectedEnd) <= 0.01 && maskStart < discoverLeft;
+                const auto solid = beforeAlpha == 0 && endAlpha == 255 && rightAlpha == 255;
+                if (!placed || !solid) {
+                    qCritical() << "Mask must reach maximum at the discover entry and fade in to its left";
+                    ok = false;
+                }
+            }
+            hud.action("archive-mask:0");
+            hud.draw(archiveFrame, 1920, 50);
+            if (maskCount != 1 || hud.commands != unmaskedCommands || hud.hits != unmaskedHits) {
+                qCritical() << "Information mask did not restore original HUD";
+                ok = false;
+            }
+            hud.action("archive-mask:150");
+            if (hud.archiveMaskStrength != 100) {
+                qCritical() << "Mask strength exceeded upper bound";
+                ok = false;
+            }
+            hud.action("archive-mask:-10");
+            if (hud.archiveMaskStrength != 0) {
+                qCritical() << "Mask strength exceeded lower bound";
+                ok = false;
+            }
+            hud.action("archive-mask:50");
+            const auto originalItem = music->current;
+            for (const auto &kind : {"song", "playlist", "album", "artist"}) {
+                music->current["kind"] = kind;
+                hud.draw(archiveFrame, 1920, 50);
+                int informationMasks = 0;
+                for (const auto &command : hud.commands) {
+                    if (command.toArray().first() == "right-mask") {
+                        ++informationMasks;
+                    }
+                }
+                if (informationMasks != 1) {
+                    qCritical() << "Information mask missing for archive kind" << kind;
+                    ok = false;
+                }
+            }
+            music->current = originalItem;
 
             // === 测试 2: Settings 面板功能 ===
             hud.openModal("settings");
@@ -229,8 +317,8 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             // 平滑滚轮的后续帧只补送距离，不再带有角度增量，仍需继续滚动。
             hud.wheel(bounds.center().x(), bounds.top() + 500, 0, 0, 75.);
             if (hud.settingsScroll != 75.) {
-                qCritical() << "Settings smoothed wheel frame failed" << provider
-                            << (dark ? "dark" : "light") << "scroll:" << hud.settingsScroll;
+                qCritical() << "Settings smoothed wheel frame failed" << provider << (dark ? "dark" : "light")
+                            << "scroll:" << hud.settingsScroll;
                 ok = false;
             }
 
@@ -309,8 +397,7 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             }
             hud.action("discover:categories");
             hud.draw(archiveFrame, 1920, 50);
-            if (!hasAction(hud.hits, "discover:category:1") ||
-                !hasAction(hud.hits, "discover:category:2")) {
+            if (!hasAction(hud.hits, "discover:category:1") || !hasAction(hud.hits, "discover:category:2")) {
                 qCritical() << provider << "category list missing choices" << (dark ? "dark" : "light");
                 ok = false;
             }

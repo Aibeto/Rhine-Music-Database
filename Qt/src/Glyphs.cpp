@@ -2,6 +2,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLinearGradient>
 #include <QRadialGradient>
 #include <QRegularExpression>
 #include <cmath>
@@ -312,6 +313,21 @@ void Glyphs::commands(QPainter &c, const QJsonArray &commands, std::function<QIm
             c.setPen(QPen(color(a[7]), n(6), Qt::SolidLine, Qt::RoundCap));
             c.setBrush(Qt::NoBrush);
             c.drawPath(p);
+        } else if (op == "right-mask") {
+            // 强度沿平滑曲线提升
+            const auto baseColor = color(a[1]);
+            const auto start = n(2);
+            const auto span = n(3);
+            QLinearGradient gradient(QPointF(start, 0), QPointF(start + span, 0));
+            constexpr int MaskSteps = 16;
+            for (int step = 0; step <= MaskSteps; ++step) {
+                const auto progress = double(step) / MaskSteps;
+                const auto eased = progress * progress * (3 - 2 * progress);
+                auto stopColor = baseColor;
+                stopColor.setAlphaF(baseColor.alphaF() * eased);
+                gradient.setColorAt(progress, stopColor);
+            }
+            c.fillRect(QRectF(start, 0, n(4) - start, n(5)), gradient);
         } else if (op == "gradient") {
             QRadialGradient gradient(QPointF(979.2, 518.4), 1100);
             gradient.setColorAt(0, QColor(231, 231, 225));

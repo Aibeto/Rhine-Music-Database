@@ -159,19 +159,6 @@ void NativeScene::navigate(QString axis, int direction) {
         select(files.at(index), {{"axis", "row"}, {"direction", direction}});
     }
 }
-/** 切换列表构图目标并唤醒场景 */
-bool NativeScene::setTrackListView(bool enabled) {
-    enabled = enabled && m_mode == "archive" && !m_viewer->isOpen();
-    if (enabled == m_trackListView) {
-        return false;
-    }
-    m_trackListView = enabled;
-    m_changed = true;
-    m_sceneFreeze.reset();
-    resetPointer();
-    return true;
-}
-
 void NativeScene::setMode(QString mode) {
     m_changed = true;
     m_sceneFreeze.reset();
@@ -272,8 +259,6 @@ bool NativeScene::review(QString mode) {
     m_columnCamera = {};
     m_reveal = 0;
     m_detail = 0;
-    m_trackListBlend = 0;
-    m_trackListView = false;
     m_rotation = 0;
     m_eye = {-62.26, 35.98, 43.28};
     m_aim = {-0.5, 1.1, 0.4};
