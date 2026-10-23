@@ -255,10 +255,20 @@ void NativeHud::lyricsPanel(double x, double width) {
             height += std::max(1, int(wrapped.size())) * 47 + translated.size() * 26 + 32;
         }
         m_lyricsBrowse.reset();
+        m_lyricsLastIndex = lyrics.index;
+        m_lyricsLineUpdates = 0;
         m_lyricsPlainOffset = 0;
         m_lyricsTarget.reset();
         m_lyricsCurve.reset();
         m_lyricsScroll = m_lyricsLayout.at(std::clamp(lyrics.index, 0, int(m_lyricsLayout.size()) - 1)).top;
+    }
+    // 每更新两行歌词重置歌词位置
+    if (lyrics.index != m_lyricsLastIndex) {
+        m_lyricsLastIndex = lyrics.index;
+        if (lyrics.index >= 0 && ++m_lyricsLineUpdates >= 2) {
+            m_lyricsLineUpdates = 0;
+            m_lyricsBrowse.reset();
+        }
     }
     const auto active = std::clamp(lyrics.index, 0, int(m_lyricsLayout.size()) - 1);
     const auto target = m_lyricsBrowse.value_or(m_lyricsLayout.at(active).top);

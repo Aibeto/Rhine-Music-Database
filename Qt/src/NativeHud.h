@@ -145,6 +145,8 @@ class NativeHud : public QObject {
     QVector<LyricRow> m_lyricsLayout;
     double m_lyricsScroll = 0;
     std::optional<double> m_lyricsBrowse;
+    int m_lyricsLastIndex = -1;
+    int m_lyricsLineUpdates = 0;
     std::optional<double> m_lyricsTarget;
     std::optional<UiMotion::ReelCurve> m_lyricsCurve;
     int m_lyricsPlainOffset = 0;
