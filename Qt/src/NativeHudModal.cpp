@@ -113,10 +113,10 @@ void NativeHud::modalDraw(double width) {
     } else if (modal == "quality") {
         category = "AUDIO SPECIFICATION";
     }
-    text("RHINE LAB / MUSIC DATABASE / " + category, x + 53, y + 37, 11);
+    text("RHINE LAB / MUSIC DATABASE / " + category, x + 53, y + 37, modal == "settings" ? 14 : 11);
     button("← 返回", x + usable - 220, y + 18, 167, 54, "close-modal", 20, "demibold");
     text(modalTitle(modal, music), x + 53, y + 91, 38, "demibold");
-    text(modalSubtitle(modal, music), x + 53, y + 147, 15);
+    text(modalSubtitle(modal, music), x + 53, y + 147, modal == "settings" ? 18 : 15);
     if (modal == "disc-rotation-warning") {
         text("唱片旋转需要持续刷新画面。", x + 53, y + 250, 22, "demibold");
         text("开启后会增加 CPU / GPU 占用、耗电和发热，可能缩短电池续航。", x + 53, y + 310, 16);
@@ -353,35 +353,7 @@ void NativeHud::qualityPanel(double x, double y, double width) {
 }
 
 void NativeHud::settings(double x, double y, double width) {
-    const auto viewport =
-        QRectF(x + 40, y + SettingsViewportTop, width - 80, SettingsViewportBottom - SettingsViewportTop);
-    settingsScroll = std::clamp(settingsScroll, 0., settingsScrollMaximum());
-    const auto firstHit = hits.size();
-    const auto originalY = y;
-    save();
-    clip(viewport.x(), viewport.y(), viewport.width(), viewport.height());
-    y -= settingsScroll;
     const auto &music = *m_music;
-    const auto left = x + 53;
-    const auto usable = width - 106;
-    text("PROVIDER ACCESS / 音乐平台", left, y + 184, 12, "demibold");
-    const auto tint = dark ? QJsonArray{1, 1, 1, 0.025} : QJsonArray{0, 0, 0, 0.025};
-    fill(left, y + 210, usable, 66, tint);
-    text("当前平台 / " + music.providerName(), left + 12, y + 233, 17, "demibold");
-    button("切换平台 ▾", left + usable - 235, y + 225, 225, 36, "provider", 13);
-    if (music.isLocal()) {
-        button("文件夹管理 / 导入与索引", left, y + 290, 340, 38, "discover", 13);
-    } else {
-        button(music.uid.isEmpty() ? "登录 / " + music.providerName() : "退出登录 / " + music.nickname, left,
-               y + 290, 340, 38, music.uid.isEmpty() ? "music:login" : "music:logout", 13);
-    }
-    const QHash<QString, QString> memberships{
-        {"free", "免费账号"}, {"green", "绿钻会员"}, {"super", "超级会员"}, {"unknown", "会员状态未知"}};
-    const auto accountNote = music.provider == "qq" && !music.uid.isEmpty()
-                                 ? memberships.value(music.vipLevel, "会员状态未知")
-                                 : QString("各平台账号独立保存");
-    limited(accountNote, left + 365, y + 301, 12, usable - 365);
-    text("TERMINAL PREFERENCES / 终端偏好", left, y + 348, 12, "demibold");
     static const QHash<QString, QString> qualities{
         {"standard", "标准"}, {"higher", "较高"},   {"exhigh", "极高"},       {"lossless", "无损"},
         {"hires", "Hi-Res"},  {"jymaster", "母带"}, {"best", "自动最高可用"}, {"ape", "APE 无损"}};
@@ -390,6 +362,7 @@ void NativeHud::settings(double x, double y, double width) {
         theme = "跟随系统";
     }
     QVector<QStringList> rows{
+        {"WINDOW / 窗口显示", "切换全屏 / F11", "window:fullscreen"},
         {"COLOR THEME / 界面配色", theme, "theme"},
         {"RhineLab Enhance", sceneEnhancement ? "开启" : "关闭", "scene-enhancement"},
         {"REDUCED MOTION / 动态效果", reduced ? "减少动态效果" : "完整动效", "motion"},
@@ -411,30 +384,95 @@ void NativeHud::settings(double x, double y, double width) {
                  m_host->preference("single-play-mode") == "append" ? "仅添加当前单曲" : "替换为所在列表",
                  "single-play-mode"});
     rows.append({"RIGHT MASK / 右侧画面遮罩", "", "archive-mask"});
+    // 内容高度随平台可用选项变化
+    constexpr double preferenceTop = 424;
+    constexpr double rowStep = 66;
+    const auto performanceTop = preferenceTop + rows.size() * rowStep + 76;
+    const auto updateTop = performanceTop + 310;
+    const auto projectTop = updateTop + 310;
+    settingsContentBottom = projectTop + 278;
+    const auto viewport =
+        QRectF(x + 40, y + SettingsViewportTop, width - 80, SettingsViewportBottom - SettingsViewportTop);
+    settingsScroll = std::clamp(settingsScroll, 0., settingsScrollMaximum());
+    const auto firstHit = hits.size();
+    const auto originalY = y;
+    save();
+    clip(viewport.x(), viewport.y(), viewport.width(), viewport.height());
+    y -= settingsScroll;
+    const auto left = x + 53;
+    const auto usable = width - 106;
+    const auto tint = dark ? QJsonArray{1, 1, 1, 0.025} : QJsonArray{0, 0, 0, 0.025};
+    text("PROVIDER ACCESS / 音乐平台", left, y + 188, 16, "demibold");
+    fill(left, y + 224, usable, 66, tint);
+    text("当前平台 / " + music.providerName(), left + 16, y + 247, 18, "demibold");
+    button("切换平台 ▾", left + usable - 280, y + 235, 264, 44, "provider", 16);
+    if (music.isLocal()) {
+        button("文件夹管理 / 导入与索引", left, y + 308, 340, 44, "discover", 16);
+    } else {
+        button(music.uid.isEmpty() ? "登录 / " + music.providerName() : "退出登录 / " + music.nickname, left,
+               y + 308, 340, 44, music.uid.isEmpty() ? "music:login" : "music:logout", 16);
+    }
+    const QHash<QString, QString> memberships{
+        {"free", "免费账号"}, {"green", "绿钻会员"}, {"super", "超级会员"}, {"unknown", "会员状态未知"}};
+    const auto accountNote = music.provider == "qq" && !music.uid.isEmpty()
+                                 ? memberships.value(music.vipLevel, "会员状态未知")
+                                 : QString("各平台账号独立保存");
+    limited(accountNote, left + 365, y + 322, 15, usable - 365);
+    rule(left, y + 376, usable, 0.2);
+    text("TERMINAL PREFERENCES / 终端偏好", left, y + 392, 16, "demibold");
     for (int index = 0; index < rows.size(); ++index) {
         const auto &row = rows.at(index);
-        const auto yy = y + 377 + index * 50;
-        fill(left, yy, usable, 44, tint);
-        text(row.at(0), left + 12, yy + 12, 15, "demibold");
+        const auto rowY = y + preferenceTop + index * rowStep;
+        fill(left, rowY, usable, 56, tint);
+        text(row.at(0), left + 16, rowY + 18, 18, "demibold");
         if (row.at(2) == "archive-mask") {
-            button("−", left + usable - 235, yy + 4, 44, 36,
-                   "archive-mask:" + QString::number(std::max(0, archiveMaskStrength - 10)), 18);
+            button("−", left + usable - 280, rowY + 6, 48, 44,
+                   "archive-mask:" + QString::number(std::max(0, archiveMaskStrength - 10)), 20);
             const auto label =
                 archiveMaskStrength == 0 ? QString("0 · 关闭") : QString::number(archiveMaskStrength) + "%";
-            centeredText(label, left + usable - 125, yy + 22, 13, "regular", true);
-            button("＋", left + usable - 54, yy + 4, 44, 36,
-                   "archive-mask:" + QString::number(std::min(100, archiveMaskStrength + 10)), 18);
+            centeredText(label, left + usable - 148, rowY + 28, 16, "regular", true);
+            button("＋", left + usable - 64, rowY + 6, 48, 44,
+                   "archive-mask:" + QString::number(std::min(100, archiveMaskStrength + 10)), 20);
         } else {
-            button(row.at(1), left + usable - 235, yy + 4, 225, 36, row.at(2), 13);
+            button(row.at(1), left + usable - 280, rowY + 6, 264, 44, row.at(2), 16);
         }
     }
-    // 后续区块与新增设置保持相同的行距，滚动范围同步扩展。
-    y += 200;
     const auto enterHint = m_host->preference("detail-autoplay") == "on" ? "ENTER 查看并播放" : "ENTER 查看";
     text("↑ ↓ 选曲 / " + QString(enterHint) + " / " + m_host->modifierKey() + " ENTER 播放 / ESC 返回", left,
-         y + 704, 12);
-    rule(left, y + 737, usable, 0.2);
-    text("PROJECT / 项目与开源参考", left, y + 752, 10, "demibold");
+         y + performanceTop - 64, 15);
+    rule(left, y + performanceTop - 20, usable, 0.2);
+    text("PERFORMANCE / 性能与诊断", left, y + performanceTop, 16, "demibold");
+    fill(left, y + performanceTop + 40, usable, 56, tint);
+    text("帧数显示 / 性能面板", left + 16, y + performanceTop + 58, 18, "demibold");
+    button("显示 / 隐藏 · F10", left + usable - 280, y + performanceTop + 46, 264, 44, "performance:toggle",
+           16);
+    text("在性能面板内手动收集、导出诊断文件。", left, y + performanceTop + 112, 15);
+    fill(left, y + performanceTop + 160, usable, 56, tint);
+    text("DISC ROTATION / 唱片旋转", left + 16, y + performanceTop + 178, 18, "demibold");
+    button(discRotation ? "开启 / 点击关闭" : "关闭 / 点击了解风险", left + usable - 280,
+           y + performanceTop + 166, 264, 44, "disc-rotation", 16);
+    text("默认关闭；开启会增加持续渲染、耗电和发热。", left, y + performanceTop + 232, 15);
+    rule(left, y + updateTop - 20, usable, 0.2);
+    text("SOFTWARE UPDATE / 软件更新", left, y + updateTop, 16, "demibold");
+    const auto &updater = m_host->updater;
+    const auto buildLabel = RHINE_RELEASE_BUILD ? QString() : QString(" · 开发版");
+    limited("当前版本 / " + AppUpdater::currentVersion() + buildLabel, left, y + updateTop + 42, 18,
+            usable - 300, "demibold");
+    if (!RHINE_RELEASE_BUILD) {
+        limited(AppUpdater::commitTitle(), left, y + updateTop + 74, 15, usable);
+    }
+    button(m_host->preference("auto-update") == "off" ? "启动检查 / 关闭" : "启动检查 / 开启",
+           left + usable - 280, y + updateTop + 30, 264, 44, "update:auto", 16);
+    limited(updater.status(), left, y + updateTop + 104, 16, usable);
+    button(updater.busy() ? "取消" : "检查更新", left, y + updateTop + 148, 160, 44,
+           updater.busy() ? "update:cancel" : "update:check", 16);
+    if (!updater.busy() && updater.available()) {
+        button("前往更新 ↗", left + 176, y + updateTop + 148, 200, 44, "update:release", 16);
+    }
+    button("发布说明 ↗", left + usable - 200, y + updateTop + 148, 200, 44, "update:release", 16);
+    text("更新将打开 GitHub 发布页面，请在浏览器中下载并安装。", left, y + updateTop + 220, 15);
+    rule(left, y + projectTop - 20, usable, 0.2);
+    text("PROJECT / 项目与开源参考", left, y + projectTop, 16, "demibold");
     const QVector<QPair<QString, QString>> links{{"本项目 / Rhine Music Database ↗", "project-home"},
                                                  {"网易云音乐 API / api-enhanced ↗", "project-author"},
                                                  {"QQ 音乐 API / qq-music-api ↗", "project-player"},
@@ -443,41 +481,12 @@ void NativeHud::settings(double x, double y, double width) {
                                                  {"歌词参考 / LyricsX ↗", "project-lyricsx"},
                                                  {"格式移植 / LyricsKit ↗", "project-lyricskit"},
                                                  {"同步与匹配参考 / Lyrimuse ↗", "project-lyrimuse"}};
-    const auto linkWidth = (usable - 280 - 12) / 2;
+    constexpr double linkGap = 16;
+    const auto linkWidth = (usable - linkGap) / 2;
     for (int index = 0; index < links.size(); ++index) {
-        button(links.at(index).first, left + (index % 2) * (linkWidth + 8), y + 775 + (index / 2) * 28,
-               linkWidth, 25, "music:" + links.at(index).second, 11);
+        button(links.at(index).first, left + (index % 2) * (linkWidth + linkGap),
+               y + projectTop + 48 + (index / 2) * 54, linkWidth, 44, "music:" + links.at(index).second, 16);
     }
-    button("切换全屏 / F11", left + usable - 260, y + 775, 260, 36, "window:fullscreen", 13);
-    rule(left, y + 911, usable, 0.2);
-    text("PERFORMANCE / 性能与诊断", left, y + 928, 12, "demibold");
-    fill(left, y + 960, usable, 44, tint);
-    text("帧数显示 / 性能面板", left + 12, y + 972, 15, "demibold");
-    button("显示 / 隐藏 · F10", left + usable - 235, y + 964, 225, 36, "performance:toggle", 13);
-    text("在性能面板内手动收集、导出诊断文件。", left, y + 1021, 12);
-    fill(left, y + 1064, usable, 44, tint);
-    text("DISC ROTATION / 唱片旋转", left + 12, y + 1076, 15, "demibold");
-    button(discRotation ? "开启 / 点击关闭" : "关闭 / 点击了解风险", left + usable - 235, y + 1068, 225, 36,
-           "disc-rotation", 13);
-    text("默认关闭；开启会增加持续渲染、耗电和发热。", left, y + 1125, 12);
-    rule(left, y + 1170, usable, 0.2);
-    text("SOFTWARE UPDATE / 软件更新", left, y + 1188, 12, "demibold");
-    const auto &updater = m_host->updater;
-    const auto buildLabel = RHINE_RELEASE_BUILD ? QString() : QString(" · 开发版");
-    text("当前版本 / " + AppUpdater::currentVersion() + buildLabel, left, y + 1220, 15, "demibold");
-    if (!RHINE_RELEASE_BUILD) {
-        limited(AppUpdater::commitTitle(), left, y + 1243, 12, usable);
-    }
-    button(m_host->preference("auto-update") == "off" ? "启动检查 / 关闭" : "启动检查 / 开启",
-           left + usable - 235, y + 1208, 225, 36, "update:auto", 13);
-    limited(updater.status(), left, y + 1260, 13, usable);
-    button(updater.busy() ? "取消" : "检查更新", left, y + 1293, 160, 36,
-           updater.busy() ? "update:cancel" : "update:check", 13);
-    if (!updater.busy() && updater.available()) {
-        button("前往更新 ↗", left + 175, y + 1293, 200, 36, "update:release", 13);
-    }
-    button("发布说明 ↗", left + usable - 200, y + 1293, 200, 36, "update:release", 13);
-    text("更新将打开 GitHub 发布页面，请在浏览器中下载并安装。", left, y + 1355, 12);
     restore();
     // QML 的透明输入层不会继承绘制裁切，必须同步裁剪命中区域，避免隐藏按钮拦截点击。
     QJsonArray clippedHits;
@@ -501,7 +510,7 @@ void NativeHud::settings(double x, double y, double width) {
     const auto railX = x + width - 24;
     const auto railTop = originalY + SettingsViewportTop + 30;
     const auto railHeight = viewport.height() - 60;
-    const auto thumbHeight = railHeight * viewport.height() / (SettingsContentBottom - SettingsViewportTop);
+    const auto thumbHeight = railHeight * viewport.height() / (settingsContentBottom - SettingsViewportTop);
     fill(railX, railTop, 3, railHeight, dark ? QJsonArray{1, 1, 1, 0.1} : QJsonArray{0, 0, 0, 0.1});
     fill(railX, railTop + settingsScroll / settingsScrollMaximum() * (railHeight - thumbHeight), 3,
          thumbHeight, dark ? QJsonArray{1, 1, 1, 0.45} : QJsonArray{0, 0, 0, 0.4});

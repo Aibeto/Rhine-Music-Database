@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QDir>
 #include <QThread>
 #include <QQuickWindow>
 #include <QDebug>
@@ -107,6 +108,21 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     backend.step(50);
     settle();
     check(hud.modal == "settings", "open settings modal");
+
+    // 保存真实窗口的设置首屏和末屏，供字号、间距与底部裁切的目视验收。
+    if (!output.isEmpty()) {
+        QDir().mkpath(output);
+        check(window->grabWindow().save(output + "/settings-top.png"), "capture settings top");
+        hud.settingsScroll = hud.settingsScrollMaximum() / 2;
+        backend.step(50);
+        settle();
+        check(window->grabWindow().save(output + "/settings-middle.png"), "capture settings middle");
+        hud.settingsScroll = hud.settingsScrollMaximum();
+        backend.step(50);
+        settle();
+        check(window->grabWindow().save(output + "/settings-bottom.png"), "capture settings bottom");
+        hud.settingsScroll = 0;
+    }
 
     hud.modal.clear();
     backend.step(50);

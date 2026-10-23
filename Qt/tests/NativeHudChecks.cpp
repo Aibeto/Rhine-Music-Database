@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QPainter>
+#include <QSet>
 #include <cmath>
 
 namespace {
@@ -217,31 +218,45 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                 ok = false;
             }
 
-            // 验证关键设置项存在（顶部配置区域）
-            const QStringList requiredSettings = {"theme",           "motion",           "startup-animation",
-                                                  "detail-autoplay", "single-play-mode", "scene-enhancement",
-                                                  "quality"};
+            if (!hasAction(hud.hits, "window:fullscreen") || hasAction(hud.hits, "music:project-home")) {
+                qCritical() << "Settings section order failed" << provider << dark;
+                ok = false;
+            }
+
+            const QStringList requiredSettings{"theme",           "motion",           "startup-animation",
+                                               "detail-autoplay", "single-play-mode", "scene-enhancement",
+                                               "quality",         "disc-rotation",    "performance:toggle",
+                                               "update:check"};
+            QSet<QString> visibleSettings;
+            for (double offset = 0;; offset += 400) {
+                hud.settingsScroll = std::min(offset, hud.settingsScrollMaximum());
+                hud.draw(archiveFrame, 1920, 50);
+                for (const auto &value : hud.hits) {
+                    visibleSettings.insert(value.toObject()["action"].toString());
+                }
+                if (hud.settingsScroll == hud.settingsScrollMaximum()) {
+                    break;
+                }
+            }
             for (const auto &setting : requiredSettings) {
-                if (!hasAction(hud.hits, setting)) {
-                    qCritical() << "Missing setting toggle:" << setting << provider
-                                << (dark ? "dark" : "light");
+                if (!visibleSettings.contains(setting)) {
+                    qCritical() << "Missing reachable setting:" << setting << provider << dark;
                     ok = false;
                 }
             }
 
-            // 滚动到底部以验证性能相关设置项
-            {
-                const auto bounds = hud.modalBounds(1920);
-                hud.wheel(bounds.center().x(), bounds.top() + 500, -120, 1, 10000.);
-                hud.draw(archiveFrame, 1920, 50);
-            }
-
-            // 验证性能相关设置项存在（下方性能区域）
-            const QStringList performanceSettings = {"disc-rotation", "performance:toggle"};
-            for (const auto &setting : performanceSettings) {
-                if (!hasAction(hud.hits, setting)) {
-                    qCritical() << "Missing performance toggle:" << setting << provider
-                                << (dark ? "dark" : "light");
+            const QStringList projectActions{"project-home",      "project-author",  "project-player",
+                                             "project-kugou",     "project-rhine",   "project-lyricsx",
+                                             "project-lyricskit", "project-lyrimuse"};
+            const auto settingsBounds = hud.modalBounds(1920);
+            for (int index = 0; index < projectActions.size(); index += 2) {
+                const auto first = getHit(hud.hits, "music:" + projectActions.at(index));
+                const auto second = getHit(hud.hits, "music:" + projectActions.at(index + 1));
+                if (first.isEmpty() || second.isEmpty() || first["y"] != second["y"] ||
+                    first["height"].toDouble() != 44 || second["height"].toDouble() != 44 ||
+                    first["x"].toDouble() + first["width"].toDouble() >= second["x"].toDouble() ||
+                    first["y"].toDouble() + 44 > settingsBounds.top() + NativeHud::SettingsViewportBottom) {
+                    qCritical() << "Settings project grid failed" << provider << dark << index;
                     ok = false;
                 }
             }
