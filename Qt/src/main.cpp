@@ -21,6 +21,7 @@
 int makeIcon(const QString &directory);
 int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, FrameProfiler &profiler);
 #ifdef Q_OS_WIN
+#include "WindowsTaskbar.h"
 void initializeWindowsGraphics();
 #endif
 /**
@@ -152,6 +153,7 @@ int main(int argc, char **argv) {
     }
     graphics.setPipelineCacheSaveFile(pipelineCache);
     window->setGraphicsConfiguration(graphics);
+    WindowsTaskbar taskbar(&backend, window);
     window->show();
 #endif
     backend.setWindow(window);
