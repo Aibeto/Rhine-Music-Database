@@ -1,6 +1,7 @@
 #include "NativeApplication.h"
 #include "AppStorage.h"
 #include "MusicData.h"
+#include <QCoreApplication>
 #include <QMediaDevices>
 #include <QElapsedTimer>
 #include <QFile>

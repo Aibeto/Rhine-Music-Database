@@ -10,7 +10,7 @@ function createUpdateFeed(directory, version, repository = 'MikeQu223/Rhine-Musi
         throw new Error('Invalid release repository');
     }
     const base = `https://github.com/${repository}/releases`;
-    const platforms = ['macOS-arm64.zip', 'Windows-x64.zip', 'Linux-x86_64.AppImage'];
+    const platforms = ['macOS-arm64.zip', 'Windows-x64-Setup.exe', 'Linux-x86_64.AppImage'];
     const assets = platforms.map((platform) => {
         const name = `RhineMusicDatabase-${tag}-${platform}`;
         const file = fs.readFileSync(path.join(directory, name));

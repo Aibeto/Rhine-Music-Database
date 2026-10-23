@@ -16,7 +16,7 @@ console.log('Release version injection checks passed');
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rhine-update-feed-'));
 try {
     const contents = Buffer.from('local distribution fixture');
-    for (const platform of ['macOS-arm64.zip', 'Windows-x64.zip', 'Linux-x86_64.AppImage']) {
+    for (const platform of ['macOS-arm64.zip', 'Windows-x64-Setup.exe', 'Linux-x86_64.AppImage']) {
         fs.writeFileSync(path.join(temporary, `RhineMusicDatabase-v1.2.3-${platform}`), contents);
     }
     const feed = createUpdateFeed(temporary, 'v1.2.3');

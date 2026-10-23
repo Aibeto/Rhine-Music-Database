@@ -83,7 +83,7 @@ function publishRelease(options, api = githubApi) {
     const { repository, tag, sha, directory } = options;
     const names = [
         `RhineMusicDatabase-${tag}-macOS-arm64.zip`,
-        `RhineMusicDatabase-${tag}-Windows-x64.zip`,
+        `RhineMusicDatabase-${tag}-Windows-x64-Setup.exe`,
         `RhineMusicDatabase-${tag}-Linux-x86_64.AppImage`,
         'update.json',
     ];

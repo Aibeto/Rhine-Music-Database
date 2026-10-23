@@ -41,7 +41,7 @@ const files = [...new Set(paths)].filter((file) => {
     return (
         configuration.has(file) ||
         (sourceRoots.some((folder) => file.startsWith(folder)) &&
-            (/\.(?:js|cjs|mjs|ts|cpp|h|mm|qml|py|sh|glsl|vert|frag|yml|yaml)$/.test(file) ||
+            (/\.(?:js|cjs|mjs|ts|cpp|h|mm|qml|py|sh|glsl|vert|frag|yml|yaml|iss)$/.test(file) ||
                 path.basename(file) === 'CMakeLists.txt'))
     );
 });

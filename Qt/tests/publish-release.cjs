@@ -92,7 +92,7 @@ function api(method, route, body, file) {
 }
 
 try {
-    for (const platform of ['macOS-arm64.zip', 'Windows-x64.zip', 'Linux-x86_64.AppImage']) {
+    for (const platform of ['macOS-arm64.zip', 'Windows-x64-Setup.exe', 'Linux-x86_64.AppImage']) {
         fs.writeFileSync(path.join(directory, `RhineMusicDatabase-${options.tag}-${platform}`), platform);
     }
     createUpdateFeed(directory, options.tag, options.repository);

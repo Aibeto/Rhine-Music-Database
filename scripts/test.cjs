@@ -27,6 +27,7 @@ for (const script of [
     'scripts/check-music-upstream.cjs',
     'Qt/tests/release-version.cjs',
     'Qt/tests/publish-release.cjs',
+    'Qt/tests/windows-installer.cjs',
 ]) {
     run(process.execPath, [script]);
 }

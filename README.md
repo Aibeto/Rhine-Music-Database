@@ -29,7 +29,7 @@
 | 平台    | 程序                                                           |
 | ------- | -------------------------------------------------------------- |
 | macOS   | `output/RHINE MUSIC DATABASE.app`                              |
-| Windows | `output/windows/RHINE MUSIC DATABASE/RHINE MUSIC DATABASE.exe` |
+| Windows | `output/RhineMusicDatabase-v<版本>-Windows-x64-Setup.exe`       |
 | Linux   | `output/RhineMusicDatabase-Linux-x86_64.AppImage`              |
 
 **macOS 若提示应用已损坏，需要执行**
@@ -38,8 +38,8 @@
 
 并且在设置-隐私中允许运行；
 
-Windows 解压完整部署目录后启动 EXE，保留旁边的 Qt DLL、插件、QML 与资源目录。
-MSVC 运行库 DLL 随包提供，无需运行安装器。
+Windows 运行 `RhineMusicDatabase-v<版本>-Windows-x64-Setup.exe` 安装程序。
+Qt、MSVC 运行库和 Node 桥接均已随包提供，无需另行安装。
 
 Linux 赋予执行权限后直接运行 AppImage，Qt 运行时、QML 模块、FFmpeg 与 Node 桥接都已随包提供：
 
@@ -170,7 +170,10 @@ npm test
 npm run share
 ```
 
-`npm run share` 将完整部署目录打包为 ZIP。运行时不需要开发工具、Python 或额外安装 Node；不能只分发 EXE。
+Windows 的 `npm run share` 使用 [Inno Setup 6.3+ 或 7](https://jrsoftware.org/isdl.php)，
+只生成 `output/RhineMusicDatabase-v<版本>-Windows-x64-Setup.exe` 安装程序。
+安装器默认安装到 `%LOCALAPPDATA%\Programs\RhineMusicDatabase`，无需管理员权限，提供开始菜单快捷方式、可选桌面快捷方式和卸载入口。
+应用在安装目录的 `data` 中保存账号、设置和缓存，请选择当前用户可写的目录。安装包排除构建机上的运行数据，覆盖安装和卸载保留用户的 `data`；彻底清理时可手动删除。
 
 ### Linux x86_64（AppImage）
 

@@ -30,11 +30,13 @@ jobs:
             qt-arch: clang_64
             node-platform: darwin-arm64
             artifact: macOS-arm64
+            distribution: '*.zip'
           - name: Linux x86_64
             os: ubuntu-24.04
             qt-arch: linux_gcc_64
             node-platform: linux-x64
             artifact: Linux-x64
+            distribution: '*.AppImage'
           - name: Windows x64
             os: windows-2022
             qt-arch: win64_msvc2022_64
@@ -42,6 +44,7 @@ jobs:
             qt-installer: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
             node-platform: win-x64
             artifact: Windows-x64
+            distribution: 'Windows-x64-Setup.exe'
     runs-on: ${{ matrix.os }}
     env:
       NODE_VERSION: '22.14.0'
@@ -124,14 +127,12 @@ jobs:
       # 离线测试
       - name: Run offline regressions
         run: npm test
-      - name: Create distribution ZIP
+      - name: Create distribution
         if: runner.os != 'Linux'
         run: npm run share
       - name: Upload distribution
         uses: actions/upload-artifact@v4
         with:
           name: RHINE-MUSIC-DATABASE-${{ matrix.artifact }}
-          path: |
-            output/RhineMusicDatabase-${{ inputs.release_version || '*' }}-*.zip
-            output/RhineMusicDatabase-${{ inputs.release_version || '*' }}-*.AppImage
+          path: output/RhineMusicDatabase-${{ inputs.release_version || '*' }}-${{ matrix.distribution }}
           if-no-files-found: error
