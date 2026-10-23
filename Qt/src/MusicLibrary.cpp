@@ -391,8 +391,19 @@ void MusicLibrary::search(QString text, QString kind, bool more) {
     }
     const auto maximum = provider == "qq" ? 60 : 100;
     if (query.isEmpty() || query.toUcs4().size() > maximum) {
+        // 输入被清空或越界后，旧结果已与当前关键词无关，必须一并清除。
         ++m_generation;
         searchLoading = false;
+        keyword = query;
+        groupLane = -1;
+        groupName.clear();
+        groupIndices.clear();
+        lists[0] = {};
+        totals[0] = 0;
+        offsets[0] = 0;
+        hasMore[0] = false;
+        rowMemory[0] = 0;
+        searchCursor = 0;
         status = QStringLiteral("请输入 1–") + QString::number(maximum) + QStringLiteral(" 字关键词");
         changed();
         return;

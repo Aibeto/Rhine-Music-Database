@@ -180,6 +180,11 @@ bool runNativeMusicChecks(const QString &root) {
     check(library.totals[0] == 1, "search results counted");
     check(!library.lists[0].isEmpty(), "search returns tracks");
 
+    // 删除全部关键词后必须清空旧结果，不能继续显示上一次搜索内容。
+    library.search(QString());
+    check(library.lists[0].isEmpty(), "clearing query clears search results");
+    check(library.totals[0] == 0, "clearing query resets result count");
+
     // === 测试 5: 歌词加载 ===
     library.player.play(song("2"));
     check(waitFor([&] { return !library.player.loading; }), "song with lyrics loads");
