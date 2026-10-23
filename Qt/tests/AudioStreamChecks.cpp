@@ -114,9 +114,12 @@ class AudioPlayerRegression {
             return false;
         }
         AudioPlayer audio;
-        // 只在测试中绕过正式 CDN 白名单；其余解码、错误与健康检查均走生产实现。
-        audio.output.setVolume(0);
-        audio.enableDiagnostics(managed);
+        // 只在测试中绕过 CDN 白名单与物理输出；真实 HTTP、解码、错误与健康检查仍走生产实现。
+        // CI 枚举到声卡不代表设备能推进播放，改用解码缓冲输出；硬件消费由音频输出回归覆盖。
+        audio.player->setAudioOutput(nullptr);
+        audio.outputUnavailable = false;
+        audio.recoveryPosition = -1;
+        audio.enableDiagnostics(true);
         audio.progressClock.start();
         audio.playbackRequested = true;
         const QUrl source(QString("http://127.0.0.1:%1/tone.wav").arg(server.serverPort()));
@@ -217,10 +220,6 @@ int main(int argc, char **argv) {
     qputenv("QT_MEDIA_BACKEND", "ffmpeg");
     QCoreApplication app(argc, argv);
     bool ok = AudioPlayerRegression::pausedError();
-    if (QMediaDevices::defaultAudioOutput().isNull()) {
-        std::fprintf(stderr, "SKIP: no audio output; real stream playback requires a device\n");
-        return ok ? 0 : 1;
-    }
     ok &= AudioPlayerRegression::stream(100, true);
     ok &= AudioPlayerRegression::stream(50, false);
     ok &= AudioPlayerRegression::stream(94, false);
