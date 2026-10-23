@@ -55,6 +55,12 @@ LyricsController::LyricsController(Host *host, QObject *parent) : QObject(parent
         m_apis[i] = std::make_unique<MusicApi>(host);
         m_apis[i]->provider = PROVIDERS[i];
     }
+    bool validOffset = false;
+    const auto savedOffset = host->preference("lyrics-global-offset-ms").toDouble(&validOffset);
+    if (validOffset && std::isfinite(savedOffset)) {
+        m_globalOffsetMs = std::clamp(savedOffset, -10000., 10000.);
+    }
+    offsetMs = m_globalOffsetMs;
     const auto cached = QJsonDocument::fromJson(host->preference("lyrics-cache").toUtf8()).array();
     for (const auto &value : cached) {
         const auto entry = value.toObject();
@@ -126,7 +132,7 @@ void LyricsController::clear() {
     status = "idle";
     message.clear();
     index = -1;
-    offsetMs = 0;
+    offsetMs = m_globalOffsetMs;
     positionMs = 0;
 }
 
@@ -212,8 +218,11 @@ void LyricsController::selectLocalSource(const QJsonObject &track, const QString
 /** 切歌先清空显示，再读精确 ID；缺词时只接受同名、同歌手、同版本的录音补缺。 */
 void LyricsController::load(const QJsonObject &track, bool retry) {
     const auto key = trackKey(track);
-    const auto position = key == currentKey ? positionMs : 0;
+    const bool sameTrack = key == currentKey;
+    const auto position = sameTrack ? positionMs : 0;
+    const auto offset = sameTrack ? offsetMs : m_globalOffsetMs;
     clear();
+    offsetMs = offset;
     currentKey = key;
     positionMs = position;
     if (track["provider"] == "local") {
@@ -412,6 +421,26 @@ void LyricsController::sync(double position) {
 void LyricsController::adjustOffset(double deltaMs) {
     offsetMs = std::clamp(offsetMs + deltaMs, -10000., 10000.);
     sync(positionMs);
+    emit changed();
+}
+
+// 重置当前歌曲歌词偏移量
+void LyricsController::resetOffset() {
+    if (offsetMs == 0) {
+        return;
+    }
+    offsetMs = 0;
+    sync(positionMs);
+    emit changed();
+}
+
+// 将当前歌曲歌词偏移量应用到全局
+void LyricsController::applyGlobalOffset() {
+    if (offsetMs == m_globalOffsetMs) {
+        return;
+    }
+    m_globalOffsetMs = offsetMs;
+    m_host->setPreference("lyrics-global-offset-ms", QString::number(m_globalOffsetMs));
     emit changed();
 }
 

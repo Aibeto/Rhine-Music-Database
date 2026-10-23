@@ -271,6 +271,10 @@ void NativeHud::playerAction(const QStringList &parts) {
         m_lyricsBrowse.reset();
     } else if (name == "lyrics-earlier" || name == "lyrics-later") {
         player.lyrics.adjustOffset(name == "lyrics-earlier" ? 200 : -200);
+    } else if (name == "lyrics-reset") {
+        player.lyrics.resetOffset();
+    } else if (name == "lyrics-apply-global") {
+        player.lyrics.applyGlobalOffset();
     } else if (name == "lyrics-sources" && music.isLocal() && player.current.value("provider") == "local") {
         if (modal == "lyrics-source" && !closing) {
             closeModal();

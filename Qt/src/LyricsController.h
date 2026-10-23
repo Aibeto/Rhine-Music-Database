@@ -14,6 +14,11 @@ class LyricsController : public QObject {
     QString localSource = "auto";
     void sync(double positionMs);
     void adjustOffset(double deltaMs);
+    void resetOffset();
+    void applyGlobalOffset();
+    double globalOffsetMs() const {
+        return m_globalOffsetMs;
+    }
     const QJsonObject &document() const {
         return m_document;
     }
@@ -52,6 +57,7 @@ class LyricsController : public QObject {
     Host *m_host;
     std::array<std::unique_ptr<MusicApi>, 3> m_apis;
     quint64 m_generation = 0;
+    double m_globalOffsetMs = 0;
     QJsonObject m_document;
     QVector<double> m_starts;
     QJsonArray m_cache;
