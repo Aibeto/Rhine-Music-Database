@@ -182,8 +182,6 @@ set(RHINE_APP_SOURCES
     Qt/src/fg/FgBackend.cpp
     Qt/src/fg/FgBackend.h
     Qt/src/fg/FgConfig.h
-    Qt/src/fg/VulkanPresenter.cpp
-    Qt/src/fg/VulkanPresenter.h
     Qt/src/OpticalScene.cpp
     Qt/src/OpticalScene.h
     Qt/src/Glyphs.cpp
@@ -228,6 +226,11 @@ if(RHINE_FFX_VK_AVAILABLE AND RHINE_FFX_SHADER_BLOBS_AVAILABLE)
     # 在不同构建配置下可能可用也可能不可用。把能力宏一并传给 RhineCore，让置灰逻辑
     # 按实际编译结果判断。这里只传宏，不链接 FidelityFX。
     target_compile_definitions(RhineCore PRIVATE RHINE_FSR3_VULKAN=1)
+    # VulkanPresenter 直接 #include <vulkan/vulkan.h>（头文件里没有平台守卫），
+    # 所以只能在真有 Vulkan 头的构建里编。macOS 没有 Vulkan 头，无条件列入源列表
+    # 会让它在 `fatal error: 'vulkan/vulkan.h' file not found` 处直接失败。
+    # FgBackend 与 Fsr3Backend 的 Vulkan 部分都在 RHINE_FSR3_VULKAN 守卫内，无需移出。
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/fg/VulkanPresenter.cpp Qt/src/fg/VulkanPresenter.h)
 endif()
 if(RHINE_FFX_DX12_AVAILABLE)
     target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_FSR3_DX12=1)

@@ -647,45 +647,54 @@ if(WIN32)
     if(NOT TARGET pixlib)
         add_library(pixlib INTERFACE)
     endif()
-    # SDK 的着色器编译脚本用相对 glob（"shaders/<effect>/*.<ext>"）收集 HLSL 源，
-    # 基准是 dx12 源码目录。glob 一旦为空，compile_shaders_with_depfile() 末尾的
-    #   set(${PERMUTATION_OUTPUTS} ${PERMUTATION_OUTPUTS} PARENT_SCOPE)
-    # 在空列表上会把输出变量赋成它自己的字面名字（"FSR3UPSCALER_PERMUTATION_OUTPUTS"）。
-    # 这个名字顺着 add_shader_output() 汇进 FFX_SC_PERMUTATION_OUTPUTS，最后进入
-    #   add_custom_target(ffx_shader_permutations_dx12 DEPENDS ${FFX_SC_PERMUTATION_OUTPUTS})
-    # ninja 只报一句
-    #   "'fidelityfx/dx12/FSR3UPSCALER_PERMUTATION_OUTPUTS' missing and no known rule"
-    # 既不说哪个效果、也不说是缺源文件，极难定位。
+    # SDK 的着色器脚本有一个自引用 bug，会把字面变量名混进 ninja 的 DEPENDS。
     #
-    # add_subdirectory 是唯一能干预的时机：custom target 在它内部就建好了，之后改
-    # FFX_SC_PERMUTATION_OUTPUTS 已经晚了。所以在配置期先校验每个启用的效果都有
-    # HLSL 源，把那条无信息的 ninja 报错换成点名到目录的 CMake 报错。
-    set(_rhine_ffx_dx12_shader_root "${FFX_SRC_BACKENDS_PATH}/dx12/shaders")
-    set(_rhine_ffx_dx12_enabled_effects)
+    # sdk/include/FidelityFX/gpu/CMakeCompileShaders.txt 里：
+    #   function(compile_shaders_with_depfile ... PERMUTATION_OUTPUTS)   # 形参
+    #     list(APPEND PERMUTATION_OUTPUTS ${WAVE32_PERMUTATION_HEADER})  # 追加到形参
+    #     set(${PERMUTATION_OUTPUTS} ${PERMUTATION_OUTPUTS} PARENT_SCOPE) # ← 问题在这
+    # 最后一行展开后是
+    #   set(FSR3UPSCALER_PERMUTATION_OUTPUTS "FSR3UPSCALER_PERMUTATION_OUTPUTS;<路径>...")
+    # 即把变量名本身当作列表首元素写出去。这个裸名经 add_shader_output() 汇入
+    # FFX_SC_PERMUTATION_OUTPUTS，再由 dx12/CMakeLists.txt:561 消费：
+    #   add_custom_target(ffx_shader_permutations_dx12 DEPENDS ${FFX_SC_PERMUTATION_OUTPUTS})
+    # CMake 把裸名当成相对路径（基准是这个子目录的 binary dir），于是 ninja 报
+    #   "'fidelityfx/dx12/FSR3UPSCALER_PERMUTATION_OUTPUTS' missing and no known rule"
+    # 这与 glob 是否命中、*.hlsl 是否存在无关——即使着色器齐全也照样发生。
+    #
+    # 为什么只有 Windows 中招：Linux 不走 SDK 的 add_subdirectory，而是用本文件里
+    # _rhine_ffx_generate_vk_shaders 自己生成置换头。
+    #
+    # 修法：add_subdirectory 之前把这些幽灵路径建成真实文件。它们只是 ninja 的依赖
+    # 占位，不是置换头本身（真正的 *_permutations.h 仍由 SDK 的 add_custom_command
+    # 生成）。改 SDK 源码会脏化 submodule 工作树，且每次 configure 重写后又会复发。
+    set(_rhine_ffx_dx12_bin "${CMAKE_CURRENT_BINARY_DIR}/fidelityfx/dx12")
+    file(MAKE_DIRECTORY "${_rhine_ffx_dx12_bin}")
+    set(_rhine_ffx_dx12_ghosts)
     if(FFX_FSR3UPSCALER OR FFX_ALL)
-        list(APPEND _rhine_ffx_dx12_enabled_effects fsr3upscaler)
+        list(APPEND _rhine_ffx_dx12_ghosts FSR3UPSCALER_PERMUTATION_OUTPUTS)
     endif()
     if(FFX_FI OR FFX_ALL)
-        list(APPEND _rhine_ffx_dx12_enabled_effects frameinterpolation)
+        list(APPEND _rhine_ffx_dx12_ghosts FRAMEINTERPOLATION_PERMUTATION_OUTPUTS)
     endif()
     if(FFX_OF OR FFX_ALL)
-        list(APPEND _rhine_ffx_dx12_enabled_effects opticalflow)
+        list(APPEND _rhine_ffx_dx12_ghosts OPTICALFLOW_PERMUTATION_OUTPUTS)
     endif()
-    foreach(_effect IN LISTS _rhine_ffx_dx12_enabled_effects)
-        file(GLOB _rhine_ffx_effect_hlsl
-             "${_rhine_ffx_dx12_shader_root}/${_effect}/*.hlsl")
-        list(LENGTH _rhine_ffx_effect_hlsl _rhine_ffx_effect_hlsl_count)
-        if(_rhine_ffx_effect_hlsl_count EQUAL 0)
-            # 这个目录本该随 SDK 一起检出。为空说明检出异常（或上层把 *.hlsl 排除了）。
-            # 只说事实、不 abort：真正的失败仍会在 ninja 阶段出现，但这行日志能让
-            # 那次失败直接指向「哪个效果没有着色器源」，而不是只剩一句变量名路径。
-            message(WARNING
-                "FidelityFX: ${_rhine_ffx_dx12_shader_root}/${_effect} 下没有任何 .hlsl。"
-                " 随后的 ninja 阶段会报 'fidelityfx/dx12/<EFFECT>_PERMUTATION_OUTPUTS "
-                "missing and no known rule to make it'——那不是真的缺文件，而是 SDK 在"
-                "空 glob 上把变量名本身当成了输出路径。请确认 FidelityFX-SDK submodule"
-                " 完整检出。")
-        else()
+    foreach(_ghost IN LISTS _rhine_ffx_dx12_ghosts)
+        file(TOUCH "${_rhine_ffx_dx12_bin}/${_ghost}")
+    endforeach()
+    if(_rhine_ffx_dx12_ghosts)
+        message(STATUS "FidelityFX: DX12 幽灵依赖占位已就绪（${_rhine_ffx_dx12_ghosts}）")
+    endif()
+
+    # 顺带把着色器源数量打出来：源缺失会让置换头为空集、FSR3 运行期不可用，
+    # 而这类问题在构建期是无声的，值得一行日志。
+    set(_rhine_ffx_dx12_shader_root "${FFX_SRC_BACKENDS_PATH}/dx12/shaders")
+    foreach(_effect fsr3upscaler frameinterpolation opticalflow)
+        if(EXISTS "${_rhine_ffx_dx12_shader_root}/${_effect}")
+            file(GLOB _rhine_ffx_effect_hlsl
+                 "${_rhine_ffx_dx12_shader_root}/${_effect}/*.hlsl")
+            list(LENGTH _rhine_ffx_effect_hlsl _rhine_ffx_effect_hlsl_count)
             message(STATUS
                 "FidelityFX: DX12 ${_effect} 着色器源 ${_rhine_ffx_effect_hlsl_count} 个")
         endif()
@@ -694,7 +703,7 @@ if(WIN32)
     set(_rhine_ffx_saved_module_path "${CMAKE_MODULE_PATH}")
     list(APPEND CMAKE_MODULE_PATH "${FFX_SRC_BACKENDS_PATH}/dx12")
     add_subdirectory("${FFX_SRC_BACKENDS_PATH}/dx12"
-                     "${CMAKE_CURRENT_BINARY_DIR}/fidelityfx/dx12")
+                     "${_rhine_ffx_dx12_bin}")
     set(CMAKE_MODULE_PATH "${_rhine_ffx_saved_module_path}")
     # target 名带 FFX_PLATFORM_NAME（x64）。按同一个变量取名，SDK 改名时会在这里
     # 报出来，而不是留下一个指向不存在目标的 ALIAS。
