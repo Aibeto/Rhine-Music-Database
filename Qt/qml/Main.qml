@@ -319,6 +319,7 @@ Window {
     }
     WindowChrome {
         window: root
+        onMinimizeRequested: rhine.minimizeWindow()
         enabled: root.windowsFrameless
         visible: enabled && root.visibility !== Window.FullScreen
         dark: rhine.state.dark === true

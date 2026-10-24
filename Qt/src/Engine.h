@@ -49,6 +49,7 @@ class Engine : public QObject {
     Q_INVOKABLE void wheelInput(double x, double y, double pixelDelta, double angleDelta);
     Q_INVOKABLE void adjustPlayer(QString control, double x, double width);
     Q_INVOKABLE void toggleFullscreen();
+    Q_INVOKABLE void minimizeWindow();
     void setWindow(QQuickWindow *window);
     Q_INVOKABLE void query(QString query);
     Q_INVOKABLE void key(QString key, bool command);

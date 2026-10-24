@@ -357,6 +357,16 @@ void Engine::submitForm(QString account, QString password) {
 void Engine::setWindow(QQuickWindow *window) {
     m_window = window;
 }
+/**
+ * 最小化时保留最大化或全屏标记
+ */
+void Engine::minimizeWindow() {
+    if (!m_window) {
+        return;
+    }
+    m_window->setWindowStates(m_window->windowStates() | Qt::WindowMinimized);
+    m_window->setVisible(true);
+}
 void Engine::toggleFullscreen() {
     if (!m_window) {
         return;
