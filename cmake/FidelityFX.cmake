@@ -647,6 +647,50 @@ if(WIN32)
     if(NOT TARGET pixlib)
         add_library(pixlib INTERFACE)
     endif()
+    # SDK 的着色器编译脚本用相对 glob（"shaders/<effect>/*.<ext>"）收集 HLSL 源，
+    # 基准是 dx12 源码目录。glob 一旦为空，compile_shaders_with_depfile() 末尾的
+    #   set(${PERMUTATION_OUTPUTS} ${PERMUTATION_OUTPUTS} PARENT_SCOPE)
+    # 在空列表上会把输出变量赋成它自己的字面名字（"FSR3UPSCALER_PERMUTATION_OUTPUTS"）。
+    # 这个名字顺着 add_shader_output() 汇进 FFX_SC_PERMUTATION_OUTPUTS，最后进入
+    #   add_custom_target(ffx_shader_permutations_dx12 DEPENDS ${FFX_SC_PERMUTATION_OUTPUTS})
+    # ninja 只报一句
+    #   "'fidelityfx/dx12/FSR3UPSCALER_PERMUTATION_OUTPUTS' missing and no known rule"
+    # 既不说哪个效果、也不说是缺源文件，极难定位。
+    #
+    # add_subdirectory 是唯一能干预的时机：custom target 在它内部就建好了，之后改
+    # FFX_SC_PERMUTATION_OUTPUTS 已经晚了。所以在配置期先校验每个启用的效果都有
+    # HLSL 源，把那条无信息的 ninja 报错换成点名到目录的 CMake 报错。
+    set(_rhine_ffx_dx12_shader_root "${FFX_SRC_BACKENDS_PATH}/dx12/shaders")
+    set(_rhine_ffx_dx12_enabled_effects)
+    if(FFX_FSR3UPSCALER OR FFX_ALL)
+        list(APPEND _rhine_ffx_dx12_enabled_effects fsr3upscaler)
+    endif()
+    if(FFX_FI OR FFX_ALL)
+        list(APPEND _rhine_ffx_dx12_enabled_effects frameinterpolation)
+    endif()
+    if(FFX_OF OR FFX_ALL)
+        list(APPEND _rhine_ffx_dx12_enabled_effects opticalflow)
+    endif()
+    foreach(_effect IN LISTS _rhine_ffx_dx12_enabled_effects)
+        file(GLOB _rhine_ffx_effect_hlsl
+             "${_rhine_ffx_dx12_shader_root}/${_effect}/*.hlsl")
+        list(LENGTH _rhine_ffx_effect_hlsl _rhine_ffx_effect_hlsl_count)
+        if(_rhine_ffx_effect_hlsl_count EQUAL 0)
+            # 这个目录本该随 SDK 一起检出。为空说明检出异常（或上层把 *.hlsl 排除了）。
+            # 只说事实、不 abort：真正的失败仍会在 ninja 阶段出现，但这行日志能让
+            # 那次失败直接指向「哪个效果没有着色器源」，而不是只剩一句变量名路径。
+            message(WARNING
+                "FidelityFX: ${_rhine_ffx_dx12_shader_root}/${_effect} 下没有任何 .hlsl。"
+                " 随后的 ninja 阶段会报 'fidelityfx/dx12/<EFFECT>_PERMUTATION_OUTPUTS "
+                "missing and no known rule to make it'——那不是真的缺文件，而是 SDK 在"
+                "空 glob 上把变量名本身当成了输出路径。请确认 FidelityFX-SDK submodule"
+                " 完整检出。")
+        else()
+            message(STATUS
+                "FidelityFX: DX12 ${_effect} 着色器源 ${_rhine_ffx_effect_hlsl_count} 个")
+        endif()
+    endforeach()
+
     set(_rhine_ffx_saved_module_path "${CMAKE_MODULE_PATH}")
     list(APPEND CMAKE_MODULE_PATH "${FFX_SRC_BACKENDS_PATH}/dx12")
     add_subdirectory("${FFX_SRC_BACKENDS_PATH}/dx12"

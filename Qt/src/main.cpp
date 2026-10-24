@@ -64,7 +64,10 @@ static bool vulkanDeviceAvailable() {
 static QSettings graphicsSettings() {
     return AppStorage::settings();
 }
-/** 应用命名后端；Vulkan 先探测物理设备，不可用时返回 false 由调用方回退。 */
+/** 应用命名后端；Vulkan 先探测物理设备，不可用时返回 false 由调用方回退。
+ *  仅在非 macOS 下编译：macOS 只提供 Metal，本函数的两个调用点都在 #else 分支里，
+ *  而 vulkanDeviceAvailable() 同样只在非 macOS 下定义。 */
+#if !defined(Q_OS_MACOS)
 static bool applyNamedBackend(const QString &requested) {
 #if defined(Q_OS_WIN)
     if (requested == "d3d12") {
@@ -89,6 +92,7 @@ static bool applyNamedBackend(const QString &requested) {
     }
     return false;
 }
+#endif
 static void selectGraphicsBackend() {
     // Qt 自己的变量优先级最高，保留它才能用 QSG_RHI_BACKEND 做后端对照。
     if (!qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND")) {

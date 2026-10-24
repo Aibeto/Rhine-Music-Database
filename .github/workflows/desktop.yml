@@ -61,9 +61,9 @@ jobs:
           # 因此必须显式递归检出，否则 CI 测不到 FSR 代码路径。
           submodules: recursive
       - name: Check out glslang vendored dependencies
-        # 只有 Vulkan 分支会解析 glslang（Windows 走 DX12，用 dxc 而非 glslang；
-        # macOS 没有 Vulkan，Vulkan 分支整体跳过），其余平台不必付这份网络开销。
-        if: runner.os != 'macOS'
+        # 只有 Vulkan 分支会解析 glslang，但不在 macOS 上跳过：万一 runner 带了
+        # MoltenVK 让 find_package(Vulkan) 成立，跳过就等于把 FSR3 静默关掉，
+        # 而本步骤失败只是告警，多跑一次的代价远小于静默禁用。
         shell: bash
         run: |
           # glslang 16.x 用 known_good.json 而非 .gitmodules 固定依赖，因此

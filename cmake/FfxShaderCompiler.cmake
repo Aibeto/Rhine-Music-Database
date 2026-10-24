@@ -33,16 +33,28 @@ set(RHINE_FFX_GLSLANG "" CACHE FILEPATH "Path to glslangValidator used for Fidel
 # Stage the upstream sources next to the port shims so quoted includes resolve to the
 # port headers. Everything lands flat in one directory, mirroring upstream's src/.
 #
-# Copy a source while applying one literal replacement. Fails loudly when the pattern is
-# gone, so an SDK update that fixes the issue upstream cannot silently leave us patching
-# nothing.
-function(_rhine_ffx_sc_stage_patched source output_path old_text new_text)
+# Copy a source while applying literal replacements, given as (old new old new ...) pairs.
+# Fails loudly when a pattern is gone, so an SDK update that fixes an issue upstream cannot
+# silently leave us patching nothing.
+function(_rhine_ffx_sc_stage_patched source output_path)
     file(READ "${source}" contents)
-    string(FIND "${contents}" "${old_text}" position)
-    if(position EQUAL -1)
-        message(FATAL_ERROR "FidelityFX: expected to patch '${old_text}' in ${source}, but it is not there")
+    # 支持一次打多组补丁：参数成对出现 (old_text new_text ...)。
+    math(EXPR _pair_count "${ARGC} / 2 - 1")
+    if(_pair_count LESS 1)
+        message(FATAL_ERROR "FidelityFX: _rhine_ffx_sc_stage_patched 至少需要一组补丁")
     endif()
-    string(REPLACE "${old_text}" "${new_text}" contents "${contents}")
+    math(EXPR _last_pair "${_pair_count} - 1")
+    foreach(_i RANGE 0 ${_last_pair})
+        math(EXPR _arg_idx "${_i} * 2 + 2")
+        math(EXPR _next_idx "${_arg_idx} + 1")
+        set(old_text "${ARGV${_arg_idx}}")
+        set(new_text "${ARGV${_next_idx}}")
+        string(FIND "${contents}" "${old_text}" position)
+        if(position EQUAL -1)
+            message(FATAL_ERROR "FidelityFX: expected to patch '${old_text}' in ${source}, but it is not there")
+        endif()
+        string(REPLACE "${old_text}" "${new_text}" contents "${contents}")
+    endforeach()
     file(WRITE "${output_path}" "${contents}")
 endfunction()
 
@@ -58,15 +70,29 @@ function(_rhine_ffx_sc_stage_sources sdk_dir)
         configure_file("${upstream_tools}/${rel}" "${stage}/${name}" COPYONLY)
     endforeach()
 
-    # glsl_compiler.cpp needs one upstream bug patched: its glslang output parser calls
-    # token.pop_back() unconditionally, and an empty token (which happens whenever a pipe
-    # read delivers a chunk that is just "\n") makes size()-1 wrap to SIZE_MAX, so
-    # libstdc++ throws std::length_error from basic_string::_M_create. Single shaders
-    # usually avoid it; a parallel build hits it every time.
+    # glsl_compiler.cpp needs two upstream bugs patched.
+    #
+    # (1) Its glslang output parser calls token.pop_back() unconditionally, and an empty
+    #     token (which happens whenever a pipe read delivers a chunk that is just "\n")
+    #     makes size()-1 wrap to SIZE_MAX, so libstdc++ throws std::length_error from
+    #     basic_string::_M_create. Single shaders usually avoid it; a parallel build hits
+    #     it every time.
+    #
+    # (2) MD5HashString() writes the digest with a fixed size argument:
+    #         char out[33];
+    #         for (i < 16) { std::snprintf(out_ptr, 32, "%02x", sig[i]); out_ptr += 2; }
+    #     The bound stays 32 while the pointer walks forward, so the last iterations tell
+    #     snprintf there are 32 writable bytes where only 1 remains -> 1-byte stack
+    #     overflow. It happens to survive on glibc builds without fortification, but
+    #     Ubuntu 24.04 enables _FORTIFY_SOURCE=3 by default and the check aborts the tool
+    #     with "*** buffer overflow detected ***", failing every shader permutation.
+    #     Passing the actually-remaining room keeps the same output and fits the buffer.
     _rhine_ffx_sc_stage_patched(
         "${upstream_tools}/src/glsl_compiler.cpp" "${stage}/glsl_compiler.cpp"
         "                token.pop_back();"
-        "                if (!token.empty())\n                    token.pop_back();")
+        "                if (!token.empty())\n                    token.pop_back();"
+        "        std::snprintf(out_ptr, 32, \"%02x\", sig[i]);"
+        "        std::snprintf(out_ptr, static_cast<size_t>(out + sizeof(out) - out_ptr), \"%02x\", sig[i]);")
 
     # Port replacements. pch.hpp and hlsl_compiler.h intentionally shadow the upstream
     # headers of the same name; the rest are Win32/D3D stubs that upstream expects to
@@ -104,10 +130,14 @@ function(_rhine_ffx_sc_build_windows sdk_dir out_var)
     file(MAKE_DIRECTORY "${stage}")
 
     # 只 stage 需要打补丁的那个 TU，其余直接编上游源码：少一份会漂移的副本。
+    # 两处补丁与 Linux 分支相同（空 token 上的 pop_back、MD5Hex 的栈溢出），
+    # 见 _rhine_ffx_sc_stage_sources 里对成因的说明。
     _rhine_ffx_sc_stage_patched(
         "${tools}/src/glsl_compiler.cpp" "${stage}/glsl_compiler.cpp"
         "                token.pop_back();"
-        "                if (!token.empty())\n                    token.pop_back();")
+        "                if (!token.empty())\n                    token.pop_back();"
+        "        std::snprintf(out_ptr, 32, \"%02x\", sig[i]);"
+        "        std::snprintf(out_ptr, static_cast<size_t>(out + sizeof(out) - out_ptr), \"%02x\", sig[i]);")
 
     add_executable(ffx_sc
         "${tools}/src/ffx_sc.cpp"
