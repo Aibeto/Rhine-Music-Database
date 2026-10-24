@@ -152,17 +152,39 @@ bool runNativeSessionChecks(const QString &root, const QString &audioURL) {
                 "paused intent, queue and browsing independent of playing song");
     playback["requested"] = true;
     restored.music.player.restoreSessionState(playback);
-    ok &= check(waitFor([&] {
-                    const auto state = restoredHost.mediaState();
-                    if (!audioOutputPresent()) {
-                        // 设备一直在时要求播放真正开始并越过恢复点；恢复途中设备消失则只
-                        // 校验播放意图保住了——没有输出时位置推进无法验收。
-                        return !restored.music.player.loading && state["requested"].toBool() &&
-                               (!hasOutput || state["position"].toLongLong() == 2500);
-                    }
-                    return state["playing"].toBool() && state["position"].toLongLong() > 2800;
-                }),
-                "playing audio resumes and advances from saved position");
+    // 这个断言在 macOS runner 上偶发失败。playing / position / buffering 三个量足以
+    // 区分三种成因：媒体始终没进 ready（recoveryPosition 被钉住、看门狗同时失效）、
+    // 进了 ready 但输出设备不推进时钟、以及仅仅启动得慢。失败时把整段等待的轨迹打
+    // 出来，否则只能看到一句 FAILED 而无从判断。
+    QString resumeTrace;
+    qint64 sampled = -1;
+    QElapsedTimer resumeClock;
+    resumeClock.start();
+    const bool resumed = waitFor([&] {
+        const auto state = restoredHost.mediaState();
+        const auto elapsed = resumeClock.elapsed();
+        if (elapsed / 200 != sampled) {
+            sampled = elapsed / 200;
+            resumeTrace += QStringLiteral("%1:%2/%3%4%5 ")
+                               .arg(elapsed)
+                               .arg(state["playing"].toBool() ? QChar('P') : QChar('-'))
+                               .arg(state["position"].toLongLong())
+                               .arg(state["seekable"].toBool() ? QChar('S') : QChar('-'))
+                               .arg(state["buffering"].toBool() ? QChar('B') : QChar('-'));
+        }
+        if (!audioOutputPresent()) {
+            // 设备一直在时要求播放真正开始并越过恢复点；恢复途中设备消失则只
+            // 校验播放意图保住了——没有输出时位置推进无法验收。
+            return !restored.music.player.loading && state["requested"].toBool() &&
+                   (!hasOutput || state["position"].toLongLong() == 2500);
+        }
+        return state["playing"].toBool() && state["position"].toLongLong() > 2800;
+    });
+    if (!resumed) {
+        std::fprintf(stderr, "DIAG: resume trace (ms:playing/position/seekable/buffering) %s\n",
+                     resumeTrace.toUtf8().constData());
+    }
+    ok &= check(resumed, "playing audio resumes and advances from saved position");
     restored.music.player.stop();
     if (!hasOutput) {
         std::fprintf(stderr, "SKIP: no audio output; verified retained position and intent, actual playback "
