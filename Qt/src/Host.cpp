@@ -901,71 +901,60 @@ void Host::invalidateMetadata() {
         metadata.remove(name);
     }
 }
+namespace {
+// 可读写的偏好键。读取与写入必须共用同一份名单：两份名单一旦分叉，写入会成功但读回
+// 为空，界面上的表现就是"设置完立刻跳回原值"。
+const QStringList &preferenceKeys() {
+    static const QStringList keys{
+        "search-history",
+        "play-history",
+        "local-cover-cache",
+        "theme",
+        "motion",
+        "startup-animation",
+        "detail-autoplay",
+        "single-play-mode",
+        "disc-rotation",
+        "scene-enhancement",
+        "archive-mask-strength",
+        "graphics-backend",
+        "vsync",
+        "supersample",
+        "render-scale",
+        "aa-mode",
+        "aa-scale",
+        "msaa",
+        "fsr-quality",
+        "fsr-sharpness",
+        "fg",
+        "auto-update",
+        "volume",
+        "quality",
+        "alternate-source",
+        "provider",
+        "lyrics-cache",
+        "welcome-name-netease",
+        "welcome-name-qq",
+        "welcome-name-kugou",
+        "account-id-netease",
+        "account-id-qq",
+        "account-id-kugou",
+        "kugou-edition",
+        "welcome-name-kugou-standard",
+        "welcome-name-kugou-lite",
+        "account-id-kugou-standard",
+        "account-id-kugou-lite"};
+    return keys;
+}
+} // namespace
 QString Host::preference(QString key) const {
-    if (offline || !QStringList{"search-history",
-                                "play-history",
-                                "local-cover-cache",
-                                "theme",
-                                "motion",
-                                "startup-animation",
-                                "detail-autoplay",
-                                "single-play-mode",
-                                "disc-rotation",
-                                "scene-enhancement",
-                                "archive-mask-strength",
-                                "auto-update",
-                                "volume",
-                                "quality",
-                                "alternate-source",
-                                "provider",
-                                "lyrics-cache",
-                                "welcome-name-netease",
-                                "welcome-name-qq",
-                                "welcome-name-kugou",
-                                "account-id-netease",
-                                "account-id-qq",
-                                "account-id-kugou",
-                                "kugou-edition",
-                                "welcome-name-kugou-standard",
-                                "welcome-name-kugou-lite",
-                                "account-id-kugou-standard",
-                                "account-id-kugou-lite"}
-                        .contains(key)) {
+    if (offline || !preferenceKeys().contains(key)) {
         return {};
     }
     return AppStorage::settings().value("panel/" + key).toString();
 }
 void Host::setPreference(QString key, QString value) {
-    if (!offline && value.size() < 262144 &&
-        QStringList{"search-history",
-                    "play-history",
-                    "local-cover-cache",
-                    "theme",
-                    "motion",
-                    "startup-animation",
-                    "detail-autoplay",
-                    "single-play-mode",
-                    "disc-rotation",
-                    "scene-enhancement",
-                    "archive-mask-strength",
-                    "auto-update",
-                    "volume",
-                    "quality",
-                    "alternate-source",
-                    "provider",
-                    "lyrics-cache",
-                    "welcome-name-netease",
-                    "welcome-name-qq",
-                    "welcome-name-kugou",
-                    "account-id-netease",
-                    "account-id-qq",
-                    "account-id-kugou",
-                    "kugou-edition",
-                    "welcome-name-kugou-standard",
-                    "welcome-name-kugou-lite",
-                    "account-id-kugou-standard",
-                    "account-id-kugou-lite"}
-            .contains(key)) {
+    if (!offline && value.size() < 262144 && preferenceKeys().contains(key)) {
         AppStorage::settings().setValue("panel/" + key, value);
     }
 }

@@ -1,4 +1,5 @@
 #include "NativeHud.h"
+#include "GraphicsBackend.h"
 #include "MusicData.h"
 #include <algorithm>
 
@@ -352,6 +353,39 @@ void NativeHud::qualityPanel(double x, double y, double width) {
             usable * 0.53);
 }
 
+namespace {
+/**
+ * 设置页在窗口创建前构造，QSGRendererInterface::graphicsApi() 还拿不到，因此按持久化的
+ * panel/graphics-backend 静态判断：空值代表"默认/自动"，启动逻辑在 Windows 默认 D3D12、
+ * 其余平台优先 Vulkan，两者都有计算着色器；只有显式选择 OpenGL 时返回 false，
+ * 因为 Qt 的 GL RHI 没有计算着色器。
+ */
+bool backendRunsFsr3(const Host *host) {
+#if defined(Q_OS_MACOS)
+    // macOS 只有 Metal，而 FSR3 后端只实现 Vulkan/D3D12。
+    Q_UNUSED(host);
+    return false;
+#elif !defined(RHINE_FSR3_VULKAN) && !defined(RHINE_FSR3_DX12)
+    // 构建里没有编进任何 FSR3 后端（Vulkan 后端缺失或着色器置换未生成）。
+    // 这时即使后端名匹配也不该把 FSR3 列成可选——选中的结果只是静默无效。
+    Q_UNUSED(host);
+    return false;
+#else
+    return host->preference("graphics-backend") != "opengl";
+#endif
+}
+/**
+ * 帧生成与 FSR3 共用同一批后端能力，但额外依赖"由应用自己拥有交换链并负责呈现"。
+ * Rhine 目前走 QQuickRhiItem，交换链归 Qt/QRhi 所有，FG 的呈现路径尚未接通，
+ * 因此这里恒返回 false，设置页把该行置灰并显示未启用，避免出现点了没有任何效果的开关。
+ * 接通 FG 时只需放开这里的条件，偏好与 RHINE_FG 的下发链路已经就绪。
+ */
+bool backendRunsFrameGeneration(const Host *host) {
+    Q_UNUSED(host);
+    return false;
+}
+} // namespace
+
 void NativeHud::settings(double x, double y, double width) {
     const auto &music = *m_music;
     static const QHash<QString, QString> qualities{
@@ -384,10 +418,107 @@ void NativeHud::settings(double x, double y, double width) {
                  m_host->preference("single-play-mode") == "append" ? "仅添加当前单曲" : "替换为所在列表",
                  "single-play-mode"});
     rows.append({"RIGHT MASK / 右侧画面遮罩", "", "archive-mask"});
+    // 图形后端写入配置，重启后由启动逻辑应用；用于定位玻璃渲染是否为特定后端的问题。
+    const auto backendSetting = m_host->preference("graphics-backend");
+    static const QHash<QString, QString> backendNames{{"vulkan", "Vulkan"},
+                                                      {"opengl", "OpenGL"},
+                                                      {"d3d12", "Direct3D 12"}};
+    const auto pending = backendSetting.isEmpty() ? QStringLiteral("默认 / 自动探测")
+                                                  : backendNames.value(backendSetting, backendSetting);
+    // 显示本次启动实际应用的后端：只读配置值会在环境变量覆盖或保存值过期时与画面不一致。
+    const auto applied = RhineGraphics::activeBackend();
+    QString backendLabel = pending;
+    if (!applied.isEmpty()) {
+        const auto appliedName = backendNames.value(applied, applied);
+        if (backendSetting.isEmpty()) {
+            backendLabel = appliedName + QStringLiteral("（自动）");
+        } else if (applied != backendSetting) {
+            backendLabel =
+                appliedName + QStringLiteral("（下次启动：") + pending + QStringLiteral("）");
+        } else {
+            backendLabel = appliedName;
+        }
+    }
+    rows.append({"GRAPHICS BACKEND / 图形后端 · 重启生效", backendLabel, "graphics-backend"});
+    // 垂直同步关闭后允许帧率超过屏幕刷新率，由交换链的呈现模式决定，重启生效。
+    rows.append({"V-SYNC / 垂直同步 · 重启生效", vsync ? "开启" : "关闭", "vsync"});
+    // 渲染分辨率：内部目标按百分比创建，最终合成通道再缩放回窗口，重启后生效。
+    // 小于 100 换帧率，大于 100 是超采样换抗锯齿，因此用 +/- 步进而不是点击循环。
+    const auto renderScale = m_host->preference("render-scale").toInt();
+    rows.append({"RENDER SCALE / 渲染分辨率", "", "render-scale"});
+    // 抗锯齿互斥单选，默认关闭；倍率只对 SSAA 生效，与渲染分辨率相乘。
+    const auto aaMode = m_host->preference("aa-mode");
+    const auto aaScale = m_host->preference("aa-scale").toInt();
+    const bool fgUsable = backendRunsFrameGeneration(m_host);
+    // 这一栏同时包含抗锯齿与超分（FSR），所以标题不能只写"抗锯齿"。
+    rows.append({"AA & UPSCALING / 抗锯齿与超分辨率", "", "aa-mode"});
+    // 下拉块选项表在建表时确定：展开高度与绘制共用同一份列表，避免两处不一致。
+    // 名称必须用 QStringLiteral：QLatin1String 会把 UTF-8 字节逐个当 Latin-1 解释，中文变乱码。
+    // FSR 只有一个选项：内部按后端能力自动选择 FFX 计算后端（FSR3）或 EASU/RCAS
+    // 片元实现（FSR1），用户不需要理解两代算法的差别，也不会选到跑不了的那个。
+    QVector<QPair<QString, QString>> aaOptions{{"off", QStringLiteral("关闭")},
+                                               {"fxaa", QStringLiteral("FXAA")},
+                                               {"ssaa", QStringLiteral("SSAA")},
+                                               {"msaa", QStringLiteral("MSAA")},
+                                               {"taa", QStringLiteral("TAA")},
+                                               {"fsr", QStringLiteral("FSR")}};
+    // 旧版本保存过 fsr1 / fsr3，统一按合并后的 fsr 显示，避免升级后显示成"关闭"。
+    const auto aaSelected = (aaMode == "fsr1" || aaMode == "fsr3") ? QStringLiteral("fsr") : aaMode;
+    int aaIndex = 0;
+    for (int i = 0; i < aaOptions.size(); ++i) {
+        if (aaSelected == aaOptions.at(i).first) {
+            aaIndex = i;
+            break;
+        }
+    }
+    // FSR 专属两行只在 FSR 模式下出现：档位决定内部渲染分辨率，锐化决定 RCAS 强度。
+    const bool fsrActive = aaMode == "fsr" || aaMode == "fsr1" || aaMode == "fsr3";
+    const QVector<QPair<QString, QString>> fsrOptions{{"native", QStringLiteral("原生 AA")},
+                                                      {"quality", QStringLiteral("高质量")},
+                                                      {"balanced", QStringLiteral("平衡")},
+                                                      {"performance", QStringLiteral("性能")},
+                                                      {"super", QStringLiteral("超级性能")}};
+    const auto fsrQuality = m_host->preference("fsr-quality");
+    int fsrIndex = 0;
+    for (int i = 0; i < fsrOptions.size(); ++i) {
+        if (fsrQuality == fsrOptions.at(i).first) {
+            fsrIndex = i;
+            break;
+        }
+    }
+    const auto fsrSharpnessPref = m_host->preference("fsr-sharpness");
+    const int fsrSharpness = fsrSharpnessPref.isEmpty() ? 50 : fsrSharpnessPref.toInt();
+    // MSAA 采样数：只有 2/4/8 三档，未设置时用渲染器的默认目标 4x。
+    const auto msaaPref = m_host->preference("msaa").toInt();
+    const int msaaSamples = msaaPref > 1 ? std::clamp(msaaPref, 2, 8) : 4;
+    constexpr double aaOptionStep = 52;
+    // 展开时列表占位参与内容总高度，滚动范围随之变长。
+    const double aaExtra =
+        expandedPreference == QLatin1String("aa-mode") ? aaOptions.size() * aaOptionStep : 0;
+    const double fsrExtra =
+        expandedPreference == QLatin1String("fsr-quality") ? fsrOptions.size() * aaOptionStep : 0;
+    const double dropdownExtra = aaExtra + fsrExtra;
+    // 抗锯齿的子设置紧跟主行，按当前模式决定显示哪些：SSAA 只有倍率，MSAA 只有采样数，
+    // FSR1/FSR3 有档位与锐化，off/fxaa/taa 没有子设置。不适用的行直接不出现，
+    // 避免调了没有任何效果。
+    if (aaMode == "ssaa") {
+        rows.append({"AA SCALE / 抗锯齿倍率", "", "aa-scale"});
+    } else if (aaMode == "msaa") {
+        rows.append({"MSAA SAMPLES / 多重采样倍率", "", "msaa"});
+    } else if (fsrActive) {
+        rows.append({"FSR QUALITY / FSR 档位", "", "fsr-quality"});
+        rows.append({"FSR SHARPNESS / 锐化", "", "fsr-sharpness"});
+    }
+    // 帧生成是独立开关，不随抗锯齿模式循环；当前未接入呈现层，只显示状态、不注册点击。
+    // 措辞刻意不用"当前后端不支持"：后端其实是支持的（Vulkan/D3D12 的 FI 与 OF 组件
+    // 都已编译进二进制），缺的是由应用自己拥有交换链并负责呈现这一层。
+    rows.append({"FRAME GENERATION / 帧生成", fgUsable ? (m_host->preference("fg") == "on" ? "开启" : "关闭")
+                                                       : "尚未接入",
+                 fgUsable ? "fg" : "fg:unavailable"});
     // 内容高度随平台可用选项变化
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;
-    const auto performanceTop = preferenceTop + rows.size() * rowStep + 76;
+    const auto performanceTop = preferenceTop + rows.size() * rowStep + 76 + dropdownExtra;
     const auto updateTop = performanceTop + 310;
     const auto projectTop = updateTop + 310;
     settingsContentBottom = projectTop + 278;
@@ -420,12 +551,108 @@ void NativeHud::settings(double x, double y, double width) {
     limited(accountNote, left + 365, y + 322, 15, usable - 365);
     rule(left, y + 376, usable, 0.2);
     text("TERMINAL PREFERENCES / 终端偏好", left, y + 392, 16, "demibold");
+    // 下拉块绘制：标题行整行可点，右侧显示当前值与箭头；展开后在行下列出全部选项。
+    // 返回新增高度，由调用方累加进 rowShift，让后续行整体下移。
+    const auto dropdown = [&](const QVector<QPair<QString, QString>> &options, int current, const QString &key,
+                              const QString &prefix, double dropdownY, double dropdownLeft,
+                              double dropdownWidth, const QJsonArray &dropdownInk,
+                              const QJsonArray &dropdownTint) -> double {
+        const bool expanded = expandedPreference == key;
+        hit(dropdownLeft, dropdownY, dropdownWidth, 56, "expand:" + key, options.at(current).second);
+        text(options.at(current).second, dropdownLeft + dropdownWidth - 300, dropdownY + 19, 17, "regular", 0,
+             dropdownInk);
+        text(expanded ? QStringLiteral("▴") : QStringLiteral("▾"), dropdownLeft + dropdownWidth - 52,
+             dropdownY + 19, 16, "regular", 0, dropdownInk);
+        if (!expanded) {
+            return 0.;
+        }
+        for (int option = 0; option < options.size(); ++option) {
+            const auto optionY = dropdownY + 56 + option * aaOptionStep;
+            const bool active = option == current;
+            fill(dropdownLeft + 16, optionY, dropdownWidth - 32, aaOptionStep - 4, dropdownTint);
+            text(options.at(option).second, dropdownLeft + 40, optionY + 17, 16,
+                 active ? "demibold" : "regular", 0, dropdownInk);
+            if (active) {
+                // 选中项用实心圆点标记，与右侧"当前值"重复一次以便扫读。
+                text(QStringLiteral("●"), dropdownLeft + dropdownWidth - 60, optionY + 16, 13, "regular");
+            }
+            hit(dropdownLeft + 16, optionY, dropdownWidth - 32, aaOptionStep - 4,
+                prefix + options.at(option).first, options.at(option).second);
+        }
+        return options.size() * aaOptionStep;
+    };
+    double rowShift = 0;
     for (int index = 0; index < rows.size(); ++index) {
         const auto &row = rows.at(index);
-        const auto rowY = y + preferenceTop + index * rowStep;
+        // 下拉块展开后，其后所有行整体下移，避免与选项列表重叠。
+        const auto rowY = y + preferenceTop + index * rowStep + rowShift;
         fill(left, rowY, usable, 56, tint);
-        text(row.at(0), left + 16, rowY + 18, 18, "demibold");
-        if (row.at(2) == "archive-mask") {
+        // 后端不支持的开关只显示状态：整行置灰且不注册命中区域，避免点了没有效果。
+        const bool unavailable = row.at(2).endsWith(":unavailable");
+        auto rowInk = ink();
+        if (unavailable) {
+            rowInk[3] = 0.35;
+        }
+        text(row.at(0), left + 16, rowY + 18, 18, "demibold", 0, rowInk);
+        if (row.at(2) == "aa-mode") {
+            // 抗锯齿下拉块：选中即收起（收起逻辑在 NativeHud::action 的 aa-mode: 分支里）。
+            rowShift += dropdown(aaOptions, aaIndex, QStringLiteral("aa-mode"), QStringLiteral("aa-mode:"),
+                                 rowY, left, usable, rowInk, tint);
+        } else if (row.at(2) == "fsr-quality") {
+            // FSR 超分档位：同样走下拉块，档位变化会改变内部渲染分辨率。
+            rowShift += dropdown(fsrOptions, fsrIndex, QStringLiteral("fsr-quality"),
+                                 QStringLiteral("fsr-quality:"), rowY, left, usable, rowInk, tint);
+        } else if (row.at(2) == "fsr-sharpness") {
+            // 锐化 0–100，步进 10；逐帧生效，不需要重启或重建目标。
+            button("−", left + usable - 280, rowY + 6, 48, 44,
+                   "fsr-sharpness:" + QString::number(std::max(0, fsrSharpness - 10)), 20);
+            centeredText(QString::number(fsrSharpness) + "%", left + usable - 148, rowY + 28, 16, "regular",
+                         true);
+            button("＋", left + usable - 64, rowY + 6, 48, 44,
+                   "fsr-sharpness:" + QString::number(std::min(100, fsrSharpness + 10)), 20);
+        } else if (row.at(2) == "msaa") {
+            // 采样数固定三档循环，避免出现 3x/5x 这类设备普遍不支持的值。
+            static const int steps[] = {2, 4, 8};
+            constexpr int count = 3;
+            int stepIndex = 1;
+            for (int i = 0; i < count; ++i) {
+                if (steps[i] == msaaSamples) {
+                    stepIndex = i;
+                    break;
+                }
+            }
+            button("−", left + usable - 280, rowY + 6, 48, 44,
+                   "msaa:" + QString::number(steps[(stepIndex + count - 1) % count]), 20);
+            centeredText(QString::number(msaaSamples) + "x", left + usable - 148, rowY + 28, 16, "regular",
+                         true);
+            button("＋", left + usable - 64, rowY + 6, 48, 44,
+                   "msaa:" + QString::number(steps[(stepIndex + 1) % count]), 20);
+        } else if (row.at(2) == "aa-scale") {
+            const int scale = aaScale > 0 ? aaScale : 125;
+            button("−", left + usable - 280, rowY + 6, 48, 44,
+                   "aa-scale:" + QString::number(std::max(100, scale - 25)), 20);
+            centeredText(QString::number(scale) + "%", left + usable - 148, rowY + 28, 16, "regular", true);
+            button("＋", left + usable - 64, rowY + 6, 48, 44,
+                   "aa-scale:" + QString::number(std::min(200, scale + 25)), 20);
+        } else if (row.at(2) == "render-scale") {
+            // 固定档位表：按表前进/后退，避免固定步长在 90 与 100 之间跳跃。
+            static const int steps[] = {50, 60, 75, 90, 100};
+            constexpr int count = 5;
+            const int scale = renderScale > 0 ? renderScale : 100;
+            int index = count - 1;
+            for (int i = 0; i < count; ++i) {
+                if (steps[i] == scale) {
+                    index = i;
+                    break;
+                }
+            }
+            button("−", left + usable - 280, rowY + 6, 48, 44,
+                   "render-scale:" + QString::number(steps[std::max(0, index - 1)]), 20);
+            centeredText(scale == 100 ? QString("100% · 原生") : QString::number(scale) + "%",
+                         left + usable - 148, rowY + 28, 16, "regular", true);
+            button("＋", left + usable - 64, rowY + 6, 48, 44,
+                   "render-scale:" + QString::number(steps[std::min(count - 1, index + 1)]), 20);
+        } else if (row.at(2) == "archive-mask") {
             button("−", left + usable - 280, rowY + 6, 48, 44,
                    "archive-mask:" + QString::number(std::max(0, archiveMaskStrength - 10)), 20);
             const auto label =
@@ -433,6 +660,8 @@ void NativeHud::settings(double x, double y, double width) {
             centeredText(label, left + usable - 148, rowY + 28, 16, "regular", true);
             button("＋", left + usable - 64, rowY + 6, 48, 44,
                    "archive-mask:" + QString::number(std::min(100, archiveMaskStrength + 10)), 20);
+        } else if (unavailable) {
+            text(row.at(1), left + usable - 280, rowY + 16, 16, "regular", 0, rowInk);
         } else {
             button(row.at(1), left + usable - 280, rowY + 6, 264, 44, row.at(2), 16);
         }
