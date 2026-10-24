@@ -1334,10 +1334,6 @@ class ItemRenderer : public QQuickRhiItemRenderer {
     void synchronize(QQuickRhiItem *value) override {
         auto scene = static_cast<RhiScene *>(value);
         auto engine = scene->engine();
-            } else if (mesh == -6) {
-                vertices = caseLetteringFront;
-            } else if (mesh == -7) {
-                vertices = caseLetteringSpine;
         backend = engine;
         if (engine) {
             frame = engine->frame();
