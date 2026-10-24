@@ -82,8 +82,8 @@ FetchContent_Declare(
     URL "${CMAKE_CURRENT_SOURCE_DIR}/vendor/taglib/taglib-2.1.1.tar.gz"
     URL_HASH SHA256=bd57924496a272322d6f9252502da4e620b6ab9777992e8934779ebd64babd6e)
 FetchContent_MakeAvailable(taglib)
-# AMD FidelityFX（FSR3 组件 + Vulkan 后端，DX12 仅在 Windows 下接入）；只建库不链接，
-# 应用源码尚未调用 FSR，后续按 cmake/FidelityFX.cmake 暴露的 target 接入。
+# AMD FidelityFX（FSR3 组件 + Vulkan 后端，DX12 仅在 Windows 下接入）。
+# SDK 目标由 RhineMusicDatabase 链接，见文件末尾的 FidelityFX::SDK 段。
 include(cmake/FidelityFX.cmake)
 # 自维护源码和锁定的二维码库构成独立应用目标。
 set(RHINE_APP_SOURCES

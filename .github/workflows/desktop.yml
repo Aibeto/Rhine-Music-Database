@@ -20,7 +20,9 @@ concurrency:
 jobs:
   build:
     name: ${{ matrix.name }}
-    timeout-minutes: 45
+    # Windows 需要从源码构建 LLVM 级的 dxc（cmake/Dxc.cmake 注释写明首次约需数十分钟），
+    # 45 分钟不足以覆盖，故按平台区分。
+    timeout-minutes: ${{ matrix.timeout || 45 }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,16 +47,65 @@ jobs:
             node-platform: win-x64
             artifact: Windows-x64
             distribution: 'Windows-x64-Setup.exe'
+            timeout: 120
     runs-on: ${{ matrix.os }}
     env:
-      NODE_VERSION: '22.14.0'
+      NODE_VERSION: '26.11.1'
       RHINE_BUILD_TYPE: Release
       RHINE_VERSION: ${{ inputs.release_version || '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # FSR3 超分与插帧需要 FidelityFX SDK；着色器预编译需要 dxc 与 glslang。
+          # 三者都以 submodule 记录，缺 SDK 时 cmake 会静默跳过 FSR 目标，
+          # 因此必须显式递归检出，否则 CI 测不到 FSR 代码路径。
+          submodules: recursive
+      - name: Check out glslang vendored dependencies
+        # 只有 Vulkan 分支会解析 glslang（Windows 走 DX12，用 dxc 而非 glslang；
+        # macOS 没有 Vulkan，Vulkan 分支整体跳过），其余平台不必付这份网络开销。
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          # glslang 16.x 用 known_good.json 而非 .gitmodules 固定依赖，因此
+          # `submodules: recursive` 不会拉取它们。缺任一目录时 cmake/Glslang.cmake
+          # 会回退到系统 glslangValidator，runner 上没有就退化为 FSR3 不可用。
+          set -uo pipefail
+          failed=0
+          clone_pinned() {
+            local subdir="$1" url="$2" commit="$3"
+            local dest="third_party/glslang/$subdir"
+            if [[ -f "$dest/CMakeLists.txt" ]]; then
+              echo "already present: $subdir"
+              return 0
+            fi
+            rm -rf "$dest"
+            mkdir -p "$(dirname "$dest")"
+            git init -q "$dest"
+            git -C "$dest" remote add origin "$url"
+            # 先按 commit 浅抓取；部分服务器不允许按 SHA 抓取，此时退回全量抓取。
+            # 注意全量抓取后必须 checkout 该 commit，不能用 FETCH_HEAD：不带 ref 的
+            # fetch 会让 FETCH_HEAD 指向默认分支最新提交，检出结果就偏离了 pin。
+            if ! git -C "$dest" fetch -q --depth 1 origin "$commit"; then
+              echo "shallow fetch by SHA failed, falling back to full fetch: $subdir"
+              git -C "$dest" fetch -q origin
+            fi
+            git -C "$dest" checkout -q "$commit"
+            test -f "$dest/CMakeLists.txt"
+          }
+          # 检出失败只影响「FSR3 Vulkan 走源码 glslang」这一条路径，不该让整个构建
+          # 直接失败：macOS 上无用，Windows 走 DX12 也不需要它。汇总后作为警告输出。
+          clone_pinned External/spirv-tools \
+            https://github.com/KhronosGroup/SPIRV-Tools.git \
+            ef96ed763b43b59b33b31b362f09a02b729fa1c9 || failed=1
+          clone_pinned External/spirv-tools/external/spirv-headers \
+            https://github.com/KhronosGroup/SPIRV-Headers.git \
+            496543121ce6419f23d6fa5d7194ba66c36212d2 || failed=1
+          if [[ "$failed" -ne 0 ]]; then
+            echo "::warning::glslang 依赖检出失败，FSR3 Vulkan 将回退到系统 glslangValidator"
+          fi
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.14.0'
+          node-version: '26.11.1'
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -71,9 +122,11 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # libvulkan-dev 提供 vulkan.h：cmake/FidelityFX.cmake 用 find_package(Vulkan QUIET)
+          # 探测后端，缺头文件会静默跳过 FSR3 的 Vulkan 实现。
           sudo apt-get install --yes --no-install-recommends \
             cmake ninja-build file libgl1-mesa-dev libxkbcommon-dev \
-            libxkbcommon-x11-0 libxcb-cursor0
+            libxkbcommon-x11-0 libxcb-cursor0 libvulkan-dev
           # 构建脚本用 --appimage-extract-and-run 打包与冒烟测试，不依赖 FUSE；
           # 这里只为兼容手动验证，noble 已按 t64 改名，缺失不算失败。
           sudo apt-get install --yes --no-install-recommends libfuse2t64 || \

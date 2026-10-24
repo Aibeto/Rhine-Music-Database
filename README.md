@@ -139,9 +139,19 @@ macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_
 
 ## 从源码构建
 
-需要包含 Shader Tools 和 Multimedia 的 Qt **6.12+** desktop kit、CMake 3.24+、Ninja、Python 3、Node.js / npm，以及平台 C++ 编译器。本地与三平台自动构建统一使用 Qt 6.12.0，自动构建使用 Node.js 22.14.0。Linux 还需要 Qt 的私有开发头文件（发行版包名通常是 `qt6-base-private-dev`、`qt6-multimedia-private-dev`）。
+需要包含 Shader Tools 和 Multimedia 的 Qt **6.12+** desktop kit、CMake 3.24+、Ninja、Python 3、Node.js / npm，以及平台 C++ 编译器。本地与三平台自动构建统一使用 Qt 6.12.0，自动构建使用 Node.js 26.11.1。Linux 还需要 Qt 的私有开发头文件（发行版包名通常是 `qt6-base-private-dev`、`qt6-multimedia-private-dev`）。
 
 `QT_ROOT` 指向 Qt kit 根目录。`RHINE_NODE_BINARY` 和 `RHINE_NODE_LICENSE` 指向官方独立 Node 分发包中的可执行文件与对应许可证；该运行时会随应用打包，不提交到源码仓库。
+
+FSR3 超分与插帧依赖 `FidelityFX-SDK/`，着色器预编译依赖 `third_party/dxc` 与 `third_party/glslang`，三者都以 submodule 记录，克隆时需要递归检出：
+
+```sh
+git clone --recurse-submodules <仓库地址>
+# 已克隆的仓库补检出
+git submodule update --init --recursive
+```
+
+`FidelityFX-SDK/` 缺失时 CMake 只打印一条状态信息并跳过 FSR 目标，构建仍然成功但 FSR3 不会编入；`third_party/glslang` 缺失时回退到系统 `glslangValidator`；`third_party/dxc` 缺失在 Windows 上会直接报错。`spirv-tools` 与 `spirv-headers` 无法嵌套为 submodule，版本记录在 `.gitmodules` 的 `pinned-commit` 中。
 
 ### macOS
 
@@ -180,7 +190,7 @@ Windows 的 `npm run share` 使用 [Inno Setup 6.3+ 或 7](https://jrsoftware.or
 
 ### Linux x86_64（AppImage）
 
-安装 Qt 6.12.0 开发包（含 Shader Tools、Multimedia 与私有头文件）、CMake、Ninja、GCC、Python 3 和 Node.js ；若发行版尚未提供此版本，使用官方 desktop kit 并设置 `QT_ROOT`。Qt 由系统提供时 `QT_ROOT` 保持默认的 `/usr` 即可：
+安装 Qt 6.12.0 开发包（含 Shader Tools、Multimedia 与私有头文件）、CMake、Ninja、GCC、Python 3 和 Node.js 26.11.1；若发行版尚未提供此版本，使用官方 desktop kit 并设置 `QT_ROOT`。Qt 由系统提供时 `QT_ROOT` 保持默认的 `/usr` 即可：
 
 ```sh
 curl -LO https://nodejs.org/dist/v26.11.1/node-v26.11.1-linux-x64.tar.xz

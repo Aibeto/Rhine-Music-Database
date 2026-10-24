@@ -58,5 +58,7 @@ Thumbs.db
 # 依赖文件 .d 与临时编译脚本 .cmake 每次构建都会重写，不入库。
 /generated/**/*.d
 /generated/**/*.cmake
+# 从源码构建的 dxc 产物（Windows 首次构建会写到这里）。
+/generated/dxc/
 # 本地临时补丁快照
 .uncommitted.diff
