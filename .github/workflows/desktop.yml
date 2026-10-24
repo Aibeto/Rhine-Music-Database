@@ -118,6 +118,20 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+      # Windows 与 Linux 的默认后端都是 Vulkan（README「图形后端」一节），
+      # 而 Windows runner 镜像不预装 Vulkan SDK：缺 vulkan.h 时 Qt 的
+      # QVulkanInstance / QRhiVulkanInitParams 不会声明，Vulkan 路径根本编不进来，
+      # 默认后端就只能退成 D3D12。装 SDK 让这条路径真正可编译。
+      - name: Install Vulkan SDK
+        if: runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          # 只为编译期需要：头文件与 vulkan-1.lib。不装 SwiftShader / Lavapipe 软光栅，
+          # 运行期是否有可用的物理设备由 vulkanDeviceAvailable() 探测决定，
+          # 探测不到就回退 D3D12，不会因为缺 GPU 而让构建或测试失败。
+          install_runtime: true
+          cache: true
+          stripdown: true
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |

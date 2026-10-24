@@ -139,23 +139,23 @@ static void selectGraphicsBackend() {
         // 旧配置里可能还留着已移除的 d3d11；同样不能直接返回，否则会落回 D3D11。
         qWarning() << "Saved graphics backend" << saved << "is unavailable; using the default backend.";
     }
-    // 都没有：Windows 上固定 D3D12，其余平台可用时默认 Vulkan。
-#if defined(Q_OS_WIN)
-    // Windows 选 D3D12 而不是 Vulkan：QT_D3D_ADAPTER_INDEX（默认独显）只在 D3D 系生效，
-    // 而且 FSR3 在 D3D12 上走厂商原生路径。本项目已移除 D3D11，必须显式指定，
-    // 否则 Qt 的平台默认后端会把它请回来。
-    QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D12);
-    RhineGraphics::setActiveBackend(QStringLiteral("d3d12"));
-    qInfo() << "No backend configured; using Direct3D 12 (default on Windows).";
-#else
+    // 都没有：Windows 与 Linux 上优先 Vulkan，不可用时回退平台默认（Windows 为 D3D12，
+    // 其余为 OpenGL）；macOS 只提供 Metal，走上面的分支。
     if (vulkanDeviceAvailable()) {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
         RhineGraphics::setActiveBackend(QStringLiteral("vulkan"));
         qInfo() << "No backend configured; Vulkan detected and selected as default.";
     } else {
+#if defined(Q_OS_WIN)
+        // 不能交给平台默认：Qt 在 Windows 的默认后端是 D3D11，本项目已彻底移除该后端，
+        // 必须显式指定 D3D12，否则会把 D3D11 请回来。
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D12);
+        RhineGraphics::setActiveBackend(QStringLiteral("d3d12"));
+        qInfo() << "No backend configured; Vulkan unavailable, using Direct3D 12 on Windows.";
+#else
         qInfo() << "No backend configured; Vulkan unavailable, using the platform default.";
-    }
 #endif
+    }
 #endif
 }
 /**
