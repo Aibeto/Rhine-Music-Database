@@ -412,114 +412,6 @@ function(_rhine_ffx_generate_vk_shaders target sdk_dir sc_executable glslang_exe
 endfunction()
 
 # ---------------------------------------------------------------------------
-# Frame-interpolation swapchain shaders and sources.
-#
-# The SDK checks the UI-composition and debug-pacing SPIR-V into the source tree as
-# generated headers; recompileUiCompositionGLSL.bat rebuilds them by hand. Rhine does not
-# consume pre-generated shader blobs, so they are regenerated from the .glsl sources at
-# build time with the same glslang invocation the .bat uses (--vn emits a uint32_t array).
-#
-# The swapchain sources are compiled from copies under the build tree: quoted includes
-# resolve next to the translation unit first, so a copy sitting beside the regenerated
-# headers picks those up instead of the SDK's checked-in ones.
-# ---------------------------------------------------------------------------
-
-function(_rhine_ffx_prepare_swapchain target sdk_dir glslang_executable)
-    set(source_dir "${sdk_dir}/sdk/src/backends/vk/FrameInterpolationSwapchain")
-    set(stage "${RHINE_FFX_COMPAT_DIR}/FrameInterpolationSwapchain")
-    file(MAKE_DIRECTORY "${stage}")
-
-    set(generated_headers
-        FrameInterpolationSwapchainUiCompositionVS.h
-        FrameInterpolationSwapchainUiCompositionPS.h
-        FrameInterpolationSwapchainUiCompositionPremulVS.h
-        FrameInterpolationSwapchainUiCompositionPremulPS.h
-        FrameInterpolationSwapchainDebugPacingVS.h
-        FrameInterpolationSwapchainDebugPacingPS.h)
-
-    # Everything that is not a generated header gets copied verbatim.
-    file(GLOB swapchain_files "${source_dir}/*.cpp" "${source_dir}/*.h")
-    set(staged_sources "")
-    foreach(file IN LISTS swapchain_files)
-        get_filename_component(name "${file}" NAME)
-        list(FIND generated_headers "${name}" generated_index)
-        if(generated_index EQUAL -1)
-            # 交换链源码在 v1.1.4 里只随 Windows SDK 分发，上游从未在 MSVC 上编译过这个文件
-            # （此前 Windows 构建根本不启用 Vulkan 后端），因此有两处不合规写法需要改写。
-            file(READ "${file}" swapchain_contents)
-            # (1) waitForSemaphoreValue 的 waitCallback 形参是非 const wchar_t*，
-            #     第 338 行却传字符串字面量；MSVC 的 /Zc:strictStrings 直接报 C2664。
-            #     改用可写缓冲区承载名字：辅助函数插在 waitForSemaphoreValue 定义之前。
-            string(REPLACE "bool waitForSemaphoreValue(VkDevice device,"
-                           "// Rhine: 提供可写宽字符缓冲区，匹配 FfxWaitCallbackFunc 的非 const 形参。\nstatic wchar_t* rhineFenceName()\n{\n    static wchar_t name[] = L\"FenceName\";\n    return name;\n}\n\nbool waitForSemaphoreValue(VkDevice device,"
-                           swapchain_contents "${swapchain_contents}")
-            string(REPLACE "waitCallback(L\"FenceName\", value);"
-                           "waitCallback(rhineFenceName(), value);"
-                           swapchain_contents "${swapchain_contents}")
-            # (2) submit 的两个重载都要求 SubmissionSemaphores& 非 const 左值引用，
-            #     而这两处传的是临时对象 SubmissionSemaphores()——这是标准 C++ 就禁止的
-            #     写法（GCC/Clang 同样报错），在各自块内起名即成为合法的左值。
-            foreach(indent "                    " "        ")
-                string(REPLACE "if (toWait.count > 0)\n${indent}{\n"
-                               "if (toWait.count > 0)\n${indent}{\n${indent}    SubmissionSemaphores noSignal;\n"
-                               swapchain_contents "${swapchain_contents}")
-            endforeach()
-            string(REPLACE "submit(VK_NULL_HANDLE, toWait, SubmissionSemaphores())"
-                           "submit(VK_NULL_HANDLE, toWait, noSignal)"
-                           swapchain_contents "${swapchain_contents}")
-            if(swapchain_contents MATCHES "waitCallback\\(L\"FenceName\"" OR
-               swapchain_contents MATCHES "SubmissionSemaphores\\(\\)\\)")
-                message(FATAL_ERROR "FidelityFX: could not rewrite swapchain source ${file}")
-            endif()
-            file(WRITE "${stage}/${name}" "${swapchain_contents}")
-        endif()
-        get_filename_component(extension "${file}" EXT)
-        if(extension STREQUAL ".cpp")
-            list(APPEND staged_sources "${stage}/${name}")
-        endif()
-    endforeach()
-
-    # <header>|<source>|<extra defines>|<stage>|<symbol>
-    set(recipes
-        "FrameInterpolationSwapchainUiCompositionVS.h|FrameInterpolationSwapchainUiCompositionVS.glsl|-DFFX_UI_PREMUL=0|vert|g_mainVS"
-        "FrameInterpolationSwapchainUiCompositionPS.h|FrameInterpolationSwapchainUiCompositionPS.glsl|-DFFX_UI_PREMUL=0|frag|g_mainPS"
-        "FrameInterpolationSwapchainUiCompositionPremulVS.h|FrameInterpolationSwapchainUiCompositionVS.glsl|-DFFX_UI_PREMUL=1|vert|g_mainPremulVS"
-        "FrameInterpolationSwapchainUiCompositionPremulPS.h|FrameInterpolationSwapchainUiCompositionPS.glsl|-DFFX_UI_PREMUL=1|frag|g_mainPremulPS"
-        "FrameInterpolationSwapchainDebugPacingVS.h|FrameInterpolationSwapchainDebugPacingVS.glsl||vert|g_mainDebugPacingVS"
-        "FrameInterpolationSwapchainDebugPacingPS.h|FrameInterpolationSwapchainDebugPacingPS.glsl||frag|g_mainDebugPacingPS")
-
-    set(generated_outputs "")
-    foreach(recipe IN LISTS recipes)
-        string(REPLACE "|" ";" parts "${recipe}")
-        list(GET parts 0 header)
-        list(GET parts 1 glsl)
-        list(GET parts 2 define)
-        list(GET parts 3 stage_kind)
-        list(GET parts 4 symbol)
-
-        set(output "${stage}/${header}")
-        add_custom_command(
-            OUTPUT "${output}"
-            COMMAND "${glslang_executable}"
-                    -o "${output}"
-                    ${define}
-                    -Os
-                    --vn "${symbol}"
-                    -S "${stage_kind}"
-                    -e main
-                    --target-env vulkan1.2
-                    "${source_dir}/${glsl}"
-            DEPENDS "${source_dir}/${glsl}" glslang-standalone
-            COMMENT "FidelityFX swapchain shader ${header}"
-            VERBATIM)
-        list(APPEND generated_outputs "${output}")
-    endforeach()
-
-    target_sources(${target} PRIVATE ${staged_sources} ${generated_outputs})
-    target_include_directories(${target} PRIVATE "${RHINE_FFX_SDK_DIR}/sdk/src/backends/vk")
-endfunction()
-
-# ---------------------------------------------------------------------------
 # Vulkan backend. Its FSR3 / frame-interpolation / optical-flow shaders are compiled
 # from the SDK's GLSL sources at build time, so the permutation headers always match the
 # vendored SDK revision and no prebuilt shader binary is consumed.
@@ -552,11 +444,21 @@ if(Vulkan_FOUND OR VULKAN_FOUND)
         "${RHINE_FFX_SDK_DIR}/sdk/include/FidelityFX/host/backends/vk/ffx_vk.h")
 
     # ffx_vk.cpp always installs a frame-generation callback, so the symbol must exist.
-    # The real swapchain is Windows-only in SDK 1.1.4; elsewhere a stand-in reports the
-    # feature as unavailable instead of breaking the link.
-    if(NOT WIN32)
-        target_sources(ffx_backend_vk PRIVATE "${CMAKE_CURRENT_LIST_DIR}/ffx_fg_unsupported.cpp")
-    endif()
+    # The stand-in reports the feature as unavailable instead of breaking the link.
+    #
+    # 这里对 Windows 也用替身，而不是编 SDK 真正的交换链（见 ffx_fg_unsupported.cpp）。
+    # 原因不是"Windows 编不过"，而是两条独立的硬约束：
+    #   * 呈现权在 Qt 手里。交换链由 QRhi 创建和 present，SDK 的交换链要求调用方把
+    #     交换链交出来、由它接管 present（ffxReplaceSwapchainForFrameinterpolationVK
+    #     会 vkDestroySwapchainKHR 调用方传入的交换链），这在 QQuickWindow 下拿不到。
+    #     本项目的呈现层是自己写的 VulkanPresenter，见 docs/fg-integration-plan.md。
+    #   * 符号冲突。DX12 与 VK 两套交换链各自定义了同名非 static 符号
+    #     （interpolationThread / ffxWaitForPresents /
+    #     ffxFrameInterpolationUiComposition / s_debugPacingFrameIndex）。上游从不把
+    #     两个后端链进同一个二进制，所以没暴露过；Rhine 同时支持两个后端，一旦两者
+    #     都参与链接就是 LNK2005 重复定义。只用替身可以彻底避开这一类冲突。
+    # 真需要 FG 呈现时补的是 VulkanPresenter 那条路径，不是把 SDK 交换链编回来。
+    target_sources(ffx_backend_vk PRIVATE "${CMAKE_CURRENT_LIST_DIR}/ffx_fg_unsupported.cpp")
     _rhine_ffx_configure_target(ffx_backend_vk)
     # ffx_shader_blobs.cpp 用这些宏决定为哪些 effect 生成 wave64 查询分支。
     # 缺任何一个，ffxGetEffectIsWave64 会落到 default 直接返回 FFX_ERROR_BACKEND_API_ERROR，
@@ -579,11 +481,6 @@ if(Vulkan_FOUND OR VULKAN_FOUND)
         _rhine_ffx_generate_vk_shaders(ffx_backend_vk "${RHINE_FFX_SDK_DIR}"
                                        "${_rhine_ffx_sc_executable}"
                                        "${_rhine_ffx_glslang_executable}")
-        # The FG swapchain sources are Windows-only; see ffx_fg_unsupported.cpp.
-        if(WIN32)
-            _rhine_ffx_prepare_swapchain(ffx_backend_vk "${RHINE_FFX_SDK_DIR}"
-                                         "${_rhine_ffx_glslang_executable}")
-        endif()
         set(RHINE_FFX_SHADER_BLOBS_AVAILABLE TRUE)
     else()
         message(
