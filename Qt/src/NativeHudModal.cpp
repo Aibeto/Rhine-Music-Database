@@ -9,11 +9,18 @@ struct Provider {
     QString label;
     QString detail;
 };
-const QVector<Provider> providers{
-    {"netease", "网易云音乐", "NETEASE", "搜索 · 个人音乐 · 推荐 · 播放 · 歌单编辑"},
-    {"qq", "QQ 音乐", "QQ MUSIC", "全类搜索 · 每日推荐 · 个人音乐 · 歌单编辑"},
-    {"kugou", "酷狗音乐", "KUGOU", "标准版 / 概念版 · 个人歌单 · 推荐与榜单 · 播放"},
-    {"local", "本地音乐", "LOCAL", "文件夹管理 · 导入与索引 · 本地检索 · 播放"}};
+const QVector<Provider> providers = [] {
+    QVector<Provider> values{
+        {"netease", "网易云音乐", "NETEASE", "搜索 · 个人音乐 · 推荐 · 播放 · 歌单编辑"},
+        {"qq", "QQ 音乐", "QQ MUSIC", "全类搜索 · 每日推荐 · 个人音乐 · 歌单编辑"},
+        {"kugou", "酷狗音乐", "KUGOU", "标准版 / 概念版 · 个人歌单 · 推荐与榜单 · 播放"},
+        {"local", "本地音乐", "LOCAL", "文件夹管理 · 导入与索引 · 本地检索 · 播放"},
+    };
+    if (!PlatformFeatures::LocalMusic) {
+        values.removeLast();
+    }
+    return values;
+}();
 
 QString modalTitle(const QString &modal, const MusicLibrary &music) {
     static const QHash<QString, QString> titles{{"provider", "MUSIC PLATFORM"},
@@ -374,9 +381,12 @@ void NativeHud::settings(double x, double y, double width) {
     }
     if (music.isLocal()) {
         rows.removeLast();
-    } else {
+    } else if (PlatformFeatures::OfficialPlayback) {
         rows.append({"OFFICIAL PLAYER / 官方窗口", m_host->activates() ? "播放时显示" : "尽量保持后台",
                      "music:activate"});
+    }
+    if (!PlatformFeatures::DesktopWindowControls) {
+        rows.removeFirst();
     }
     rows.append({"ENTER AUTOPLAY / 进入详情自动播放",
                  m_host->preference("detail-autoplay") == "on" ? "开启" : "关闭", "detail-autoplay"});

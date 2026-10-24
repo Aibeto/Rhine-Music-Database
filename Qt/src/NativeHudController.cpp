@@ -329,6 +329,12 @@ void NativeHud::playerAction(const QStringList &parts) {
 
 /** 动作字符串保持原有输入协议，控制器直接更新原生音乐状态和场景。 */
 void NativeHud::action(QString value) {
+    if ((!PlatformFeatures::LocalMusic && (value.startsWith("local:") || value == "provider:local")) ||
+        (!PlatformFeatures::OfficialPlayback &&
+         (value == "music:official" || value == "player:official" || value == "music:activate")) ||
+        (!PlatformFeatures::ApplicationVolume && value.startsWith("player:volume"))) {
+        return;
+    }
     if (modal == "settings" && !closing &&
         (value == "settings:scroll-up" || value == "settings:scroll-down")) {
         const auto movement = value == "settings:scroll-down" ? 120. : -120.;

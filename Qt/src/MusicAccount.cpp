@@ -182,6 +182,12 @@ void MusicLibrary::restoreAccount(Completion done) {
 
 /** 换来源先隔离旧请求并停止播放，再恢复目标来源的独立凭据和显示状态。 */
 void MusicLibrary::switchProvider(QString source, QString edition, Completion done) {
+    if (source == "local" && !PlatformFeatures::LocalMusic) {
+        if (done) {
+            done(false);
+        }
+        return;
+    }
     const auto editionChanged =
         source == "kugou" && QStringList{"standard", "lite"}.contains(edition) && edition != kugouEdition;
     if (!QStringList{"netease", "qq", "kugou", "local"}.contains(source) ||

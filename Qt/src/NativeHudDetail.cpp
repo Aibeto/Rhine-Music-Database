@@ -139,11 +139,14 @@ void NativeHud::detail(double width, double opacity) {
     actionButton("下一首播放", x + (buttonWidth + gap) * 2, 498, buttonWidth, "music:play-next");
     rule(x, 565, usable, 0.4);
     const auto column = (usable - gap) / 2;
-    const QVector<QPair<QString, QString>> meta{
-        {"ARTIST / 歌手", item["artist"].toString()},
-        {"ALBUM / 专辑", item["album"].toString()},
-        {"DURATION / 时长", MusicData::time(item)},
-        {"PLAYBACK / 播放方式", music.isLocal() ? "本地文件 / 面板内播放" : "面板内播放 / 官方入口"}};
+    QString playbackDescription = "面板内播放";
+    if (PlatformFeatures::OfficialPlayback) {
+        playbackDescription = music.isLocal() ? "本地文件 / 面板内播放" : "面板内播放 / 官方入口";
+    }
+    const QVector<QPair<QString, QString>> meta{{"ARTIST / 歌手", item["artist"].toString()},
+                                                {"ALBUM / 专辑", item["album"].toString()},
+                                                {"DURATION / 时长", MusicData::time(item)},
+                                                {"PLAYBACK / 播放方式", playbackDescription}};
     for (int index = 0; index < meta.size(); ++index) {
         const auto xx = x + (index % 2) * (column + gap);
         const auto yy = 584 + (index / 2) * 64;
@@ -184,7 +187,7 @@ void NativeHud::detail(double width, double opacity) {
             text(lines.at(bodyOffset + index), x, 790 + index * 31, 16);
         }
     }
-    if (!music.isLocal()) {
+    if (PlatformFeatures::OfficialPlayback && !music.isLocal()) {
         actionButton(music.provider != "netease" ? music.providerName() + " ↗" : "官方客户端 ↗", x, 910,
                      buttonWidth, "music:official");
     }

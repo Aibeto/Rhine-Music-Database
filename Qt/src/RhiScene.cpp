@@ -1172,7 +1172,11 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         }
     }
     void render(QRhiCommandBuffer *cb) override {
-        if (frame.isEmpty() || (frame["mode"] == "boot" && frame["time"].toDouble() < 21.9)) {
+        // 系统可能先请求绘制再生成首帧，相机未就绪时只清空目标，禁止读取空矩阵。
+        const bool cameraReady = frame.value("projection").toArray().size() == 16 &&
+                                 frame.value("aoProjection").toArray().size() == 16 &&
+                                 frame.value("view").toArray().size() == 16;
+        if (!cameraReady || (frame.value("mode") == "boot" && frame.value("time").toDouble() < 21.9)) {
             cb->beginPass(renderTarget(), Qt::transparent, {1, 0});
             cb->endPass();
             return;
@@ -1221,7 +1225,7 @@ QImage renderReference(const QString &root, const QJsonObject &frame, const QJso
     // 离屏表面先声明，析构顺序才能晚于 QRhi：GL 后端在析构时会切回上下文。
     std::unique_ptr<QOffscreenSurface> surface;
     std::unique_ptr<QRhi> rhi;
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     QRhiMetalInitParams params;
     rhi.reset(QRhi::create(QRhi::Metal, &params));
 #elif defined(Q_OS_WIN)

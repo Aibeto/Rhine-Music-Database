@@ -59,15 +59,15 @@ Host::Host(QString path, bool test, QObject *parent)
     }
     connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
             [this] { emit invalidated(); });
-    connect(&child, &QProcess::started, this, [this] {
+    connect(&child, &BridgeProcess::started, this, [this] {
         const auto keys = pending.values();
         pending.clear();
         for (const auto &key : keys) {
             send(key);
         }
     });
-    connect(&child, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (error != QProcess::FailedToStart) {
+    connect(&child, &BridgeProcess::errorOccurred, this, [this](BridgeProcess::ProcessError error) {
+        if (error != BridgeProcess::FailedToStart) {
             return;
         }
         const auto keys = pending.values();
@@ -76,7 +76,7 @@ Host::Host(QString path, bool test, QObject *parent)
             finish(key, {}, QStringLiteral("音乐服务组件缺失，请重新构建应用"));
         }
     });
-    connect(&child, &QProcess::readyReadStandardOutput, this, [this] {
+    connect(&child, &BridgeProcess::readyReadStandardOutput, this, [this] {
         buffer += child.readAllStandardOutput();
         if (buffer.size() >= 32 * 1024 * 1024) {
             child.kill();
@@ -94,7 +94,7 @@ Host::Host(QString path, bool test, QObject *parent)
             }
         }
     });
-    connect(&child, &QProcess::finished, this, [this] {
+    connect(&child, &BridgeProcess::finished, this, [this] {
         const auto keys = pending.values();
         pending.clear();
         buffer.clear();
@@ -319,12 +319,17 @@ void Host::send(QString key) {
         });
         return;
     }
-    if (child.state() == QProcess::NotRunning) {
+    if (child.state() == BridgeProcess::NotRunning) {
         temporary = std::make_unique<QTemporaryDir>(AppStorage::temporaryDirectory() + "/rhine-music-XXXXXX");
         if (!temporary->isValid()) {
             finish(key, {}, "无法创建音乐服务临时目录");
             return;
         }
+#ifdef Q_OS_IOS
+        pending.insert(work.id, key);
+        child.start(root, temporary->path(), kugouEdition);
+        return;
+#else
         QProcessEnvironment env;
 #ifdef Q_OS_WIN
         const auto system = QProcessEnvironment::systemEnvironment();
@@ -352,7 +357,7 @@ void Host::send(QString key) {
         child.setProcessEnvironment(env);
         // 子进程的工作目录改到应用自己的系统临时目录
         child.setWorkingDirectory(temporary->path());
-        child.setStandardErrorFile(QProcess::nullDevice());
+        child.setStandardErrorFile(BridgeProcess::nullDevice());
         // 平台选择放在宏调用外，避免 MSVC 将条件编译指令当作宏参数。
 #ifdef Q_OS_WIN
         const auto nodeName = QStringLiteral("node.exe");
@@ -361,9 +366,10 @@ void Host::send(QString key) {
 #endif
         pending.insert(work.id, key);
         child.start(root + "/MusicBridge/" + nodeName, {root + "/MusicBridge/worker.cjs"});
+#endif
         return;
     }
-    if (child.state() == QProcess::Starting) {
+    if (child.state() == BridgeProcess::Starting) {
         pending.insert(work.id, key);
         return;
     }
@@ -545,7 +551,7 @@ void Host::setKugouEdition(QString edition) {
     cache.clear();
     images.clear();
     coverFlights.clear();
-    if (child.state() != QProcess::NotRunning) {
+    if (child.state() != BridgeProcess::NotRunning) {
         child.kill();
         child.waitForFinished(1000);
     }
@@ -588,7 +594,7 @@ void Host::logout() {
     ++epoch;
     privateCredentials.clear();
     // 结束进程同时关闭 QQ 的扫码长连接；另一平台的持久凭据仍保留。
-    if (child.state() != QProcess::NotRunning) {
+    if (child.state() != BridgeProcess::NotRunning) {
         child.kill();
         child.waitForFinished(1000);
     }
@@ -826,6 +832,10 @@ void Host::fixtureImage(const QString &key, const QImage &image) {
     }
 }
 void Host::playOfficial(QString id, TextReply callback) {
+    if (!PlatformFeatures::OfficialPlayback) {
+        callback(QStringLiteral("当前平台仅支持面板内播放"));
+        return;
+    }
     if (!QRegularExpression("^[0-9]{1,20}$").match(id).hasMatch()) {
         callback("请先选择一首歌曲");
         return;
@@ -852,6 +862,9 @@ bool Host::mediaLoad(QString url, bool alternative, double position, bool paused
     return audio->load(url, offline, alternative, provider, position, paused);
 }
 void Host::mediaControl(QString action, double value) {
+    if (action == "volume" && !PlatformFeatures::ApplicationVolume) {
+        value = 1.0;
+    }
     if (!audio && action == "volume") {
         audio = std::make_unique<AudioPlayer>([this] { emit mediaChanged(); });
         audio->diagnosticEvent = [this](const QString &event, const QJsonObject &values) {
@@ -1005,7 +1018,7 @@ void Host::shutdown() {
     audio.reset();
     disconnect(&child, nullptr, this, nullptr);
     child.closeWriteChannel();
-    if (child.state() != QProcess::NotRunning) {
+    if (child.state() != BridgeProcess::NotRunning) {
         child.terminate();
         if (!child.waitForFinished(2000)) {
             child.kill();

@@ -5,6 +5,9 @@
 #include "Hud.h"
 #include "RhiScene.h"
 #include "OpticalScene.h"
+#ifdef Q_OS_IOS
+#include "IOSWindow.h"
+#endif
 #include <QDir>
 #include <QFileInfo>
 #include <QFontDatabase>
@@ -77,10 +80,12 @@ int main(int argc, char **argv) {
     }
     QString root = qEnvironmentVariable("RHINE_RESOURCES");
     if (root.isEmpty()) {
-        // macOS 使用 Resources ；其他平台使用 resources
+        // iOS 使用专用资源目录
         const auto base = QCoreApplication::applicationDirPath();
 #ifdef Q_OS_MACOS
         const QStringList candidates{base + "/../Resources"};
+#elif defined(Q_OS_IOS)
+        const QStringList candidates{base + "/RhineAssets"};
 #else
         const QStringList candidates{base + "/resources", base + "/../resources"};
 #endif
@@ -157,6 +162,9 @@ int main(int argc, char **argv) {
     window->show();
 #endif
     backend.setWindow(window);
+#ifdef Q_OS_IOS
+    configureIOSWindow(window, &backend);
+#endif
     if (!offline && RHINE_RELEASE_BUILD) {
         QTimer::singleShot(8000, &backend.host, [&backend] {
             if (backend.host.preference("auto-update") != "off") {

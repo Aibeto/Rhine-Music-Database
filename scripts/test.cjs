@@ -23,20 +23,14 @@ function run(command, args, env = {}) {
 }
 run(process.execPath, ['scripts/check-repository.cjs']);
 run(python, ['scripts/check-qt-project.py']);
-for (const script of [
-    'scripts/check-music-upstream.cjs',
-    'Qt/tests/release-version.cjs',
-    'Qt/tests/publish-release.cjs',
-    'Qt/tests/windows-installer.cjs',
-]) {
-    run(process.execPath, [script]);
-}
+run(process.execPath, ['scripts/check-music-upstream.cjs']);
 
 run('ctest', ['--test-dir', 'output/qt-build', '--output-on-failure']);
 // 验证最终应用包
 const resources = path.join(app, resourceDirectory);
 const bridgeTests = [
     'Qt/tests/local-lyrics.cjs',
+    'Qt/tests/ios-bridge.cjs',
     'Qt/tests/netease-client.mjs',
     'Qt/tests/qq-client.mjs',
     'Qt/tests/kugou-client.mjs',

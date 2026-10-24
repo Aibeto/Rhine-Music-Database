@@ -285,7 +285,13 @@ target_link_libraries(
             Qt6::Concurrent
             Qt6::Multimedia)
 # 平台分支只处理原生能力、部署身份及链接依赖。
-if(APPLE)
+if(IOS)
+    target_sources(RhineCore PRIVATE Qt/src/PlatformIOS.mm Qt/src/BridgeProcessIOS.cpp Qt/src/BridgeProcess.h)
+    target_link_libraries(RhineCore PRIVATE "-framework Security" "-framework UIKit" "-framework AVFAudio"
+                                            "-framework MediaPlayer")
+    target_compile_options(RhineCore PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    include(Qt/IOS.cmake)
+elseif(APPLE)
     target_sources(RhineCore PRIVATE Qt/src/Platform.mm)
     target_link_libraries(RhineCore PRIVATE "-framework Security" "-framework AppKit"
                                             "-framework MediaPlayer")
@@ -317,7 +323,9 @@ else()
 endif()
 # Qt Creator 的普通构建也交付完整应用，不能依赖运行目录里的 output/resources。
 option(RHINE_PACKAGE_APP "Package resources and Qt libraries after a macOS CMake build" ON)
-if(APPLE AND RHINE_PACKAGE_APP)
+if(APPLE
+   AND NOT IOS
+   AND RHINE_PACKAGE_APP)
     find_program(RHINE_NPM_EXECUTABLE NAMES npm REQUIRED)
     get_filename_component(RHINE_QT_KIT "${Qt6_DIR}/../../.." ABSOLUTE)
     # 脚本、字体和场景数据改变时重新链接，确保 POST_BUILD 重新生成部署资源。
@@ -347,6 +355,10 @@ if(APPLE AND RHINE_PACKAGE_APP)
         VERBATIM)
 endif()
 qt_finalize_executable(RhineMusicDatabase)
+# 桌面回归包含子进程和桌面路径，iOS 只构建正式应用。
+if(IOS)
+    return()
+endif()
 enable_testing()
 # 冻结动画与场景基准只在手动视觉回归中启用，避免正常 UI 调整导致默认测试失败。
 option(RHINE_VISUAL_TESTS "Register frozen animation and scene snapshot regressions" OFF)

@@ -4,6 +4,8 @@ set_target_properties(RhineMusicDatabase PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${
 set_source_files_properties(qml/Main.qml PROPERTIES QT_RESOURCE_ALIAS Main.qml)
 set_source_files_properties(qml/PerformancePanel.qml PROPERTIES QT_RESOURCE_ALIAS PerformancePanel.qml)
 set_source_files_properties(qml/WindowChrome.qml PROPERTIES QT_RESOURCE_ALIAS WindowChrome.qml)
+set_source_files_properties(qml/IOSInput.qml PROPERTIES QT_RESOURCE_ALIAS IOSInput.qml)
+set_source_files_properties(qml/LocalMusicDialogs.qml PROPERTIES QT_RESOURCE_ALIAS LocalMusicDialogs.qml)
 qt_add_qml_module(
     RhineMusicDatabase
     URI
@@ -14,5 +16,7 @@ qt_add_qml_module(
     "${CMAKE_BINARY_DIR}/RhineMusic"
     QML_FILES
     qml/Main.qml
+    qml/IOSInput.qml
+    qml/LocalMusicDialogs.qml
     qml/PerformancePanel.qml
     qml/WindowChrome.qml)

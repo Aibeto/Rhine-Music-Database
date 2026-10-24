@@ -1,41 +1,23 @@
 import QtQuick
 import QtQuick.Window
-import QtQuick.Dialogs
 import Rhine.Native 1.0
 
 Window {
     id: root
+    readonly property bool ios: Qt.platform.os === "ios"
     width: 1280
     height: 720
-    minimumWidth: 960
-    minimumHeight: 540
+    minimumWidth: ios ? 0 : 960
+    minimumHeight: ios ? 0 : 540
     visible: true
     property bool windowsFrameless: Qt.platform.os === "windows"
     flags: (windowsFrameless ? Qt.FramelessWindowHint : 0) | Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint | Qt.WindowFullscreenButtonHint
     title: "RHINE MUSIC DATABASE"
     color: "#e7e7e1"
-    FolderDialog {
-        id: localFolderDialog
-        objectName: "localMusicFolderDialog"
-        title: "导入本地音乐文件夹"
-        onAccepted: rhine.importLocal([selectedFolder])
-    }
-    FileDialog {
-        id: localFileDialog
-        objectName: "localMusicFileDialog"
-        title: "导入本地音乐文件"
-        fileMode: FileDialog.OpenFiles
-        nameFilters: ["音乐文件 (*.mp3 *.flac *.m4a *.mp4 *.aac *.ogg *.opus *.ape *.wav *.aiff *.aif *.wv *.wma *.mpc)"]
-        onAccepted: rhine.importLocal(selectedFiles)
-    }
-    Connections {
-        target: rhine
-        function onLocalImportRequested(folder: bool) {
-            if (folder) {
-                localFolderDialog.open();
-            } else {
-                localFileDialog.open();
-            }
+    Loader {
+        active: !root.ios
+        sourceComponent: LocalMusicDialogs {
+            backend: rhine
         }
     }
     property real stageScale: height / 1080
@@ -130,7 +112,14 @@ Window {
                     onEntered: rhine.pointer("pointerleave", 0, 0)
                     onPressed: {
                         inputLayer.forceActiveFocus();
-                        rhine.action(modelData.action);
+                        if (!root.ios) {
+                            rhine.action(modelData.action);
+                        }
+                    }
+                    onClicked: {
+                        if (root.ios) {
+                            rhine.action(modelData.action);
+                        }
                     }
                     onWheel: function (wheel) {
                         var p = mapToItem(inputLayer, wheel.x, wheel.y);
@@ -140,6 +129,10 @@ Window {
                 }
             }
         }
+    }
+    IOSInput {
+        stage: root
+        backend: rhine
     }
     // 密码只在输入组件和单次登录请求中短暂存在，提交后立即清空。
     Item {
@@ -238,7 +231,7 @@ Window {
         }
     }
     Repeater {
-        model: ["seek", "volume"]
+        model: root.ios ? ["seek"] : ["seek", "volume"]
         delegate: MouseArea {
             required property string modelData
             property var region: rhine.state[modelData]

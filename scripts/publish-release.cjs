@@ -2,7 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { spawnSync } = require('node:child_process');
-const { buildVersion } = require('./release-version.cjs');
+const { buildVersion, distributionPlatforms } = require('./release-version.cjs');
 
 /** 通过独立参数调用 GitHub CLI */
 function githubApi(method, endpoint, body, file) {
@@ -82,9 +82,7 @@ function publishRelease(options, api = githubApi) {
     checkRelease(options, api);
     const { repository, tag, sha, directory } = options;
     const names = [
-        `RhineMusicDatabase-${tag}-macOS-arm64.zip`,
-        `RhineMusicDatabase-${tag}-Windows-x64-Setup.exe`,
-        `RhineMusicDatabase-${tag}-Linux-x86_64.AppImage`,
+        ...distributionPlatforms.map((platform) => `RhineMusicDatabase-${tag}-${platform}`),
         'update.json',
     ];
     const files = names.map((name) => {

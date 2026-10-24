@@ -1,4 +1,4 @@
-name: Desktop build
+name: Platform build
 
 on:
   push:
@@ -135,4 +135,63 @@ jobs:
         with:
           name: RHINE-MUSIC-DATABASE-${{ matrix.artifact }}
           path: output/RhineMusicDatabase-${{ inputs.release_version || '*' }}-${{ matrix.distribution }}
+          if-no-files-found: error
+
+  ios:
+    name: iOS arm64 (unsigned)
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      RHINE_VERSION: ${{ inputs.release_version || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.14.0'
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            MusicBridge/package-lock.json
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # 跨平台工具（qsb 等）由同版本桌面 kit 提供，设备库使用独立 iOS kit。
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.12.0'
+          arch: clang_64
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
+          modules: qtshadertools qtmultimedia
+          cache: true
+      - uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.12.0'
+          target: ios
+          arch: ios
+          aqtsource: git+https://github.com/miurahr/aqtinstall.git@076e1659807d0b362a3ed684d54c2e9c775eb9c7
+          modules: qtshadertools qtmultimedia
+          cache: true
+      - name: Install build dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Use setup-node runtime for resource preparation
+        run: |
+          node - <<'JS' >> "$GITHUB_ENV"
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const license = path.resolve(path.dirname(process.execPath), '../LICENSE');
+          if (!fs.existsSync(license)) {
+              throw new Error('Standalone Node license missing');
+          }
+          console.log('RHINE_NODE_BINARY=' + process.execPath);
+          console.log('RHINE_NODE_LICENSE=' + license);
+          JS
+      - name: Build and audit unsigned IPA
+        run: npm run build:ios
+        env:
+          RHINE_IOS_QT: ${{ env.QT_ROOT_DIR }}
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: RHINE-MUSIC-DATABASE-iOS-arm64
+          path: output/RhineMusicDatabase-*-ios-unsigned.ipa
           if-no-files-found: error

@@ -2,7 +2,7 @@
 #ifdef Q_OS_WIN
 #include <windows.h>
 #include <psapi.h>
-#elif defined(Q_OS_MACOS)
+#elif defined(Q_OS_DARWIN)
 #include <mach/mach.h>
 #elif defined(Q_OS_LINUX)
 #include <QFile>
@@ -31,7 +31,7 @@ ProcessMetrics readProcessMetrics() {
         result.cpuNanoseconds = nanoseconds(kernel) + nanoseconds(user);
     }
 #else
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     mach_task_basic_info memory{};
     mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
     if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&memory), &count) ==

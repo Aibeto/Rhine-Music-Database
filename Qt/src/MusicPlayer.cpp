@@ -528,6 +528,9 @@ void MusicPlayer::seek(double fraction) {
 }
 
 void MusicPlayer::volume(double value) {
+    if (!PlatformFeatures::ApplicationVolume) {
+        value = 1.0;
+    }
     const auto volume = std::clamp(value, 0., 1.);
     m_host->mediaControl("volume", volume);
     m_host->setPreference("volume", QString::number(volume));

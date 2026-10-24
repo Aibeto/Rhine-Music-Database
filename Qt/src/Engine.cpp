@@ -165,8 +165,8 @@ void Engine::notifySceneRenderers(bool visualChanged) {
     if (enhanced) {
         m_originalSceneDirty |= visualChanged;
         // 进入资料库时预热一次原版管线，避免抽取末尾才同步编译和分配整套资源。
-        const bool prewarm = !m_originalSceneWarm && m_frame["mode"] != "boot";
-        if ((prewarm || m_frame["originalActorBlend"].toDouble() > 0) && m_originalSceneDirty) {
+        const bool prewarm = !m_originalSceneWarm && m_frame.value("mode") != "boot";
+        if ((prewarm || m_frame.value("originalActorBlend").toDouble() > 0) && m_originalSceneDirty) {
             m_originalSceneDirty = false;
             m_originalSceneWarm = true;
             emit sceneUpdated();
@@ -312,7 +312,7 @@ void Engine::tick() {
                           ? 33
                           : 16);
     if (now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
-        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot") {
+        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame.value("mode") != "boot") {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();
@@ -501,7 +501,7 @@ void Engine::step(double time) {
     if (object.isEmpty()) {
         return;
     }
-    const auto previousDiscAngle = m_frame["discAngle"].toDouble();
+    const auto previousDiscAngle = m_frame.value("discAngle").toDouble();
     m_frame = scene.frame;
     m_frame["originalActorBlend"] = scene.originalActorBlend();
     auto signature = m_frame;
@@ -523,8 +523,8 @@ void Engine::step(double time) {
     }
     m_sceneSignature = signature;
     m_previousBuffers = scene.drawBuffers;
-    if (m_stableFrames >= 4 && !scene.changed() && m_frame["mode"] != "boot" &&
-        !m_frame["pendingAnimations"].toBool()) {
+    if (m_stableFrames >= 4 && !scene.changed() && m_frame.value("mode") != "boot" &&
+        !m_frame.value("pendingAnimations").toBool()) {
         m_sceneSleeping = true;
     }
     const auto current = object["current"].toObject();
@@ -538,7 +538,7 @@ void Engine::step(double time) {
     }
     const bool wasRotating = m_discRotating;
     m_discRotating = m_visible && app->hud.discRotation && !app->hud.reduced && app->hud.modal.isEmpty() &&
-                     m_frame["mode"] == "detail" && !m_frame["viewer"].toBool() &&
+                     m_frame.value("mode") == "detail" && !m_frame.value("viewer").toBool() &&
                      current["kind"] == "song" && MusicPlayer::identity(current) == identity &&
                      !player.loading && !player.failed && player.state["playing"].toBool();
     if (wasRotating && m_discRotating) {
@@ -550,7 +550,7 @@ void Engine::step(double time) {
     m_discTime = time;
     const bool showDiscAngle = current["kind"] == "song" && MusicPlayer::identity(current) == identity;
     m_frame["discAngle"] = showDiscAngle ? m_discAngle : 0;
-    const bool discChanged = m_discRotating || previousDiscAngle != m_frame["discAngle"].toDouble();
+    const bool discChanged = m_discRotating || previousDiscAngle != m_frame.value("discAngle").toDouble();
     const bool visualChanged = discChanged || !stable || current != m_current || cover != m_cover ||
                                coverRevision != m_coverRevision;
     m_coverRevision = coverRevision;
@@ -560,10 +560,10 @@ void Engine::step(double time) {
     const auto musicKey = current["key"].toString("empty");
     m_musicTextures[musicKey] = {current, host.image(m_cover)};
     QSet<QString> retainedKeys{musicKey};
-    for (const auto &key : m_frame["returningMusicKeys"].toArray()) {
+    for (const auto &key : m_frame.value("returningMusicKeys").toArray()) {
         retainedKeys.insert(key.toString());
     }
-    for (const auto &value : m_frame["draws"].toArray()) {
+    for (const auto &value : m_frame.value("draws").toArray()) {
         const auto key = value.toObject()["musicKey"].toString();
         if (!key.isEmpty()) {
             retainedKeys.insert(key);
@@ -587,7 +587,7 @@ void Engine::step(double time) {
     }
     notifySceneRenderers(visualChanged);
     auto state = object["state"].toObject().toVariantMap();
-    state["originalActorVisible"] = m_frame["originalActorBlend"].toDouble() > 0;
+    state["originalActorVisible"] = m_frame.value("originalActorBlend").toDouble() > 0;
     if (state != m_state) {
         m_state = state;
         const auto loginMethod = m_state.value("loginMethod").toString();
@@ -634,9 +634,20 @@ void Engine::snapshot(QString path) {
 int Engine::selfTest() {
     bool ok =
         ready() && DiscGeometry::validate() && runNativeHostChecks(root()) && runNativeMusicChecks(root());
+    // 首帧尚未生成时，渲染通知不能通过非 const JSON 读取插入空字段。
+    const auto savedFrame = m_frame;
+    const auto savedEnhancement = app->hud.sceneEnhancement;
+    m_frame = {};
+    app->hud.sceneEnhancement = true;
+    notifySceneRenderers(true);
+    ok &= m_frame.isEmpty();
+    app->hud.sceneEnhancement = savedEnhancement;
+    m_frame = savedFrame;
+    notifySceneRenderers(true);
     scene.review("archive");
     step(2.101);
-    ok &= !m_frame["draws"].toArray().isEmpty() && m_frame["stats"].toObject()["archiveCount"].toInt() > 0;
+    ok &= !m_frame.value("draws").toArray().isEmpty() &&
+          m_frame.value("stats").toObject()["archiveCount"].toInt() > 0;
     QFile fixture(root() + "/scene-fixture.json");
     if (!fixture.open(QIODevice::ReadOnly)) {
         qCritical() << "Missing offline scene fixture";
@@ -644,8 +655,8 @@ int Engine::selfTest() {
     }
     const auto expected = QJsonDocument::fromJson(fixture.readAll()).object();
     const auto legacy = expected["frame"].toObject();
-    ok &= equivalent(m_frame["view"], legacy["view"]) &&
-          equivalent(m_frame["projection"], legacy["projection"]);
+    ok &= equivalent(m_frame.value("view"), legacy["view"]) &&
+          equivalent(m_frame.value("projection"), legacy["projection"]);
     for (const auto &entry : expected["rays"].toArray()) {
         const auto ray = entry.toObject();
         const auto hit = scene.pick(ray["x"].toDouble(), ray["y"].toDouble());
