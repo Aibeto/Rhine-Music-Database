@@ -713,7 +713,8 @@ int Engine::selfTest() {
         const QSize size(960, 540);
         const auto actual =
             renderReference(root(), m_frame, m_current, host.image(m_cover), size, scene.drawBuffers);
-        const auto original = renderReference(root(), legacy, m_current, host.image(m_cover), size);
+        const auto original =
+            renderReference(root(), legacy, m_current, host.image(m_cover), size, scene.drawBuffers);
         ok &= runGpuReferenceCheck(original, actual);
         if (!ok) {
             qCritical() << "Native GPU frame differs from original fixture";
