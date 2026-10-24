@@ -109,14 +109,14 @@ struct Mesh {
         const auto firstIndex = part["start"].toInt(-1);
         const auto indexCount = part["count"].toInt();
         if (vertexStart < 0 || firstIndex < 0 || vertexCount <= 0 || indexCount < 0 ||
-            (qint64(vertexStart) + vertexCount) * 48 > vertices.size() ||
+            (qint64(vertexStart) + vertexCount) * 32 > vertices.size() ||
             (qint64(firstIndex) + indexCount) * 4 > indexBytes.size()) {
             return;
         }
         positions.reserve(vertexCount);
         for (int index = 0; index < vertexCount; ++index) {
             float point[3];
-            std::memcpy(point, vertices.constData() + (vertexStart + index) * 48, sizeof(point));
+            std::memcpy(point, vertices.constData() + (vertexStart + index) * 32, sizeof(point));
             positions.push_back({point[0], point[1], point[2]});
         }
         indices.reserve(indexCount);

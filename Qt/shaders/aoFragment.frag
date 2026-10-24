@@ -36,12 +36,12 @@ vec4 effect() {
     float z = viewZ(d, g);
     vec4 p = vec4(v_uv.x * 2 - 1, 1 - v_uv.y * 2, d * 2 - 1, 1) * (-z);
     vec3 pos = (g.aoInverseProjection * p).xyz;
-    vec3 N = normalize(texture(normal, rtUV(v_uv)).rgb * 2 - 1);
+    vec3 N = octDecode(texture(normal, rtUV(v_uv)).rg);
     float rnd = texture(noise, vec2(v_uv.x, 1 - v_uv.y) * g.viewport.xy / 4).r;
     vec3 tangent = normalize(vec3(rnd) - N * dot(vec3(rnd), N));
     mat3 basis = mat3(tangent, cross(N, tangent), N);
     float occlusion = 0;
-    for (int i = 0; i < 32; i++) {
+    for (int i = 0; i < 16; i++) {
         vec3 point = pos + basis * aoSamples[i].xyz * .38;
         vec4 clip = g.aoProjection * vec4(point, 1);
         vec2 uv = clip.xy / clip.w * .5 + .5;
@@ -53,7 +53,9 @@ vec4 effect() {
             occlusion += 1;
         }
     }
-    return vec4(vec3(1 - occlusion / 32), 1);
+    // 32 个采样里只取前 16 个：AO 是低频信号，合成通道还有 4×4 模糊兜底，
+    // 采样减半后遮蔽形态不变，全屏的深度读取次数直接砍半。
+    return vec4(vec3(1 - occlusion / 16), 1);
 }
 void main() {
     fragColor = effect();

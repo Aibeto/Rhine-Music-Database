@@ -30,16 +30,17 @@ struct Globals {
     QVector4D backend;
 };
 struct Surface {
-    QVector4D color, physical, optics, attenuation, extra, flags, darkColor;
+    QVector4D color, physical, optics, attenuation, extra, flags, darkColor, atlas;
 };
 struct Instance {
     PackedMatrix model;
     QVector4D state;
 };
 static_assert(sizeof(Globals) == 544);
-static_assert(sizeof(Surface) == 112);
+static_assert(sizeof(Surface) == 128);
 static_assert(sizeof(Instance) == 80);
-static constexpr qint64 MUSIC_TEXTURE_BUDGET_BYTES = 24 * 1024 * 1024;
+// 封面按源图最高取 1024²，带 mip 链后单张约 5.3 MiB；预算过小时每切一首都要重传并重建 mip。
+static constexpr qint64 MUSIC_TEXTURE_BUDGET_BYTES = 64 * 1024 * 1024;
 static QMatrix4x4 matrix(QJsonArray a, int offset = 0) {
     QMatrix4x4 m;
     for (int i = 0; i < 16; ++i) {
@@ -167,8 +168,11 @@ class Renderer {
         return b;
     }
     QRhiTexture *texture(QSize s, QRhiTexture::Format format, QRhiTexture::Flags flags = {},
-                         bool resize = false) {
-        return create(own(rhi->newTexture(format, s, 1, flags), resize));
+                         bool resize = false, int samples = 1) {
+        auto t = own(rhi->newTexture(format, s, 1, flags), resize);
+        // 采样数必须在 create() 之前设定：后端在创建时就按采样数分配图像，之后改不回去。
+        t->setSampleCount(samples);
+        return create(t);
     }
     void upload(QRhiTexture *t, QByteArray bytes) {
         QRhiTextureSubresourceUploadDescription data(bytes);
@@ -230,29 +234,73 @@ class Renderer {
         discHubCount = hub.count();
         musicLabelPlane = plane(-.83, .07, -.03, .29, 0, -.83, .07, .8, .22);
         caseDecoration = plane(-2.5, 0, 2.5, 3.7, .222, -2.5, 0, 5, 3.7);
-        QImage decoration(1000, 740, QImage::Format_RGBA8888_Premultiplied);
-        decoration.fill(Qt::transparent);
-        QPainter painter(&decoration);
-        painter.setRenderHint(QPainter::Antialiasing);
+        // 背景图案按需分两档：卡片在屏幕上很小时（资源库列表）用低档省采样带宽，
+        // 拉近到详情才切高档保住细节。绘制共用同一套 1 倍坐标，靠画布缩放派生两档，
+        // 切换阈值取 detail 过渡值的一半——飞行途中一次切换，内容相同不可察觉。
+        // 文字仍由独立薄片承担（见下方 lettering），密度与背景解耦。
         const QColor ink(65, 70, 62, 170), accent(119, 123, 96, 195);
-        painter.setPen(QPen(ink, 1.4));
-        for (auto point : {QPointF(75, 60), QPointF(930, 60), QPointF(75, 685), QPointF(930, 685)}) {
-            painter.drawLine(point + QPointF(-10, 0), point + QPointF(10, 0));
-            painter.drawLine(point + QPointF(0, -10), point + QPointF(0, 10));
+        const auto paintDecoration = [&](QPainter &painter) {
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(QPen(ink, 1.4));
+            for (auto point :
+                 {QPointF(75, 60), QPointF(930, 60), QPointF(75, 685), QPointF(930, 685)}) {
+                painter.drawLine(point + QPointF(-10, 0), point + QPointF(10, 0));
+                painter.drawLine(point + QPointF(0, -10), point + QPointF(0, 10));
+            }
+            painter.drawEllipse(QRectF(875, 574, 55, 55));
+            painter.drawEllipse(QRectF(891, 574, 23, 55));
+            painter.drawLine(875, 601, 930, 601);
+            painter.fillRect(QRectF(875, 654, 25, 5), accent);
+        };
+        QImage decorationHigh(2000, 1480, QImage::Format_RGBA8888_Premultiplied);
+        decorationHigh.fill(Qt::transparent);
+        {
+            QPainter painter(&decorationHigh);
+            painter.scale(2, 2);
+            paintDecoration(painter);
         }
-        glyphs->text(painter, "MUSIC ARCHIVE / 001", 130, 688, 15, "regular", .5, ink);
-        painter.save();
-        painter.translate(75, 465);
-        painter.rotate(-90);
-        glyphs->text(painter, "RHINE LAB", 0, 0, 21, "demibold", 2, ink);
-        painter.restore();
-        painter.drawEllipse(QRectF(875, 574, 55, 55));
-        painter.drawEllipse(QRectF(891, 574, 23, 55));
-        painter.drawLine(875, 601, 930, 601);
-        painter.fillRect(QRectF(875, 654, 25, 5), accent);
-        painter.end();
-        decorationTexture = texture(decoration.size(), QRhiTexture::RGBA8);
-        updates->uploadTexture(decorationTexture, decoration);
+        decorationTextureHigh =
+            texture(decorationHigh.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        uploadMipped(decorationTextureHigh, decorationHigh);
+        QImage decorationLow(1000, 740, QImage::Format_RGBA8888_Premultiplied);
+        decorationLow.fill(Qt::transparent);
+        {
+            QPainter painter(&decorationLow);
+            paintDecoration(painter);
+        }
+        decorationTextureLow =
+            texture(decorationLow.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        uploadMipped(decorationTextureLow, decorationLow);
+        // 文字单独以 16 倍密度绘制：缩放后笔画仍有足够采样，屏幕上的字才立得住。
+        // 区域按原 1000×740 画布的像素坐标框定，绘制时用同一套坐标，只是整体放大八倍。
+        const auto lettering = [&](QRect source, auto &&draw) {
+            QImage image(source.size() * 16, QImage::Format_RGBA8888_Premultiplied);
+            image.fill(Qt::transparent);
+            QPainter text(&image);
+            text.setRenderHint(QPainter::Antialiasing);
+            text.scale(16, 16);
+            text.translate(-source.x(), -source.y());
+            draw(text);
+            text.end();
+            auto result = texture(image.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+            uploadMipped(result, image);
+            return result;
+        };
+        // 横向标题：原基线 (130, 688)、字号 15。
+        letteringTextureFront =
+            lettering(QRect(120, 664, 220, 46), [&](QPainter &text) {
+                glyphs->text(text, "MUSIC ARCHIVE / 001", 130, 688, 15, "regular", .5, ink);
+            });
+        // 纵向脊标：原起点 (75, 465)、字号 21、逆时针 90 度。
+        letteringTextureSpine =
+            lettering(QRect(62, 348, 46, 128), [&](QPainter &text) {
+                text.translate(75, 465);
+                text.rotate(-90);
+                glyphs->text(text, "RHINE LAB", 0, 0, 21, "demibold", 2, ink);
+            });
+        // 几何按原画布像素换算：200 px = 1 单位，x 从 -2.5 起、y 从 3.7 向下。
+        caseLetteringFront = plane(-1.9, 0.15, -0.8, 0.38, .2225, -1.9, 0.15, 1.1, 0.23);
+        caseLetteringSpine = plane(-2.19, 1.32, -1.96, 1.96, .2225, -2.19, 1.32, 0.23, 0.64);
         QImage placeholder(512, 512, QImage::Format_RGBA8888_Premultiplied);
         placeholder.fill(QColor(94, 115, 112));
         QPainter placeholderPainter(&placeholder);
@@ -261,8 +309,8 @@ class Renderer {
         placeholderPainter.drawEllipse(QRectF(52, 52, 408, 408));
         glyphs->text(placeholderPainter, "RHINE LAB", 130, 340, 34, "demibold", 1, QColor(215, 220, 204));
         placeholderPainter.end();
-        placeholderCover = texture(placeholder.size(), QRhiTexture::RGBA8);
-        updates->uploadTexture(placeholderCover, placeholder);
+        placeholderCover = texture(placeholder.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        uploadMipped(placeholderCover, placeholder);
     }
     ~Renderer() {
         if (updates) {
@@ -274,28 +322,65 @@ class Renderer {
         std::vector<float> vertices;
         for (auto v : {QVector2D{x0, y0}, QVector2D{x1, y0}, QVector2D{x1, y1}, QVector2D{x0, y0},
                        QVector2D{x1, y1}, QVector2D{x0, y1}}) {
-            float data[] = {
-                v.x(), v.y(), z, 1, 0, 0, 1, 0, uw ? (v.x() - ux) / uw : 0, uh ? (v.y() - uy) / uh : 0, 0, 0};
+            float data[] = {v.x(),
+                            v.y(),
+                            z,
+                            0,
+                            0,
+                            1,
+                            uw ? (v.x() - ux) / uw : 0,
+                            uh ? (v.y() - uy) / uh : 0};
             vertices.insert(vertices.end(), std::begin(data), std::end(data));
         }
         return buffer(QByteArray(reinterpret_cast<const char *>(vertices.data()), vertices.size() * 4),
                       QRhiBuffer::VertexBuffer);
     }
-    Target makeTarget(QRhiTexture *texture, QRhiTexture *depth = nullptr, QRhiTexture *second = nullptr) {
+    /**
+     * 建立渲染目标。resolve 非空时 color 附件是多重采样纹理，渲染通道结束时解析到
+     * resolve 纹理（QRhi 在 endPass 里做 resolve，不需要额外的拷贝通道）。
+     * 返回的 Target.texture 一律指向“可采样”的那一张——有 resolve 时就是解析结果，
+     * 下游通道因此完全不需要知道自己拿到的是不是 MSAA 的画面。
+     */
+    Target makeTarget(QRhiTexture *texture, QRhiTexture *depth = nullptr, QRhiTexture *second = nullptr,
+                      QRhiTexture *resolve = nullptr) {
         QRhiTextureRenderTargetDescription desc;
         if (texture) {
             if (second) {
-                desc.setColorAttachments({QRhiColorAttachment(texture), QRhiColorAttachment(second)});
+                desc.setColorAttachments({attachment, QRhiColorAttachment(second)});
             } else {
-                desc.setColorAttachments({QRhiColorAttachment(texture)});
+                desc.setColorAttachments({attachment});
             }
+    /**
+     * 逐层生成并上传 mip 链。
+     * 不能用 generateMips：部分后端对上传纹理不会填满每一层，而 GL 会把 mip 链不完整的纹理
+     * 整体判为不完整并采样为黑——这会让封面直接消失而不是仅仅变模糊。CPU 生成可保证每层都有内容。
+     */
+    void uploadMipped(QRhiTexture *target, const QImage &image) {
+        QVector<QRhiTextureUploadEntry> entries;
+        auto level = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        for (int index = 0;; ++index) {
+            entries.append(
+                QRhiTextureUploadEntry(0, index, QRhiTextureSubresourceUploadDescription(level)));
+            if (level.width() == 1 && level.height() == 1) {
+                break;
+            }
+            level = level.scaled(qMax(1, level.width() / 2), qMax(1, level.height() / 2),
+                                 Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
         }
+        QRhiTextureUploadDescription description;
+        description.setEntries(entries.cbegin(), entries.cend());
+        updates->uploadTexture(target, description);
+    }
+        }
+        // 采样数能力只查一次：设备在渲染器生命周期内不变，而 resize() 每帧都要判断
+        // 采样数是否需要重建目标，不能每次都去问后端。
+        supportedSamples = rhi->supportedSampleCounts();
         desc.setDepthTexture(depth);
         auto rt = own(rhi->newTextureRenderTarget(desc), true);
         auto rp = own(rt->newCompatibleRenderPassDescriptor(), true);
         rt->setRenderPassDescriptor(rp);
         create(rt);
-        return {texture, rt, rp};
+        return {resolve ? resolve : texture, rt, rp};
     }
     void invalidateBindings(QRhiTexture *texture = nullptr) {
         for (auto &state : materials) {
@@ -332,16 +417,16 @@ class Renderer {
         capture = texture(size, QRhiTexture::RGBA16F,
                           rtFlags | QRhiTexture::MipMapped | QRhiTexture::UsedWithGenerateMips, true);
         // AO 和景深共用真实 D32F 深度，不再额外打包、写入和解包四通道深度图。
-        normal = makeTarget(texture(size, QRhiTexture::RGBA16F, rtFlags, true), normalDepth);
+        normal = makeTarget(texture(post, QRhiTexture::RGBA8, rtFlags, true), normalDepth);
         // AO 和模糊只使用红通道，R16F 保留同样的半精度数值，减少四通道显存和带宽。
         const auto aoFormat = rhi->isTextureFormatSupported(QRhiTexture::R16F, rtFlags)
                                   ? QRhiTexture::R16F
                                   : QRhiTexture::RGBA16F;
-        for (auto t : {&ao, &blur}) {
-            *t = makeTarget(texture(size, aoFormat, rtFlags, true));
-        }
-        combined = makeTarget(texture(size, QRhiTexture::RGBA16F, rtFlags, true));
-        // AO 完成后不再读取法线颜色；景深复用其 HDR 纹理，避免再分配一张全尺寸中间图。
+        // AO、法线与景深模糊都走半分辨率（post 在 resize 开头算好）：AO 的 16 次深度采样、
+        // 法线的整场景光栅、景深的 41 次颜色采样都从全屏像素降到 1/4。模糊半径按 AO 自身
+        // 纹素计算，半分辨率下屏幕半径自动翻倍，与早期独立 blurAO 通道的观感一致。
+        ao = makeTarget(texture(post, aoFormat, rtFlags, true));
+        // 景深结果只有半分辨率，最终合成按弥散圆把它与全分辨率颜色混合。
         // 此目标不挂载深度附件，因此可安全采样 normalDepth，不形成读写反馈。
         bokeh = makeTarget(normal.texture);
         target = {};
@@ -402,6 +487,10 @@ class Renderer {
     }
     Surface surface(QJsonObject d) {
         auto name = d["name"].toString();
+            QRhiColorAttachment attachment(texture);
+            if (resolve) {
+                attachment.setResolveTexture(resolve);
+            }
         bool optical = name.startsWith("Optical_Glass") || name == "Optical_Bridge_Glass";
         float type = d["mesh"].toInt() == -2                            ? 6
                      : d["label"].toBool()                              ? 1
@@ -425,6 +514,31 @@ class Renderer {
         static const QStringList removed = {"Internal_Ceramic",  "Optical_Edges",       "Subsurface_Optics",
                                             "Optical_Film_Edge", "Amber_Optical_Inlay", "Optical_Film",
                                             "Champagne_Index",   "Printed_Label"};
+    /**
+     * 选出 MSAA 实际使用的采样数。
+     * 目标 4x，可用 RHINE_MSAA 覆盖（2/4/8），实际取设备支持列表里不超过目标值的最大值。
+     * 6.12 的 isTextureFormatSupported 没有采样数参数，所以只能分两步校验：
+     * 格式本身可作渲染目标（RGBA16F 与 D32F），加上采样数在 supportedSampleCounts 里。
+     * 任一步不满足就退回单采样——宁可没抗锯齿，也不要创建不出目标。
+     */
+    int msaaSampleCount() const {
+        if (qEnvironmentVariable("RHINE_AA_MODE") != "msaa") {
+            return 1;
+        }
+        const int configured = qEnvironmentVariableIntValue("RHINE_MSAA");
+        const int wanted = configured > 1 ? qBound(2, configured, 8) : 4;
+        if (!rhi->isTextureFormatSupported(QRhiTexture::RGBA16F, QRhiTexture::RenderTarget) ||
+            !rhi->isTextureFormatSupported(QRhiTexture::D32F, QRhiTexture::RenderTarget)) {
+            return 1;
+        }
+        int best = 1;
+        for (int candidate : supportedSamples) {
+            if (candidate > best && candidate <= wanted) {
+                best = candidate;
+            }
+        }
+        return best;
+    }
         QList<QJsonObject> result;
         for (auto v : f["draws"].toArray()) {
             auto d = v.toObject();
@@ -949,10 +1063,12 @@ class Renderer {
             const bool write = kind != "surface" || hashed || !blend || d["depthWrite"].toBool();
             cb->setGraphicsPipeline(pipeline(kind, draw.bindings, rp, back,
                                              kind != "normal" && d["side"].toInt() == 2, write, blend));
-            // D3D11 会按首次使用的着色器缓存绑定映射。阴影/法线阶段只绑定全局参数，
-            // 不能复用材质的纹理绑定，否则深度贴图会被误读成环境光贴图。
+            // 绑定与管线必须一一对应：RHI 会按首次使用时建立的映射校验后续绑定的
+            // 布局。阴影/法线阶段只绑定全局参数，不能复用材质的纹理绑定，
+            // 否则深度贴图会被误读成环境光贴图。
             cb->setShaderResources(kind == "surface" ? draw.bindings : pipelineLayouts.value(kind));
-            auto s = kind == "shadow" ? QSize(2048, 2048) : size;
+            // 法线只喂半分辨率的 AO，按 post 尺寸光栅，省掉 3/4 的像素。
+            auto s = kind == "shadow" ? QSize(2048, 2048) : kind == "normal" ? post : size;
             cb->setViewport({0, 0, float(s.width()), float(s.height())});
             const QRhiCommandBuffer::VertexInput inputs[] = {{draw.vertices, 0}, {draw.instances, 0}};
             cb->setVertexInput(0, 2, inputs, draw.indices, 0, QRhiCommandBuffer::IndexUInt32);
@@ -1050,7 +1166,11 @@ class Renderer {
                 shadowInputs.append(matrixBytes(draw.data));
             }
         }
-        if (!shadowValid || shadowInputs != shadowRevision) {
+        ++frameIndex;
+        // 阴影贴图每两帧最多更新一次：转动时模型矩阵逐帧变化，但隔帧的阴影差异肉眼不可见，
+        // 阴影 pass 的几何提交与深度写入开销因此减半。首帧必须生成，否则阴影为空。
+        const bool shadowStale = !shadowValid || shadowInputs != shadowRevision;
+        if (shadowStale && (!shadowValid || (frameIndex & 1) == 0)) {
             // 合批缓冲区与其他实例更新一起提交，阴影只需按几何而非按卡片发出指令。
             cb->resourceUpdate(updates);
             updates = nullptr;
@@ -1060,13 +1180,10 @@ class Renderer {
             shadowRevision = shadowInputs;
             shadowValid = true;
         }
-        QList<Draw> opaque, glass, transparent, backs;
+        QList<Draw> opaque, glass, transparent;
         for (auto d : data) {
             if (n(d.data, "transmission") > .000001) {
                 glass << d;
-                if (d.data["side"].toInt() == 2) {
-                    backs << d;
-                }
             } else if (d.data["transparent"].toBool()) {
                 transparent << d;
             } else {
@@ -1081,7 +1198,6 @@ class Renderer {
         sort(opaque);
         sort(glass);
         sort(transparent);
-        sort(backs);
         // 阴影未重绘时更新批次仍未提交；颜色通道需要的实例缓冲区在此准备。
         if (!updates) {
             updates = rhi->nextResourceUpdateBatch();

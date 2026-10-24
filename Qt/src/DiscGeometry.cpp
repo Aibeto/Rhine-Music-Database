@@ -18,15 +18,11 @@ DiscGeometry::Mesh DiscGeometry::annulus(float inner, float outer, float front, 
         float values[] = {p.x(),
                           p.y(),
                           p.z(),
-                          1,
                           normal.x(),
                           normal.y(),
                           normal.z(),
-                          0,
                           .5f + (p.x() - CenterX) / (2 * PrintRadius),
-                          .5f + (p.y() - CenterY) / (2 * PrintRadius),
-                          0,
-                          0};
+                          .5f + (p.y() - CenterY) / (2 * PrintRadius)};
         mesh.vertices.insert(mesh.vertices.end(), std::begin(values), std::end(values));
     };
     auto triangle = [&](QVector3D a, QVector3D b, QVector3D c, QVector3D normal) {
@@ -68,7 +64,7 @@ bool DiscGeometry::validate() {
     }
     double x = 0;
     double y = 0;
-    for (size_t i = 0; i < mesh.vertices.size(); i += 12) {
+    for (size_t i = 0; i < mesh.vertices.size(); i += 8) {
         auto px = mesh.vertices[i];
         auto py = mesh.vertices[i + 1];
         const auto radius = std::hypot(px - CenterX, py - CenterY);
