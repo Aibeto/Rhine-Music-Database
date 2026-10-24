@@ -30,10 +30,29 @@ for asset in ["archive-cassette", "archive-assembly"]:
             for item_index in range(accessor["count"])
         ]
 
-    # 顶点统一为十二个分量，索引偏移与原生渲染层保持一致。
+    # 顶点统一为八个分量：位置、法线、UV，与原生顶点布局的 32 字节步长一致。
     vertices = []
     index_values = []
     parts = []
+
+    def closed_surface(positions, indices, epsilon=1e-5):
+        """按位置合并顶点后统计边的共享次数：全部为 2 才是闭合流形，可安全关闭双面渲染。"""
+        unique = {}
+        merged = []
+        for point in positions:
+            key = tuple(round(value / epsilon) for value in point)
+            merged.append(unique.setdefault(key, len(unique)))
+        edges = {}
+        for offset in range(0, len(indices), 3):
+            first, second, third = (merged[indices[offset + i]] for i in range(3))
+            if first == second or second == third or third == first:
+                continue
+            for left, right in ((first, second), (second, third), (third, first)):
+                edge = (left, right) if left < right else (right, left)
+                edges[edge] = edges.get(edge, 0) + 1
+        # 非流形或带开放边界的部件保持双面，避免薄片单面消失。
+        return bool(edges) and all(count == 2 for count in edges.values())
+
     for node in gltf["nodes"]:
         if "mesh" not in node:
             continue
@@ -43,7 +62,17 @@ for asset in ["archive-cassette", "archive-assembly"]:
         for primitive in gltf["meshes"][node["mesh"]]["primitives"]:
             material = gltf["materials"][primitive["material"]]
             name = material["name"].split(".")[0]
-            if name == "Carbon_Ink":
+            if name in {
+                "Carbon_Ink",
+                # 藏在磨砂外壳之后的内部结构，经多点平均的透射采样后细节不可辨：
+                # 胶片边缘齿纹约 3.6 万三角、内部陶瓷、次表面光学、光学内边框约 1.1 万、
+                # 琥珀嵌件。全部剔除后模型三角数约为原始的三分之一，磨砂模糊下视觉等价。
+                "Optical_Film_Edge",
+                "Internal_Ceramic",
+                "Subsurface_Optics",
+                "Optical_Edges",
+                "Amber_Optical_Inlay",
+            }:
                 continue
             positions = read_accessor(primitive["attributes"]["POSITION"])
             normals = read_accessor(primitive["attributes"]["NORMAL"])
@@ -54,9 +83,9 @@ for asset in ["archive-cassette", "archive-assembly"]:
             )
             indices = read_accessor(primitive["indices"])
             index_offset = len(index_values)
-            vertex_offset = len(vertices) // 12
+            vertex_offset = len(vertices) // 8
             for i in range(len(positions)):
-                vertices.extend([*positions[i], 1, *normals[i], 0, *texture_coordinates[i], 0, 0])
+                vertices.extend([*positions[i], *normals[i], *texture_coordinates[i]])
             index_values.extend((vertex_offset + i[0] for i in indices))
             parts.append(
                 dict(
@@ -65,6 +94,7 @@ for asset in ["archive-cassette", "archive-assembly"]:
                     count=len(indices),
                     vertexStart=vertex_offset,
                     vertexCount=len(positions),
+                    closed=closed_surface(positions, [value[0] for value in indices]),
                     material=material,
                     minimum=gltf["accessors"][primitive["attributes"]["POSITION"]]["min"],
                     maximum=gltf["accessors"][primitive["attributes"]["POSITION"]]["max"],

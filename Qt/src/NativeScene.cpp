@@ -59,11 +59,14 @@ bool NativeScene::ready() const {
 int NativeScene::selection() const {
     return m_selected;
 }
-/** 只读抽取与相机进度，接近稳定后渐入原版外观；归位时先退出合成。 */
+/**
+ * 原版外观合成权重恒为 0：详情页与查看封面页改由增强渲染器（OpticalScene）直接绘制。
+ * 旧实现会在唱片投影多边形内部回读 RhiScene 的整帧纹理，唱片贴图因此依赖另一条渲染路径，
+ * 一旦该路径的贴图或后处理出问题（例如超分下的封面），唱片区域就只剩外壳玻璃。
+ * 保留该接口是为了让合成通路的接线继续成立，但不再产生任何回读。
+ */
 double NativeScene::originalActorBlend() const {
-    const double extraction = SceneMotion::smooth((m_actor.lift.value - 3.96) / 0.08);
-    const double cameraSettled = SceneMotion::smooth((m_detail - 0.997) / 0.002);
-    return std::min(extraction, cameraSettled);
+    return 0.;
 }
 NativeScene::Cell NativeScene::fileLocation(int index) const {
     for (int lane = 0; lane < 5; ++lane) {
@@ -270,7 +273,20 @@ bool NativeScene::review(QString mode) {
     m_scanBlend = 0;
     m_looping = false;
     select(0);
-    setMode(mode);
+    if (mode == "viewer" || mode == "viewer-back") {
+        // 查看封面页叠在详情页之上：先进详情，再打开装配视图，离线验收才能截到封面。
+        setMode("detail");
+        m_viewer->open(m_clock);
+        if (mode == "viewer-back") {
+            // 展开并把装配体转到背面，用来验收封面纸背的渲染结果。
+            m_viewer->action("explode", m_clock);
+            m_viewer->pointer("pointerdown", 0, 0, 0);
+            m_viewer->pointer("pointermove", -m_height / 1.3, 0, 0);
+            m_viewer->pointer("pointerup", 0, 0, 0);
+        }
+    } else {
+        setMode(mode);
+    }
     for (int index = 1; index <= 120; ++index) {
         update(index / 60.0, std::nullopt);
     }

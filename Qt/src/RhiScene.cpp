@@ -652,14 +652,59 @@ class Renderer {
         textureOrder.removeAll(key);
         textureOrder << key;
         if (!labels.contains(key) || labelRevisions.value(key) != labelRevision) {
-            if (const auto previous = labels.value(key)) {
-                invalidateBindings(previous);
+            // 标签图集：每页 2048×2016 装 8×18 张 256×112 标签，列表卡片的标签批次
+            // 从每卡一个 draw 合并到每页一个——资源库 606 draws 的最大来源就此收敛。
+            // 同 key 重画复用同槽，纹理对象不变，无需失效绑定；页纹理随图集页生命周期。
+            if (!labelSlots.contains(key)) {
+                int page = -1;
+                int cell = -1;
+                for (int index = 0; index < atlasPages.size() && cell < 0; ++index) {
+                    if (!atlasPages.at(index).freeCells.isEmpty()) {
+                        page = index;
+                        cell = atlasPages[index].freeCells.takeLast();
+                    }
+                }
+                if (cell < 0 && atlasPages.size() < 4) {
+                    QImage staging(2048, 2016, QImage::Format_RGBA8888_Premultiplied);
+                    staging.fill(Qt::transparent);
+                    QVector<int> freeCells;
+                    for (int index = 143; index >= 0; --index) {
+                        freeCells.append(index);
+                    }
+                    AtlasPage created{texture(staging.size(), QRhiTexture::RGBA8,
+                                              QRhiTexture::MipMapped | QRhiTexture::UsedWithGenerateMips),
+                                      staging, freeCells, true};
+                    // 新页必须完整初始化：未上传过内容的纹理在部分驱动上采样为未定义值。
+                    updates->uploadTexture(created.texture, created.staging);
+                    atlasPages.append(created);
+                    page = atlasPages.size() - 1;
+                    cell = atlasPages[page].freeCells.takeLast();
+                }
+                if (cell < 0) {
+                    labelRevisions[key] = labelRevision;
+                    return;
+                }
+                labelSlots[key] = {page, cell};
             }
-            // 覆盖同一 key 时退休的是该 key 的旧对象，而非上一首当前曲目的对象。
-            retire(labels.take(key));
-            const auto label = glyphs->label(value);
-            labels[key] = texture(label.size(), QRhiTexture::RGBA8);
-            updates->uploadTexture(labels[key], label);
+            const auto slot = labelSlots.value(key);
+            auto &bound = atlasPages[slot.page];
+            const auto label = glyphs->label(value).scaled(256, 112, Qt::IgnoreAspectRatio,
+                                                           Qt::SmoothTransformation);
+            {
+                QPainter painter(&bound.staging);
+                painter.drawImage((slot.cell % 8) * 256, (slot.cell / 8) * 112, label);
+                painter.end();
+            }
+            // 只上传槽位矩形：整页 16 MB，槽位仅 114 KB。
+            QRhiTextureSubresourceUploadDescription region(
+                bound.staging.copy((slot.cell % 8) * 256, (slot.cell / 8) * 112, 256, 112)
+                    .convertToFormat(QImage::Format_RGBA8888_Premultiplied));
+            region.setDestinationTopLeft(QPoint((slot.cell % 8) * 256, (slot.cell / 8) * 112));
+            updates->uploadTexture(bound.texture,
+                                   QRhiTextureUploadDescription(
+                                       {QRhiTextureUploadEntry(0, 0, region)}));
+            bound.dirty = true;
+            labels[key] = bound.texture;
             labelRevisions[key] = labelRevision;
         }
         if (!covers.contains(key) || (!image.isNull() && coverRevisions.value(key) != coverRevision)) {
@@ -684,8 +729,8 @@ class Renderer {
                     glyphs->text(painter, "RHINE LAB", 156, 370, 28, "demibold", 1, QColor(215, 220, 204));
                 }
                 painter.end();
-                const auto cover = texture(pixels.size(), QRhiTexture::RGBA8);
-                updates->uploadTexture(cover, pixels);
+                const auto cover = texture(pixels.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+                uploadMipped(cover, pixels);
                 coverTextures[coverRevision] = cover;
                 ++coverUploads;
             }
@@ -704,25 +749,28 @@ class Renderer {
             }
             const auto old = *candidate;
             textureOrder.erase(candidate);
-            if (const auto label = labels.value(old)) {
-                invalidateBindings(label);
+            // 标签槽位归还给图集页（页纹理被同页其他标签共享，不退休）。
+            if (labelSlots.contains(old)) {
+                const auto slotRecord = labelSlots.take(old);
+                atlasPages[slotRecord.page].freeCells.append(slotRecord.cell);
             }
-            retire(labels.take(old));
+            labels.remove(old);
             releaseCover(old);
             labelRevisions.remove(old);
         }
     }
     qint64 musicTextureBytes() const {
-        qint64 bytes = 0;
-        for (const auto texture : labels) {
-            const auto dimensions = texture->pixelSize();
-            bytes += qint64(dimensions.width()) * dimensions.height() * 4;
+        // 图集页按整页计（同页标签共享纹理），封面按各自带 mip 的实际占用计。
+        // labels[key] 现在指向图集页纹理，不能按条目重复计入。
+        qint64 total = qint64(atlasPages.size()) * 2048 * 2016 * 4;
+        const auto bytes = [](QRhiTexture *texture) {
+            total += bytes(texture);
         }
         for (const auto texture : coverTextures) {
             const auto dimensions = texture->pixelSize();
-            bytes += qint64(dimensions.width()) * dimensions.height() * 4;
-        }
-        return bytes;
+            return qint64(dimensions.width()) * dimensions.height() * 4 * 4 / 3;
+        };
+        return total;
     }
     QRhiShaderResourceBindings *bindings(std::vector<QRhiShaderResourceBinding> list,
                                          bool temporary = false) {
@@ -758,6 +806,7 @@ class Renderer {
                                   {1, 3, QRhiVertexInputAttribute::Float4, 0},
                                   {1, 4, QRhiVertexInputAttribute::Float4, 16},
                                   {1, 5, QRhiVertexInputAttribute::Float4, 32},
+                     : d["mesh"].toInt() == -6 || d["mesh"].toInt() == -7 ? 7
                                   {1, 6, QRhiVertexInputAttribute::Float4, 48},
                                   {1, 7, QRhiVertexInputAttribute::Float4, 64}});
             p->setVertexInputLayout(layout);
@@ -930,15 +979,28 @@ class Renderer {
                 QString::number(d["id"].toInt()) + "/" + QString::number(mesh) + "/" + d["name"].toString();
             auto &state = materials[resourceKey];
             state.used = generation;
-            const auto material = surface(d);
+            const auto key =
+                d["musicSelected"].toBool() ? musicItem["key"].toString() : d["musicKey"].toString();
+            auto material = surface(d);
+            // 标签图集：把槽位换算成 uv 缩放与偏移，随材质 uniform 下发。
+            // 非图集采样的部件（装饰印记、装饰文字、封面）保持全图 {0,0,1,1}。
+            if (d["label"].toBool()) {
+                const auto slot = labelSlots.value(key, {-1, -1});
+                if (slot.page >= 0) {
+                    material.atlas = {float(slot.cell % 8) / 8.f, float(slot.cell / 8) / 18.f,
+                                      1.f / 8.f, 1.f / 18.f};
+                }
+            }
             const auto mb = dynamicBuffer(
                 state.uniform, QByteArray(reinterpret_cast<const char *>(&material), sizeof(material)),
                 QRhiBuffer::UniformBuffer);
-            const auto key =
-                d["musicSelected"].toBool() ? musicItem["key"].toString() : d["musicKey"].toString();
             QRhiTexture *label = white;
             if (mesh == -5) {
-                label = decorationTexture;
+                label = decorationHigh ? decorationTextureHigh : decorationTextureLow;
+            } else if (mesh == -6) {
+                label = letteringTextureFront;
+            } else if (mesh == -7) {
+                label = letteringTextureSpine;
             } else if (d["label"].toBool()) {
                 label = labels.value(key, labelTexture ? labelTexture : white);
             }
@@ -1272,6 +1334,10 @@ class ItemRenderer : public QQuickRhiItemRenderer {
     void synchronize(QQuickRhiItem *value) override {
         auto scene = static_cast<RhiScene *>(value);
         auto engine = scene->engine();
+            } else if (mesh == -6) {
+                vertices = caseLetteringFront;
+            } else if (mesh == -7) {
+                vertices = caseLetteringSpine;
         backend = engine;
         if (engine) {
             frame = engine->frame();
