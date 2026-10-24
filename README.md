@@ -145,12 +145,12 @@ macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_
 | macOS    | - [ ]  | - [ ]       | - [ ]  | - [x] |
 | Linux    | - [x]  | - [ ]       | - [x]  | - [ ] |
 
-| API         | FXAA  | SSAA  | MSAA  | TAA   | FSR Upscaling              |
-| ----------- | ----- | ----- | ----- | ----- | -------------------------- |
-| Vulkan      | - [x] | - [x] | - [x] | - [x] | EASU + RCAS                |
-| Direct3D 12 | - [x] | - [x] | - [x] | - [x] | EASU + RCAS / TU (default) |
-| OpenGL      | - [x] | - [x] | - [x] | - [x] | EASU + RCAS                |
-| Metal       | - [x] | - [x] | - [x] | - [x] | EASU + RCAS                |
+| API         | FXAA  | SSAA   | MSAA   | TAA   | FSR Upscaling              | FSR Frame Generation |
+| ----------- | ----- | ------ | ------ | ----- | -------------------------- | -------------------- |
+| Vulkan      | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [ ]                |
+| Direct3D 12 | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS / TU (default) | - [ ]                |
+| OpenGL      | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [ ]                |
+| Metal       | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [ ]                |
 
 ## 从源码构建
 

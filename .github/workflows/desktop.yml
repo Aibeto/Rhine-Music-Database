@@ -150,13 +150,22 @@ jobs:
           } > "$RUNNER_TEMP/dxc-tools.txt"
           echo "rev=${rev}" >> "$GITHUB_OUTPUT"
           echo "tools=$(sha256sum "$RUNNER_TEMP/dxc-tools.txt" | cut -c1-16)" >> "$GITHUB_OUTPUT"
-      - name: Cache DXC build
+      - name: Restore DXC build
         # generated/dxc 被 .gitignore 排除，干净检出后 RHINE_DXC_REUSE_BUILT 找不到
         # 产物，Windows 每次都要从源码编一遍 LLVM 级的 dxc（约数十分钟）。这里缓存
         # 的是本地从源码构建出来的产物，不是外来的预编译二进制；命中后签名校验通过，
         # ExternalProject 那一层整个跳过。
+        #
+        # runner 每次都是全新机器，但这份缓存存在 GitHub 侧的远端缓存里（仓库级，
+        # 上限 10 GB），跨 runner、跨运行持久，与机器是否干净无关。它用的是 Actions
+        # 运行时 token，不受上面 permissions: contents: read 影响；唯一存不进去的
+        # 情况是来自 fork 的 pull_request——那种运行只能 restore。
+        #
+        # 拆成 restore/save 两步而不是单个 actions/cache：后者的保存在 post 步骤，
+        # job 被 timeout 掐掉时不执行，会出现“编完了但没存上、下次再编一遍”的死循环。
         if: runner.os == 'Windows'
-        uses: actions/cache@v4
+        id: dxc-cache
+        uses: actions/cache/restore@v4
         with:
           path: generated/dxc
           key: dxc-win-${{ steps.dxc.outputs.rev }}-${{ steps.dxc.outputs.tools }}-${{ hashFiles('cmake/Dxc.cmake') }}
@@ -219,6 +228,36 @@ jobs:
         run: npm run build
         env:
           QT_ROOT: ${{ env.QT_ROOT_DIR }}
+      - name: Check DXC build completeness
+        # actions/cache 不会覆盖已存在的 key：一旦把半成品存进去，之后每次都会命中
+        # 这份坏缓存、签名校验失败、重新全量构建，而保存又被 cache-hit 挡住，就永远
+        # 修不好。dxc-source-revision.txt 由 ExternalProject 的 INSTALL 步骤最后写入，
+        # 它和两个 DLL 同时存在才代表 dxc/dxcompiler/dxildll 三个目标都编完了。
+        if: always() && runner.os == 'Windows'
+        id: dxc-artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f generated/dxc/dxc-source-revision.txt ] \
+             && [ -f generated/dxc/bin/dxcompiler.dll ] \
+             && [ -f generated/dxc/bin/dxil.dll ]; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "complete=false" >> "$GITHUB_OUTPUT"
+            echo "DXC 产物不完整，跳过缓存保存"
+          fi
+      - name: Save DXC build
+        # 紧跟构建之后显式保存，而不是等 actions/cache 的 post 步骤：这样即使后面的
+        # 测试或打包失败，这份来之不易的 DXC 产物也已经落地，下次直接命中。
+        #
+        # continue-on-error：来自 fork 的 PR 只有缓存读权限，保存会 403；配额或网络
+        # 出问题也一样。缓存只是加速手段，存不进去不该把构建判失败。
+        if: always() && runner.os == 'Windows' && steps.dxc-cache.outputs.cache-hit != 'true' && steps.dxc-artifacts.outputs.complete == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: generated/dxc
+          key: dxc-win-${{ steps.dxc.outputs.rev }}-${{ steps.dxc.outputs.tools }}-${{ hashFiles('cmake/Dxc.cmake') }}
       # 离线测试
       - name: Run offline regressions
         run: npm test
