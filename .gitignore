@@ -9,6 +9,7 @@ account.dpapi
 /data/
 *.app/
 *.dSYM/
+node-*
 
 # 本地会话和临时工作文件
 /.codex/
@@ -50,3 +51,12 @@ Thumbs.db
 /sessions/
 /memories/
 /.claude/
+/.workbuddy/
+/.mnemon/
+
+# FSR 着色器预编译产物：只保留 .h 头文件（供无 dxc/glslang 的环境直接构建），
+# 依赖文件 .d 与临时编译脚本 .cmake 每次构建都会重写，不入库。
+/generated/**/*.d
+/generated/**/*.cmake
+# 本地临时补丁快照
+.uncommitted.diff
