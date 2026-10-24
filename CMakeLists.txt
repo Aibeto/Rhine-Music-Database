@@ -279,13 +279,22 @@ qt_add_shaders(
     Qt/shaders/shadow.vert
     Qt/shaders/shadow.frag
     Qt/shaders/surface.frag
+    Qt/shaders/surfaceHashed.frag
     Qt/shaders/normal.frag
     Qt/shaders/quad.vert
     Qt/shaders/aoFragment.frag
     Qt/shaders/blurAO.frag
     Qt/shaders/combineAO.frag
+    Qt/shaders/copyColor.frag
     Qt/shaders/bokehFragment.frag
-    Qt/shaders/finalFragment.frag)
+    Qt/shaders/finalFragment.frag
+    Qt/shaders/aaFragment.frag
+    Qt/shaders/taa.frag
+    Qt/shaders/downsample.frag
+    Qt/shaders/velocity.vert
+    Qt/shaders/velocity.frag
+    Qt/shaders/fsr1_easu.frag
+    Qt/shaders/fsr1_rcas.frag)
 # 增强模式单独打包
 qt_add_shaders(
     RhineMusicDatabase
