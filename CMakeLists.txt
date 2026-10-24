@@ -313,6 +313,7 @@ qt_add_shaders(
     Qt/shaders/enhancement/opticalGeometry.vert
     Qt/shaders/enhancement/opticalQuad.vert
     Qt/shaders/enhancement/opticalSurface.frag
+    Qt/shaders/enhancement/opticalGlass.frag
     Qt/shaders/enhancement/opticalFinalFragment.frag)
 target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}"
                                                       $<$<CONFIG:Debug>:QT_QML_DEBUG>)
