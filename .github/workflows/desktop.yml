@@ -132,6 +132,34 @@ jobs:
           install_runtime: true
           cache: true
           stripdown: true
+      - name: Resolve DXC cache key
+        # 复用签名 = 子模块 rev + 构建配方，而配方里含编译器/ninja/Python 的绝对路径。
+        # 因此 key 要同时带上 rev 和工具链标识：rev 换版本、镜像换工具链都会得到新 key，
+        # 缓存自然失效并重新保存。若只按 rev 取 key，actions/cache 不会覆盖已存在的
+        # key，镜像升级后就会永久命中旧缓存，而签名校验每次都判不等，退化成每次全量重建。
+        if: runner.os == 'Windows'
+        id: dxc
+        shell: bash
+        run: |
+          set -euo pipefail
+          rev=$(git -C third_party/dxc rev-parse HEAD)
+          {
+            cl 2>&1 | head -1 || true
+            ninja --version 2>/dev/null || echo "ninja: 未找到"
+            python -c 'import sys; print(sys.executable)' 2>/dev/null || echo "python: 未找到"
+          } > "$RUNNER_TEMP/dxc-tools.txt"
+          echo "rev=${rev}" >> "$GITHUB_OUTPUT"
+          echo "tools=$(sha256sum "$RUNNER_TEMP/dxc-tools.txt" | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Cache DXC build
+        # generated/dxc 被 .gitignore 排除，干净检出后 RHINE_DXC_REUSE_BUILT 找不到
+        # 产物，Windows 每次都要从源码编一遍 LLVM 级的 dxc（约数十分钟）。这里缓存
+        # 的是本地从源码构建出来的产物，不是外来的预编译二进制；命中后签名校验通过，
+        # ExternalProject 那一层整个跳过。
+        if: runner.os == 'Windows'
+        uses: actions/cache@v4
+        with:
+          path: generated/dxc
+          key: dxc-win-${{ steps.dxc.outputs.rev }}-${{ steps.dxc.outputs.tools }}-${{ hashFiles('cmake/Dxc.cmake') }}
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
