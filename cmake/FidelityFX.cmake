@@ -712,6 +712,17 @@ if(WIN32)
     # target 名带 FFX_PLATFORM_NAME（x64）。按同一个变量取名，SDK 改名时会在这里
     # 报出来，而不是留下一个指向不存在目标的 ALIAS。
     if(TARGET ffx_backend_dx12_${FFX_PLATFORM_NAME})
+        # SDK 在 sdk/CMakeLists.txt:161-164 用 add_compile_definitions 给整个 SDK 目录
+        # 挂了 _UNICODE / UNICODE / _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR。我们不走那个
+        # 顶层 CMakeLists（只 add_subdirectory 了 dx12 后端），这些定义就丢了，后果是
+        #   ffx_dx12.cpp(345): error C2664: 'LoadLibraryA': cannot convert argument 1
+        #   from 'const wchar_t *' to 'LPCSTR'
+        # —— 没有 UNICODE 时 LoadLibrary 展开成 LoadLibraryA，而该处传的是宽字符路径。
+        # 我们的 _rhine_ffx_configure_target() 只覆盖了自己创建的那几个 target，dx12
+        # 后端是 add_subdirectory 内部建的，没走过它，所以在这里补上。
+        target_compile_definitions(ffx_backend_dx12_${FFX_PLATFORM_NAME}
+                                   PUBLIC UNICODE _UNICODE NOMINMAX
+                                   PRIVATE _DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
         # 置换头由 ffx_shader_permutations_dx12 这个 custom target 生成，它和后端
         # target 之间只有“后端依赖它”这一条边，没有“它依赖工具”的边。不显式排到
         # ffx_sc/rhine_dxc 之后，并行构建会先跑着色器编译、再等工具出现，直接失败。
