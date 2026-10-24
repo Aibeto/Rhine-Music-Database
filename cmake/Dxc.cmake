@@ -127,6 +127,36 @@ function(rhine_dxc_build out_exe out_dxcompiler)
         set(_rhine_dxc_bin_dir "${RHINE_DXC_BUILD_DIR}/bin")
     endif()
 
+    # HCT.cmake 生成 DxilConstants.h 等头文件后，会拿它们与源树里的同名文件做
+    # compare_files 校验，行尾必须逐字节一致，否则那一步直接失败（CI 里表现为一串
+    #   FAILED: include/dxc/DXIL/tmp/DxilConstants.h.stamp
+    # 而没有任何编译错误）。
+    #
+    # 上游的判定是运行时去问 git：
+    #   git config --get core.autocrlf     # 返回非零就整个跳过探测
+    #   HLSL_AUTOCRLF=On  -> 不加 --force-lf（生成 CRLF）
+    #   HLSL_AUTOCRLF=Off -> 加 --force-lf（生成 LF）
+    # 未定义时按 Off 处理。GitHub Actions 的检出并不设置 core.autocrlf（Windows
+    # runner 上通常是未设置或 false），探测因此从不生效，于是生成器按 LF 输出；
+    # 而 dxc 的 .gitattributes 是 `* text=auto`，当 autocrlf 为 true 时这些文件在
+    # 磁盘上是 CRLF —— 两者对不上，校验就失败。
+    #
+    # 这里不猜 git 配置，直接读磁盘上被校验文件的真实行尾：生成器输出的行尾因此
+    # 与校验对象必然一致，与 autocrlf、检出方式、平台都无关。
+    set(_rhine_dxc_eol_probe "${RHINE_DXC_SOURCE_DIR}/include/dxc/DXIL/DxilConstants.h")
+    set(_rhine_dxc_eol_arg "-DHLSL_AUTOCRLF=OFF")
+    set(_rhine_dxc_eol_name "LF")
+    if(EXISTS "${_rhine_dxc_eol_probe}")
+        file(READ "${_rhine_dxc_eol_probe}" _rhine_dxc_eol_hex HEX)
+        string(FIND "${_rhine_dxc_eol_hex}" "0d0a" _rhine_dxc_eol_crlf)
+        if(NOT _rhine_dxc_eol_crlf EQUAL -1)
+            # 磁盘上是 CRLF -> 生成器也要产 CRLF -> HLSL_AUTOCRLF=ON 即“不强制 LF”。
+            set(_rhine_dxc_eol_arg "-DHLSL_AUTOCRLF=ON")
+            set(_rhine_dxc_eol_name "CRLF")
+        endif()
+    endif()
+    message(STATUS "DXC: 按源树实际行尾(${_rhine_dxc_eol_name})固定生成器输出")
+
     # 构建配方。注意这里没有用 -C cmake/caches/PredefinedParams.cmake：那份 cache 会顺手
     # 打开 SPIR-V、测试和文档，而我们要的正好相反。下面显式给出 PredefinedParams 里
     # DX12 必需的三项（LLVM_DEFAULT_TARGET_TRIPLE / LLVM_TARGETS_TO_BUILD=None /
@@ -172,7 +202,9 @@ function(rhine_dxc_build out_exe out_dxcompiler)
         "-DCLANG_ENABLE_ARCMT=OFF"
         "-DCLANG_ENABLE_CLANGD=OFF"
         "-DCLANG_INCLUDE_TESTS=OFF"
-        "-DLIBCLANG_BUILD_STATIC=ON")
+        "-DLIBCLANG_BUILD_STATIC=ON"
+        # 见上面的行尾探测：显式指定，避免流程依赖 git 的 core.autocrlf 探测。
+        "${_rhine_dxc_eol_arg}")
 
     # 签名 = 源码版本 + 构建配方。配方变了（比如以后改选项）也要重建，避免拿旧产物
     # 骗过构建；签名文件只在整个构建成功后才拷进 generated/，失败的构建不会留下标记。
