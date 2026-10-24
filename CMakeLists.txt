@@ -10,7 +10,9 @@ endif()
 project(
     RhineMusicDatabase
     VERSION ${RHINE_VERSION}
-    LANGUAGES CXX)
+    # C is required by the vendored glslang/SPIRV-Tools that compiles the FidelityFX
+    # shader permutations at build time.
+    LANGUAGES CXX C)
 set(RHINE_APPLICATION_ID "rhine.music.database")
 find_package(Git QUIET)
 set(RHINE_COMMIT_SHA "unknown")
@@ -80,6 +82,9 @@ FetchContent_Declare(
     URL "${CMAKE_CURRENT_SOURCE_DIR}/vendor/taglib/taglib-2.1.1.tar.gz"
     URL_HASH SHA256=bd57924496a272322d6f9252502da4e620b6ab9777992e8934779ebd64babd6e)
 FetchContent_MakeAvailable(taglib)
+# AMD FidelityFX（FSR3 组件 + Vulkan 后端，DX12 仅在 Windows 下接入）；只建库不链接，
+# 应用源码尚未调用 FSR，后续按 cmake/FidelityFX.cmake 暴露的 target 接入。
+include(cmake/FidelityFX.cmake)
 # 自维护源码和锁定的二维码库构成独立应用目标。
 set(RHINE_APP_SOURCES
     Qt/src/AppUpdater.cpp
@@ -170,6 +175,15 @@ set(RHINE_APP_SOURCES
     Qt/src/Hud.h
     Qt/src/RhiScene.cpp
     Qt/src/RhiScene.h
+    Qt/src/fsr/Fsr3Backend.cpp
+    Qt/src/fsr/Fsr3Backend.h
+    Qt/src/fg/FgHost.cpp
+    Qt/src/fg/FgHost.h
+    Qt/src/fg/FgBackend.cpp
+    Qt/src/fg/FgBackend.h
+    Qt/src/fg/FgConfig.h
+    Qt/src/fg/VulkanPresenter.cpp
+    Qt/src/fg/VulkanPresenter.h
     Qt/src/OpticalScene.cpp
     Qt/src/OpticalScene.h
     Qt/src/Glyphs.cpp
@@ -181,9 +195,12 @@ if(APPLE)
     set(CMAKE_OBJCXX_STANDARD 20)
 endif()
 # 原生业务和场景由应用与独立回归共用，测试不需要复制整套源码目标。
+# FSR 与 FG 后端只被渲染器使用，跟 RhiScene 一起留在应用目标里，避免把 FidelityFX 与
+# Vulkan 链接进每个回归测试。过滤条件必须同时覆盖 /fsr/ 与 /fg/：这两处的实现依赖
+# Qt6::Quick 与 GuiPrivate，而 RhineCore 只链 Core/Gui/Network/Concurrent/Multimedia。
 set(RHINE_CORE_SOURCES ${RHINE_APP_SOURCES})
 list(FILTER RHINE_CORE_SOURCES EXCLUDE REGEX
-     "/(main|Engine|Icon|RhiScene|OpticalScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/")
+     "/(main|Engine|Icon|RhiScene|OpticalScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/|/fsr/|/fg/")
 list(REMOVE_ITEM RHINE_APP_SOURCES ${RHINE_CORE_SOURCES})
 add_library(RhineCore STATIC ${RHINE_CORE_SOURCES})
 target_include_directories(
@@ -200,6 +217,22 @@ target_link_libraries(
     PRIVATE Qt6::MultimediaPrivate tag)
 add_subdirectory(Qt)
 target_link_libraries(RhineMusicDatabase PRIVATE RhineCore)
+# FSR 只挂在应用目标上：设置页要按编译期能力置灰，所以把可用性也传成宏。
+# FSR1 是纯着色器（EASU+RCAS），任何后端都能用；FSR3 需要 Vulkan 或 D3D12。
+if(TARGET FidelityFX::SDK)
+    target_link_libraries(RhineMusicDatabase PRIVATE FidelityFX::SDK)
+endif()
+if(RHINE_FFX_VK_AVAILABLE AND RHINE_FFX_SHADER_BLOBS_AVAILABLE)
+    target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_FSR3_VULKAN=1)
+    # 设置页编在 RhineCore 里，只凭"后端名"猜不出构建是否真编进了 FSR3：同一个后端
+    # 在不同构建配置下可能可用也可能不可用。把能力宏一并传给 RhineCore，让置灰逻辑
+    # 按实际编译结果判断。这里只传宏，不链接 FidelityFX。
+    target_compile_definitions(RhineCore PRIVATE RHINE_FSR3_VULKAN=1)
+endif()
+if(RHINE_FFX_DX12_AVAILABLE)
+    target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_FSR3_DX12=1)
+    target_compile_definitions(RhineCore PRIVATE RHINE_FSR3_DX12=1)
+endif()
 set_source_files_properties(Qt/qml/Main.qml TARGET_DIRECTORY RhineMusicDatabase PROPERTIES QT_RESOURCE_ALIAS
                                                                                            Main.qml)
 target_include_directories(RhineMusicDatabase PRIVATE vendor/qrcodegen Qt/src)
