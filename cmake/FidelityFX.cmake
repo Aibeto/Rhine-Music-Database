@@ -1,0 +1,740 @@
+# AMD FidelityFX integration (build system only).
+#
+# The vendored FidelityFX SDK 1.1.4 ships a Windows/MSVC-only CMake build
+# (sdk/CMakeLists.txt requires CMAKE_GENERATOR_PLATFORM=x64 and a shader
+# compiler to pre-compile shaders), so it cannot be added as-is on Linux. This
+# module wires the parts we need into the Rhine build:
+#
+#   * FSR3 host components: ffx_fsr3upscaler, ffx_frameinterpolation,
+#     ffx_opticalflow plus the shared host sources they depend on.
+#   * Vulkan backend (sdk/src/backends/vk) with its FSR3/FI/OF shader permutations.
+#     The shaders are compiled from the SDK's GLSL sources at build time:
+#     FfxShaderCompiler.cmake builds ffx_shader_compiler from source, and
+#     Glslang.cmake builds the glslangValidator it drives. No prebuilt binary
+#     from FidelityFX-SDK/sdk/tools/**/libs/ is used on any platform.
+#   * DX12 backend: kept behind if(WIN32) and delegated to the SDK's own CMake.
+#     The shader compiler it drives is our own ffx_sc, and the DXC behind it is
+#     built from third_party/dxc at build time (Dxc.cmake) — the prebuilt
+#     sdk/tools/binary_store/FidelityFX_SC.exe is never used.
+#     It never blocks a Linux build.
+#
+# Nothing under FidelityFX-SDK/ or FidelityFX-FSR/ is modified. GCC/Clang need
+# a few compatibility shims that are supplied from the build tree instead:
+#   * FFX_GCC removes __declspec(dllexport) from FFX_API (ffx_types.h).
+#   * cmake/ffx_linux_compat.h is force-included and provides _countof,
+#     wcscpy_s, <cstddef>/<cwchar>/<cmath> and a wstring_convert replacement.
+#   * two SDK sources use the MSVC-only `L#token` wide-string trick; a copy with
+#     `L"" #token` is generated under the build tree and compiled instead.
+#
+# Targets exposed for the eventual FSR3 runtime wiring:
+#   FidelityFX::SDK               aggregate (components + available backends)
+#   FidelityFX::fsr3upscaler      FSR3 upscaler host API
+#   FidelityFX::frameinterpolation frame interpolation host API
+#   FidelityFX::opticalflow       optical flow host API
+#   FidelityFX::backend_vk        Vulkan backend (when Vulkan is available)
+#   FidelityFX::backend_dx12      DX12 backend (WIN32 only)
+#   FidelityFX::fsr1_reference    FSR1 EASU/RCAS shader sources (reference only)
+
+include_guard(GLOBAL)
+
+# Shader permutations are produced at build time by these two helpers:
+#   Glslang.cmake          builds glslangValidator from third_party/glslang
+#   FfxShaderCompiler.cmake builds ffx_shader_compiler from the SDK sources and drives it
+include("${CMAKE_CURRENT_LIST_DIR}/Glslang.cmake")
+include("${CMAKE_CURRENT_LIST_DIR}/FfxShaderCompiler.cmake")
+
+set(RHINE_FFX_SDK_DIR "${CMAKE_CURRENT_SOURCE_DIR}/FidelityFX-SDK")
+set(RHINE_FFX_FSR_DIR "${CMAKE_CURRENT_SOURCE_DIR}/FidelityFX-FSR")
+set(RHINE_FFX_COMPAT_HEADER "${CMAKE_CURRENT_LIST_DIR}/ffx_linux_compat.h")
+
+# Pinned submodule revisions, mirrored in .gitmodules.
+set(RHINE_FFX_SDK_PIN "c6efa6bf7f2027b3ec94f28578bb5965eabb9e55")
+set(RHINE_FFX_FSR_PIN "a21ffb8f6c13233ba336352bdff293894c706575")
+
+option(RHINE_ENABLE_FIDELITYFX "Build the vendored FidelityFX SDK (FSR3 host components and backends)" ON)
+
+if(NOT RHINE_ENABLE_FIDELITYFX)
+    message(STATUS "FidelityFX: disabled by RHINE_ENABLE_FIDELITYFX=OFF")
+    return()
+endif()
+
+if(NOT EXISTS "${RHINE_FFX_SDK_DIR}/sdk/include/FidelityFX/host/ffx_interface.h")
+    message(STATUS "FidelityFX: FidelityFX-SDK/ is not checked out; skipping SDK targets")
+    return()
+endif()
+
+find_package(Git QUIET)
+
+# Report the checked-out revision and warn when it drifts from the pin recorded
+# in .gitmodules (the gitlink itself cannot be staged from the build system).
+function(_rhine_ffx_check_pin repository label expected)
+    if(NOT GIT_FOUND OR NOT EXISTS "${repository}/.git")
+        return()
+    endif()
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" -C "${repository}" rev-parse HEAD
+        OUTPUT_VARIABLE actual
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE result)
+    if(NOT result EQUAL 0)
+        return()
+    endif()
+    if(NOT actual STREQUAL expected)
+        message(
+            WARNING
+                "FidelityFX: ${label} is checked out at ${actual}, expected pin ${expected} (see .gitmodules)"
+        )
+    else()
+        message(STATUS "FidelityFX: ${label} @ ${actual}")
+    endif()
+endfunction()
+
+_rhine_ffx_check_pin("${RHINE_FFX_SDK_DIR}" "FidelityFX-SDK" "${RHINE_FFX_SDK_PIN}")
+if(EXISTS "${RHINE_FFX_FSR_DIR}/license.txt")
+    _rhine_ffx_check_pin("${RHINE_FFX_FSR_DIR}" "FidelityFX-FSR" "${RHINE_FFX_FSR_PIN}")
+endif()
+
+# ---------------------------------------------------------------------------
+# Build-tree compatibility copies for MSVC-only source constructs.
+# ---------------------------------------------------------------------------
+
+set(RHINE_FFX_COMPAT_DIR "${CMAKE_CURRENT_BINARY_DIR}/fidelityfx-compat")
+
+function(_rhine_ffx_compat_copy source_rel output_path)
+    set(source "${RHINE_FFX_SDK_DIR}/${source_rel}")
+    file(READ "${source}" contents)
+    # MSVC accepts `L#token` (wide literal from stringification); GCC/Clang do
+    # not, but `L"" #token` is portable and produces the same wide literal.
+    string(REGEX REPLACE "L#([A-Za-z_][A-Za-z0-9_]*)" "L\"\" #\\1" contents "${contents}")
+    if(contents MATCHES "L#[A-Za-z_]")
+        message(FATAL_ERROR "FidelityFX: could not rewrite MSVC-only L#token in ${source}")
+    endif()
+    # libstdc++ 16 removed std::wstring_convert; the shim provides an
+    # equivalent UTF-8 <-> wchar_t converter with the same call syntax. The SDK spells
+    # the template two ways, so both are rewritten.
+    string(REPLACE "std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>> converter;"
+                   "RhineFfxWideConverter converter;" contents "${contents}")
+    string(REPLACE "std::wstring_convert<std::codecvt_utf8<wchar_t>, wchar_t> converter;"
+                   "RhineFfxWideConverter converter;" contents "${contents}")
+    if(contents MATCHES "std::wstring_convert")
+        message(FATAL_ERROR "FidelityFX: unhandled std::wstring_convert spelling in ${source}")
+    endif()
+    # ffx_vk.cpp：BackendContext_VK::EffectContext 带 alignas(32)，但 scratch 里排在它
+    # 前面的几个数组只按 4 字节对齐，GCC/Clang 会为它的赋值生成 movaps 对齐写，一旦落在
+    # 非 16 字节边界就直接 SIGSEGV（MSVC 生成非对齐写，所以上游没暴露这个问题）。
+    # 这里在映射 context 数组之前补一次 32 字节对齐，并在尺寸函数里留出同样的余量。
+    if(source_rel MATCHES "backends/vk/ffx_vk\\.cpp")
+        string(REPLACE "pipelineArraySize + resourceArraySize + contextArraySize,"
+                       "pipelineArraySize + resourceArraySize + contextArraySize + 32,"
+                       contents "${contents}")
+        string(REPLACE "        // Map context array\n        backendContext->pEffectContexts = (BackendContext_VK::EffectContext*)pMem;"
+                       "        // Map context array: EffectContext is alignas(32), so align before mapping.\n        pMem = (uint8_t*)FFX_ALIGN_UP((uintptr_t)pMem, 32);\n        backendContext->pEffectContexts = (BackendContext_VK::EffectContext*)pMem;"
+                       contents "${contents}")
+        if(NOT contents MATCHES "FFX_ALIGN_UP\\(\\(uintptr_t\\)pMem, 32\\)")
+            message(FATAL_ERROR "FidelityFX: ffx_vk.cpp EffectContext alignment patch did not apply")
+        endif()
+    endif()
+    if(EXISTS "${output_path}")
+        file(READ "${output_path}" previous)
+        if(previous STREQUAL contents)
+            return()
+        endif()
+    endif()
+    file(WRITE "${output_path}" "${contents}")
+endfunction()
+
+# ---------------------------------------------------------------------------
+# Context size override for 4-byte wchar_t platforms.
+#
+# The opaque effect contexts are fixed-size arrays sized by FFX_SDK_DEFAULT_CONTEXT_SIZE
+# (512 KiB as 131072 uint32). That number is calibrated for Windows, where wchar_t is two
+# bytes. On Linux wchar_t is four bytes, and FfxResourceBinding embeds a
+# wchar_t[FFX_RESOURCE_NAME_SIZE] name, so it grows from 140 to 268 bytes. With twelve
+# FfxPipelineState members the FSR3 upscaler's private context reaches 837848 bytes and the
+# SDK's own static_assert in ffx_fsr3upscaler.cpp fails.
+#
+# Measured requirements on Linux x86-64 (uint32 slots): FSR3 upscaler 209462, frame
+# interpolation 192018, optical flow 122210. 262144 slots (1 MiB) leaves headroom.
+#
+# The constant is a plain #define in a public header, so it cannot be overridden from the
+# command line. Instead a build-tree copy of ffx_types.h with the one literal changed is
+# placed ahead of sdk/include. The copy is generated from the vendored header, so it
+# cannot drift when the SDK revision changes.
+# ---------------------------------------------------------------------------
+
+set(RHINE_FFX_OVERRIDE_INCLUDE "${RHINE_FFX_COMPAT_DIR}/include")
+
+function(_rhine_ffx_override_context_size)
+    if(MSVC)
+        # 2-byte wchar_t: the SDK's own default is correct, nothing to override.
+        return()
+    endif()
+
+    set(source "${RHINE_FFX_SDK_DIR}/sdk/include/FidelityFX/host/ffx_types.h")
+    set(destination "${RHINE_FFX_OVERRIDE_INCLUDE}/FidelityFX/host/ffx_types.h")
+    set(original "#define FFX_SDK_DEFAULT_CONTEXT_SIZE (1024 * 128)")
+    set(replacement "#define FFX_SDK_DEFAULT_CONTEXT_SIZE (1024 * 256)")
+
+    file(READ "${source}" contents)
+    string(FIND "${contents}" "${original}" position)
+    if(position EQUAL -1)
+        message(
+            FATAL_ERROR
+                "FidelityFX: '${original}' is gone from ${source}; re-check the 4-byte wchar_t context size override"
+        )
+    endif()
+    string(REPLACE "${original}" "${replacement}" contents "${contents}")
+
+    if(EXISTS "${destination}")
+        file(READ "${destination}" previous)
+        if(previous STREQUAL contents)
+            return()
+        endif()
+    endif()
+    file(WRITE "${destination}" "${contents}")
+endfunction()
+
+_rhine_ffx_override_context_size()
+
+# The frame-interpolation swapchain includes <Windows.h> unconditionally. Install the
+# POSIX shim as Windows.h in the same override directory so those sources compile without
+# touching the vendored tree.
+if(NOT MSVC)
+    configure_file("${CMAKE_CURRENT_LIST_DIR}/ffx_windows_shim.h"
+                   "${RHINE_FFX_OVERRIDE_INCLUDE}/Windows.h" COPYONLY)
+    configure_file("${CMAKE_CURRENT_LIST_DIR}/ffx_synchapi_shim.h"
+                   "${RHINE_FFX_OVERRIDE_INCLUDE}/synchapi.h" COPYONLY)
+endif()
+
+# ---------------------------------------------------------------------------
+# Common target configuration for SDK translation units.
+# ---------------------------------------------------------------------------
+
+function(_rhine_ffx_configure_target target)
+    set_target_properties(
+        ${target}
+        PROPERTIES CXX_STANDARD 20
+                   CXX_STANDARD_REQUIRED ON
+                   CXX_EXTENSIONS OFF
+                   AUTOMOC OFF
+                   AUTOUIC OFF
+                   AUTORCC OFF)
+    # The override copy has to come first so every translation unit, ours included, sees
+    # the same context layout.
+    target_include_directories(${target} BEFORE PUBLIC "${RHINE_FFX_OVERRIDE_INCLUDE}")
+    target_include_directories(${target} PUBLIC "${RHINE_FFX_SDK_DIR}/sdk/include")
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W3)
+        target_compile_definitions(${target} PUBLIC UNICODE _UNICODE NOMINMAX)
+    else()
+        # FFX_API is __declspec(dllexport) unless FFX_GCC is defined.
+        target_compile_definitions(${target} PUBLIC FFX_GCC)
+        target_compile_options(${target} PRIVATE -include "${RHINE_FFX_COMPAT_HEADER}"
+                                                  -Wno-deprecated-declarations)
+        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(${target} PRIVATE -Wno-write-strings)
+        elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            target_compile_options(${target} PRIVATE -Wno-writable-strings)
+        endif()
+    endif()
+endfunction()
+
+# ---------------------------------------------------------------------------
+# Shared host sources and FSR3 components.
+# ---------------------------------------------------------------------------
+
+add_library(
+    ffx_shared STATIC
+    "${RHINE_FFX_SDK_DIR}/sdk/src/shared/ffx_assert.cpp"
+    "${RHINE_FFX_SDK_DIR}/sdk/src/shared/ffx_breadcrumbs_list.cpp"
+    "${RHINE_FFX_SDK_DIR}/sdk/src/shared/ffx_message.cpp"
+    "${RHINE_FFX_SDK_DIR}/sdk/src/shared/ffx_object_management.cpp")
+_rhine_ffx_configure_target(ffx_shared)
+target_include_directories(ffx_shared PRIVATE "${RHINE_FFX_SDK_DIR}/sdk/src/shared")
+add_library(FidelityFX::shared ALIAS ffx_shared)
+
+set(_rhine_ffx_component_includes
+    "${RHINE_FFX_SDK_DIR}/sdk/src/shared"
+    "${RHINE_FFX_SDK_DIR}/sdk/src/components")
+
+add_library(
+    ffx_fsr3upscaler STATIC
+    "${RHINE_FFX_SDK_DIR}/sdk/src/components/fsr3upscaler/ffx_fsr3upscaler.cpp"
+    "${RHINE_FFX_SDK_DIR}/sdk/src/components/fsr3upscaler/ffx_fsr3upscaler_private.h")
+_rhine_ffx_configure_target(ffx_fsr3upscaler)
+target_include_directories(ffx_fsr3upscaler PRIVATE ${_rhine_ffx_component_includes})
+target_link_libraries(ffx_fsr3upscaler PUBLIC ffx_shared)
+add_library(FidelityFX::fsr3upscaler ALIAS ffx_fsr3upscaler)
+
+add_library(
+    ffx_frameinterpolation STATIC
+    "${RHINE_FFX_SDK_DIR}/sdk/src/components/frameinterpolation/ffx_frameinterpolation.cpp"
+    "${RHINE_FFX_SDK_DIR}/sdk/src/components/frameinterpolation/ffx_frameinterpolation_private.h")
+_rhine_ffx_configure_target(ffx_frameinterpolation)
+target_include_directories(ffx_frameinterpolation PRIVATE ${_rhine_ffx_component_includes})
+target_link_libraries(ffx_frameinterpolation PUBLIC ffx_shared)
+add_library(FidelityFX::frameinterpolation ALIAS ffx_frameinterpolation)
+
+if(MSVC)
+    set(_rhine_ffx_opticalflow_source
+        "${RHINE_FFX_SDK_DIR}/sdk/src/components/opticalflow/ffx_opticalflow.cpp")
+else()
+    file(MAKE_DIRECTORY "${RHINE_FFX_COMPAT_DIR}")
+    _rhine_ffx_compat_copy("sdk/src/components/opticalflow/ffx_opticalflow.cpp"
+                           "${RHINE_FFX_COMPAT_DIR}/ffx_opticalflow.cpp")
+    set(_rhine_ffx_opticalflow_source "${RHINE_FFX_COMPAT_DIR}/ffx_opticalflow.cpp")
+endif()
+
+add_library(
+    ffx_opticalflow STATIC
+    "${_rhine_ffx_opticalflow_source}"
+    "${RHINE_FFX_SDK_DIR}/sdk/src/components/opticalflow/ffx_opticalflow_private.h")
+_rhine_ffx_configure_target(ffx_opticalflow)
+target_include_directories(
+    ffx_opticalflow PRIVATE ${_rhine_ffx_component_includes}
+                            "${RHINE_FFX_SDK_DIR}/sdk/src/components/opticalflow")
+target_link_libraries(ffx_opticalflow PUBLIC ffx_shared)
+add_library(FidelityFX::opticalflow ALIAS ffx_opticalflow)
+
+# ---------------------------------------------------------------------------
+# Vulkan shader permutations.
+#
+# Mirrors the SDK's own sdk/src/backends/vk/CMakeShaders*.txt scripts: same compiler
+# arguments, same permutation matrices, same output layout. The generated headers are
+# flat in one directory because the SDK's blob accessors include them by bare name
+# (`#include <ffx_fsr3upscaler_rcas_pass_permutations.h>`).
+# ---------------------------------------------------------------------------
+
+function(_rhine_ffx_generate_vk_shaders target sdk_dir sc_executable glslang_executable)
+    set(gpu "${sdk_dir}/sdk/include/FidelityFX/gpu")
+    set(shader_root "${sdk_dir}/sdk/src/backends/vk/shaders")
+    # 置换头有 364 个文件、约 25MB，而重新生成要跑上千次 glslang（首次全量约 40 分钟）。
+    # 因此默认落在源码树里未被 .gitignore 排除的 generated/ 下，而不是 output/ 里——
+    # 后者整目录被忽略，产物既无法复用也无法跨机拷贝。需要时可用
+    # -DRHINE_FFX_SHADER_OUTPUT_DIR=<dir> 覆盖。
+    set(RHINE_FFX_SHADER_OUTPUT_DIR
+        "${CMAKE_SOURCE_DIR}/generated/ffx_shaders/vk"
+        CACHE PATH "FidelityFX Vulkan 置换头的输出目录（默认在源码树内，便于复用）")
+    set(output "${RHINE_FFX_SHADER_OUTPUT_DIR}")
+    file(MAKE_DIRECTORY "${output}")
+
+    # Tool selection plus a modest per-invocation thread count: CMake already runs
+    # several shaders concurrently, and each invocation internally compiles 2^N
+    # permutations through glslangValidator.
+    set(tool_args "-glslangexe=${glslang_executable}" -num-threads=4)
+
+    # Vulkan flavour of the compiler arguments, identical across the three effects.
+    set(api_base_args -compiler=glslang -e CS --target-env vulkan1.2 -S comp -Os -DFFX_GLSL=1)
+
+    # Shared "half precision sampler" choices; only reprojection runs at half precision.
+    set(sampler_args
+        -DFFX_FSR3UPSCALER_OPTION_UPSAMPLE_SAMPLERS_USE_DATA_HALF=0
+        -DFFX_FSR3UPSCALER_OPTION_ACCUMULATE_SAMPLERS_USE_DATA_HALF=0
+        -DFFX_FSR3UPSCALER_OPTION_REPROJECT_SAMPLERS_USE_DATA_HALF=1
+        -DFFX_FSR3UPSCALER_OPTION_POSTPROCESSLOCKSTATUS_SAMPLERS_USE_DATA_HALF=0
+        -DFFX_FSR3UPSCALER_OPTION_UPSAMPLE_USE_LANCZOS_TYPE=2)
+    set(fi_sampler_args
+        -DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_SAMPLERS_USE_DATA_HALF=0
+        -DFFX_FRAMEINTERPOLATION_OPTION_ACCUMULATE_SAMPLERS_USE_DATA_HALF=0
+        -DFFX_FRAMEINTERPOLATION_OPTION_REPROJECT_SAMPLERS_USE_DATA_HALF=1
+        -DFFX_FRAMEINTERPOLATION_OPTION_POSTPROCESSLOCKSTATUS_SAMPLERS_USE_DATA_HALF=0
+        -DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_USE_LANCZOS_TYPE=2)
+
+    set(deps ffx_sc glslang-standalone)
+    set(all_outputs "")
+
+    # --- FSR3 upscaler: 10 passes, 6 binary options -> 64 permutations per variant.
+    file(GLOB fsr3_shaders "${shader_root}/fsr3upscaler/*.glsl")
+    set(fsr3_perm_args
+        "-DFFX_FSR3UPSCALER_OPTION_REPROJECT_USE_LANCZOS_TYPE={0,1}"
+        "-DFFX_FSR3UPSCALER_OPTION_HDR_COLOR_INPUT={0,1}"
+        "-DFFX_FSR3UPSCALER_OPTION_LOW_RESOLUTION_MOTION_VECTORS={0,1}"
+        "-DFFX_FSR3UPSCALER_OPTION_JITTERED_MOTION_VECTORS={0,1}"
+        "-DFFX_FSR3UPSCALER_OPTION_INVERTED_DEPTH={0,1}"
+        "-DFFX_FSR3UPSCALER_OPTION_APPLY_SHARPENING={0,1}")
+    rhine_ffx_compile_shaders(
+        "${sc_executable}"
+        "${tool_args}"
+        "-reflection;-deps=gcc;-DFFX_GPU=1;${sampler_args}"
+        "${api_base_args}"
+        "${fsr3_perm_args}"
+        "${gpu};${gpu}/fsr3upscaler"
+        "${fsr3_shaders}"
+        "${output}"
+        fsr3_outputs
+        ${deps})
+    list(APPEND all_outputs ${fsr3_outputs})
+
+    # --- Frame interpolation: 11 passes, 3 binary options -> 8 permutations per variant.
+    file(GLOB fi_shaders "${shader_root}/frameinterpolation/*.glsl")
+    set(fi_perm_args
+        "-DFFX_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS={0,1}"
+        "-DFFX_FRAMEINTERPOLATION_OPTION_JITTER_MOTION_VECTORS={0,1}"
+        "-DFFX_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH={0,1}")
+    rhine_ffx_compile_shaders(
+        "${sc_executable}"
+        "${tool_args}"
+        "-reflection;-deps=gcc;-DFFX_GPU=1;${fi_sampler_args}"
+        "${api_base_args}"
+        "${fi_perm_args}"
+        "${gpu};${gpu}/frameinterpolation"
+        "${fi_shaders}"
+        "${output}"
+        fi_outputs
+        ${deps})
+    list(APPEND all_outputs ${fi_outputs})
+
+    # --- Optical flow: 7 passes, 1 binary option -> 2 permutations per variant.
+    file(GLOB of_shaders "${shader_root}/opticalflow/*.glsl")
+    set(of_perm_args "-DFFX_OPTICALFLOW_OPTION_HDR_COLOR_INPUT={0,1}")
+    rhine_ffx_compile_shaders(
+        "${sc_executable}"
+        "${tool_args}"
+        "-reflection;-deps=gcc;-DFFX_GPU=1"
+        "${api_base_args}"
+        "${of_perm_args}"
+        "${gpu};${gpu}/opticalflow"
+        "${of_shaders}"
+        "${output}"
+        of_outputs
+        ${deps})
+    list(APPEND all_outputs ${of_outputs})
+
+    list(LENGTH all_outputs _rhine_ffx_shader_count)
+    message(STATUS "FidelityFX: generating ${_rhine_ffx_shader_count} Vulkan shader permutation headers")
+
+    target_sources(${target} PRIVATE ${all_outputs})
+    target_include_directories(${target} PRIVATE "${output}")
+    set(RHINE_FFX_SHADER_OUTPUT_DIR
+        "${output}"
+        PARENT_SCOPE)
+endfunction()
+
+# ---------------------------------------------------------------------------
+# Frame-interpolation swapchain shaders and sources.
+#
+# The SDK checks the UI-composition and debug-pacing SPIR-V into the source tree as
+# generated headers; recompileUiCompositionGLSL.bat rebuilds them by hand. Rhine does not
+# consume pre-generated shader blobs, so they are regenerated from the .glsl sources at
+# build time with the same glslang invocation the .bat uses (--vn emits a uint32_t array).
+#
+# The swapchain sources are compiled from copies under the build tree: quoted includes
+# resolve next to the translation unit first, so a copy sitting beside the regenerated
+# headers picks those up instead of the SDK's checked-in ones.
+# ---------------------------------------------------------------------------
+
+function(_rhine_ffx_prepare_swapchain target sdk_dir glslang_executable)
+    set(source_dir "${sdk_dir}/sdk/src/backends/vk/FrameInterpolationSwapchain")
+    set(stage "${RHINE_FFX_COMPAT_DIR}/FrameInterpolationSwapchain")
+    file(MAKE_DIRECTORY "${stage}")
+
+    set(generated_headers
+        FrameInterpolationSwapchainUiCompositionVS.h
+        FrameInterpolationSwapchainUiCompositionPS.h
+        FrameInterpolationSwapchainUiCompositionPremulVS.h
+        FrameInterpolationSwapchainUiCompositionPremulPS.h
+        FrameInterpolationSwapchainDebugPacingVS.h
+        FrameInterpolationSwapchainDebugPacingPS.h)
+
+    # Everything that is not a generated header gets copied verbatim.
+    file(GLOB swapchain_files "${source_dir}/*.cpp" "${source_dir}/*.h")
+    set(staged_sources "")
+    foreach(file IN LISTS swapchain_files)
+        get_filename_component(name "${file}" NAME)
+        list(FIND generated_headers "${name}" generated_index)
+        if(generated_index EQUAL -1)
+            configure_file("${file}" "${stage}/${name}" COPYONLY)
+        endif()
+        get_filename_component(extension "${file}" EXT)
+        if(extension STREQUAL ".cpp")
+            list(APPEND staged_sources "${stage}/${name}")
+        endif()
+    endforeach()
+
+    # <header>|<source>|<extra defines>|<stage>|<symbol>
+    set(recipes
+        "FrameInterpolationSwapchainUiCompositionVS.h|FrameInterpolationSwapchainUiCompositionVS.glsl|-DFFX_UI_PREMUL=0|vert|g_mainVS"
+        "FrameInterpolationSwapchainUiCompositionPS.h|FrameInterpolationSwapchainUiCompositionPS.glsl|-DFFX_UI_PREMUL=0|frag|g_mainPS"
+        "FrameInterpolationSwapchainUiCompositionPremulVS.h|FrameInterpolationSwapchainUiCompositionVS.glsl|-DFFX_UI_PREMUL=1|vert|g_mainPremulVS"
+        "FrameInterpolationSwapchainUiCompositionPremulPS.h|FrameInterpolationSwapchainUiCompositionPS.glsl|-DFFX_UI_PREMUL=1|frag|g_mainPremulPS"
+        "FrameInterpolationSwapchainDebugPacingVS.h|FrameInterpolationSwapchainDebugPacingVS.glsl||vert|g_mainDebugPacingVS"
+        "FrameInterpolationSwapchainDebugPacingPS.h|FrameInterpolationSwapchainDebugPacingPS.glsl||frag|g_mainDebugPacingPS")
+
+    set(generated_outputs "")
+    foreach(recipe IN LISTS recipes)
+        string(REPLACE "|" ";" parts "${recipe}")
+        list(GET parts 0 header)
+        list(GET parts 1 glsl)
+        list(GET parts 2 define)
+        list(GET parts 3 stage_kind)
+        list(GET parts 4 symbol)
+
+        set(output "${stage}/${header}")
+        add_custom_command(
+            OUTPUT "${output}"
+            COMMAND "${glslang_executable}"
+                    -o "${output}"
+                    ${define}
+                    -Os
+                    --vn "${symbol}"
+                    -S "${stage_kind}"
+                    -e main
+                    --target-env vulkan1.2
+                    "${source_dir}/${glsl}"
+            DEPENDS "${source_dir}/${glsl}" glslang-standalone
+            COMMENT "FidelityFX swapchain shader ${header}"
+            VERBATIM)
+        list(APPEND generated_outputs "${output}")
+    endforeach()
+
+    target_sources(${target} PRIVATE ${staged_sources} ${generated_outputs})
+    target_include_directories(${target} PRIVATE "${RHINE_FFX_SDK_DIR}/sdk/src/backends/vk")
+endfunction()
+
+# ---------------------------------------------------------------------------
+# Vulkan backend. Its FSR3 / frame-interpolation / optical-flow shaders are compiled
+# from the SDK's GLSL sources at build time, so the permutation headers always match the
+# vendored SDK revision and no prebuilt shader binary is consumed.
+# ---------------------------------------------------------------------------
+
+set(RHINE_FFX_VK_AVAILABLE FALSE)
+set(RHINE_FFX_SHADER_BLOBS_AVAILABLE FALSE)
+
+find_package(Vulkan QUIET)
+if(Vulkan_FOUND OR VULKAN_FOUND)
+    if(MSVC)
+        set(_rhine_ffx_vk_source "${RHINE_FFX_SDK_DIR}/sdk/src/backends/vk/ffx_vk.cpp")
+    else()
+        file(MAKE_DIRECTORY "${RHINE_FFX_COMPAT_DIR}")
+        _rhine_ffx_compat_copy("sdk/src/backends/vk/ffx_vk.cpp"
+                               "${RHINE_FFX_COMPAT_DIR}/ffx_vk.cpp")
+        set(_rhine_ffx_vk_source "${RHINE_FFX_COMPAT_DIR}/ffx_vk.cpp")
+    endif()
+
+    set(_rhine_ffx_blob_dir "${RHINE_FFX_SDK_DIR}/sdk/src/backends/shared/blob_accessors")
+
+    add_library(
+        ffx_backend_vk STATIC
+        "${_rhine_ffx_vk_source}"
+        "${RHINE_FFX_SDK_DIR}/sdk/src/backends/shared/ffx_shader_blobs.cpp"
+        "${RHINE_FFX_SDK_DIR}/sdk/src/backends/shared/ffx_shader_blobs.h"
+        "${_rhine_ffx_blob_dir}/ffx_fsr3upscaler_shaderblobs.cpp"
+        "${_rhine_ffx_blob_dir}/ffx_frameinterpolation_shaderblobs.cpp"
+        "${_rhine_ffx_blob_dir}/ffx_opticalflow_shaderblobs.cpp"
+        "${RHINE_FFX_SDK_DIR}/sdk/include/FidelityFX/host/backends/vk/ffx_vk.h")
+
+    # ffx_vk.cpp always installs a frame-generation callback, so the symbol must exist.
+    # The real swapchain is Windows-only in SDK 1.1.4; elsewhere a stand-in reports the
+    # feature as unavailable instead of breaking the link.
+    if(NOT WIN32)
+        target_sources(ffx_backend_vk PRIVATE "${CMAKE_CURRENT_LIST_DIR}/ffx_fg_unsupported.cpp")
+    endif()
+    _rhine_ffx_configure_target(ffx_backend_vk)
+    # ffx_shader_blobs.cpp 用这些宏决定为哪些 effect 生成 wave64 查询分支。
+    # 缺任何一个，ffxGetEffectIsWave64 会落到 default 直接返回 FFX_ERROR_BACKEND_API_ERROR，
+    # 表现为 ffxFsr3UpscalerContextCreate 失败（实测返回码 -2147483635）。
+    target_compile_definitions(ffx_backend_vk PRIVATE FFX_FSR3UPSCALER FFX_FI FFX_OF)
+    # The blob accessors reach into each effect's private header through a
+    # "<effect>/..." path, so sdk/src/components has to be an include root.
+    target_include_directories(ffx_backend_vk
+                               PRIVATE "${RHINE_FFX_SDK_DIR}/sdk/src/backends/shared"
+                                       "${RHINE_FFX_SDK_DIR}/sdk/src/components"
+                                       "${RHINE_FFX_SDK_DIR}/sdk/src/shared")
+    target_link_libraries(ffx_backend_vk PUBLIC ffx_shared Vulkan::Vulkan)
+    add_library(FidelityFX::backend_vk ALIAS ffx_backend_vk)
+    set(RHINE_FFX_VK_AVAILABLE TRUE)
+
+    rhine_ffx_build_shader_compiler("${RHINE_FFX_SDK_DIR}" _rhine_ffx_sc_executable)
+    rhine_ffx_resolve_glslang("${RHINE_FFX_SDK_DIR}" _rhine_ffx_glslang_executable)
+
+    if(_rhine_ffx_sc_executable AND _rhine_ffx_glslang_executable)
+        _rhine_ffx_generate_vk_shaders(ffx_backend_vk "${RHINE_FFX_SDK_DIR}"
+                                       "${_rhine_ffx_sc_executable}"
+                                       "${_rhine_ffx_glslang_executable}")
+        # The FG swapchain sources are Windows-only; see ffx_fg_unsupported.cpp.
+        if(WIN32)
+            _rhine_ffx_prepare_swapchain(ffx_backend_vk "${RHINE_FFX_SDK_DIR}"
+                                         "${_rhine_ffx_glslang_executable}")
+        endif()
+        set(RHINE_FFX_SHADER_BLOBS_AVAILABLE TRUE)
+    else()
+        message(
+            STATUS
+                "FidelityFX: Vulkan shader permutations cannot be generated "
+                "(ffx_shader_compiler or glslangValidator unavailable); FSR3 will report unavailable at runtime")
+    endif()
+
+    message(STATUS "FidelityFX: Vulkan backend enabled (${Vulkan_LIBRARY})")
+else()
+    message(STATUS "FidelityFX: Vulkan not found; Vulkan backend target disabled")
+endif()
+
+# ---------------------------------------------------------------------------
+# DX12 backend (Windows only). The SDK's own CMake still drives the permutation
+# build, but the tools it drives (ffx_sc + DXC) are compiled from source here;
+# nothing comes from the prebuilt binaries checked into the SDK.
+# Never part of a Linux build.
+# ---------------------------------------------------------------------------
+
+set(RHINE_FFX_DX12_AVAILABLE FALSE)
+if(WIN32)
+    include("${CMAKE_CURRENT_LIST_DIR}/Dxc.cmake")
+
+    set(FFX_API_DX12 ON)
+    set(FFX_PLATFORM_NAME x64)
+    set(FFX_INCLUDE_PATH "${RHINE_FFX_SDK_DIR}/sdk/include")
+    set(FFX_LIB_PATH "${RHINE_FFX_SDK_DIR}/sdk/include")
+    set(FFX_SHARED_PATH "${RHINE_FFX_SDK_DIR}/sdk/src/shared")
+    set(FFX_HOST_PATH "${FFX_INCLUDE_PATH}/FidelityFX/host")
+    set(FFX_GPU_PATH "${FFX_INCLUDE_PATH}/FidelityFX/gpu")
+    set(FFX_COMPONENTS_PATH "${RHINE_FFX_SDK_DIR}/sdk/src/components")
+    set(FFX_HOST_BACKENDS_PATH "${FFX_HOST_PATH}/backends")
+    set(FFX_SRC_BACKENDS_PATH "${RHINE_FFX_SDK_DIR}/sdk/src/backends")
+    # 不用 SDK 签入的 sdk/tools/binary_store/FidelityFX_SC.exe：那是预编译二进制。
+    # 这里两个工具都从源码编：
+    #   * ffx_sc —— cmake/FfxShaderCompiler.cmake，从 SDK 的 ffx_shader_compiler 源码；
+    #   * DXC    —— cmake/Dxc.cmake，从 third_party/dxc（LLVM 级，首次较慢，之后复用）。
+    rhine_dxc_build(_rhine_ffx_dxc_exe _rhine_ffx_dxc_dll)
+    rhine_ffx_build_shader_compiler("${RHINE_FFX_SDK_DIR}" _rhine_ffx_sc_exe)
+    if(NOT _rhine_ffx_sc_exe OR NOT _rhine_ffx_dxc_dll)
+        # 不静默降级：没有这两个工具就生成不了置换头，DX12 后端连编译都过不去，
+        # 运行期 ffxFsr3UpscalerContextCreate 也必然失败。早点报出来更好查。
+        message(FATAL_ERROR
+            "FidelityFX: 无法从源码构建 DX12 着色器工具链（ffx_sc / DXC）。"
+            "请检查 MSVC 工具链、Python 3 与 DIA SDK 是否就绪。")
+    endif()
+
+    # ffx_sc 用 -dxcdll=<dxcompiler.dll 路径> 指定 DXC（见
+    # sdk/tools/ffx_shader_compiler/src/ffx_sc.cpp 里 -dxcdll 的解析；没有 -dxcexe 这个
+    # 参数）。SDK 的 CMakeCompileShaders.txt 把命令写成
+    # `COMMAND ${EXECUTABLE} ...`（未加引号），所以这里用列表：
+    # 第一个元素是工具本身，后面是每次调用都附带的参数。
+    set(FFX_SC_EXECUTABLE "${_rhine_ffx_sc_exe};-dxcdll=${_rhine_ffx_dxc_dll}")
+
+    # dxcompiler.dll 由 -dxcdll 的绝对路径加载；它内部再按“可执行文件所在目录”找
+    # dxil.dll，所以把两个 DLL 一并放到 ffx_sc.exe 旁边（构建树里，随 ffx_sc 更新）。
+    add_custom_command(TARGET ffx_sc POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${_rhine_ffx_dxc_dll}" "$<TARGET_FILE_DIR:ffx_sc>"
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+                "${RHINE_DXC_OUTPUT_DIR}/dxil.dll" "$<TARGET_FILE_DIR:ffx_sc>"
+        VERBATIM)
+    add_dependencies(ffx_sc rhine_dxc)
+    # SDK 1.1.4 的 dx12/CMakeLists.txt 只认这些按效果命名的开关：FFX_FSR1、FFX_FSR2、
+    # FFX_FSR3UPSCALER、FFX_FI、FFX_OF……（FFX_ALL 是它们的并集）。FFX_FSR / FFX_FSR3
+    # 是它不认识的名字，写了等于什么都没开。而 shader blob 访问器
+    # （ffx_*_shaderblobs.cpp）和 CMakeShaders*.txt 全挂在这些开关上：一个都不开的话
+    # 后端仍然编得过，但 FSR3 上下文创建时找不到 permutation blob，运行期必然失败。
+    set(FFX_FSR3UPSCALER ON)
+    set(FFX_FI ON)
+    set(FFX_OF ON)
+    set(FFX_ALL OFF)
+    set(FFX_BUILD_AS_DLL OFF)
+    set(SHADERS "")
+    if(CMAKE_GENERATOR STREQUAL "Ninja")
+        set(USE_DEPFILE TRUE)
+    else()
+        set(USE_DEPFILE FALSE)
+    endif()
+    # 置换头由我们自己的 ffx_sc 在构建时生成，工具是刚编出来的，不存在“缺失”这种
+    # 状态：真出问题会在构建时以 ExternalProject / 编译错误的形式暴露，而不是悄悄关掉
+    # DX12 —— 关掉之后运行期 ffxFsr3UpscalerContextCreate 必然失败，更难查。
+    set(FFX_AUTO_COMPILE_SHADERS ON)
+
+    # The SDK's DX12 target links `pixlib` from the Cauldron framework, which we
+    # do not build; an empty interface target keeps the backend linkable.
+    if(NOT TARGET pixlib)
+        add_library(pixlib INTERFACE)
+    endif()
+    set(_rhine_ffx_saved_module_path "${CMAKE_MODULE_PATH}")
+    list(APPEND CMAKE_MODULE_PATH "${FFX_SRC_BACKENDS_PATH}/dx12")
+    add_subdirectory("${FFX_SRC_BACKENDS_PATH}/dx12"
+                     "${CMAKE_CURRENT_BINARY_DIR}/fidelityfx/dx12")
+    set(CMAKE_MODULE_PATH "${_rhine_ffx_saved_module_path}")
+    # target 名带 FFX_PLATFORM_NAME（x64）。按同一个变量取名，SDK 改名时会在这里
+    # 报出来，而不是留下一个指向不存在目标的 ALIAS。
+    if(TARGET ffx_backend_dx12_${FFX_PLATFORM_NAME})
+        # 置换头由 ffx_shader_permutations_dx12 这个 custom target 生成，它和后端
+        # target 之间只有“后端依赖它”这一条边，没有“它依赖工具”的边。不显式排到
+        # ffx_sc/rhine_dxc 之后，并行构建会先跑着色器编译、再等工具出现，直接失败。
+        if(TARGET ffx_shader_permutations_dx12)
+            add_dependencies(ffx_shader_permutations_dx12 rhine_dxc ffx_sc)
+        endif()
+        add_library(FidelityFX::backend_dx12 ALIAS ffx_backend_dx12_${FFX_PLATFORM_NAME})
+        set(RHINE_FFX_DX12_AVAILABLE TRUE)
+        message(STATUS "FidelityFX: DX12 backend enabled (ffx_backend_dx12_${FFX_PLATFORM_NAME})")
+    else()
+        message(WARNING
+            "FidelityFX: ffx_backend_dx12_${FFX_PLATFORM_NAME} 没有被生成，DX12 后端不可用")
+    endif()
+else()
+    message(STATUS "FidelityFX: DX12 backend skipped (Windows-only)")
+endif()
+
+# ---------------------------------------------------------------------------
+# Aggregate target for the eventual FSR3 runtime wiring.
+# ---------------------------------------------------------------------------
+
+add_library(rhine_fidelityfx_sdk INTERFACE)
+add_library(FidelityFX::SDK ALIAS rhine_fidelityfx_sdk)
+target_link_libraries(
+    rhine_fidelityfx_sdk
+    INTERFACE FidelityFX::fsr3upscaler
+              FidelityFX::frameinterpolation
+              FidelityFX::opticalflow)
+if(TARGET FidelityFX::backend_vk)
+    target_link_libraries(rhine_fidelityfx_sdk INTERFACE FidelityFX::backend_vk)
+endif()
+if(TARGET FidelityFX::backend_dx12)
+    target_link_libraries(rhine_fidelityfx_sdk INTERFACE FidelityFX::backend_dx12)
+endif()
+target_include_directories(rhine_fidelityfx_sdk INTERFACE "${RHINE_FFX_SDK_DIR}/sdk/include")
+# Consumers of the aggregate target must see the same context layout as the SDK
+# translation units, so the override copy comes first here as well.
+if(NOT MSVC)
+    target_include_directories(rhine_fidelityfx_sdk BEFORE INTERFACE "${RHINE_FFX_OVERRIDE_INCLUDE}")
+endif()
+if(NOT MSVC)
+    target_compile_definitions(rhine_fidelityfx_sdk INTERFACE FFX_GCC)
+    # ffx_types.h 只用 <stdint.h> 却引用 size_t/wchar_t；让消费方无需先手工包含。
+    # 必须写成单个 SHELL: 条目：target_compile_options 会去掉重复的 -include，
+    # 拆成两个参数时会被压成 `-include cstddef cwchar`，cwchar 就成了输入文件。
+    target_compile_options(rhine_fidelityfx_sdk INTERFACE "SHELL:-include cstddef -include cwchar")
+endif()
+
+set(RHINE_FFX_FSR3_AVAILABLE TRUE)
+
+# ---------------------------------------------------------------------------
+# FSR1 reference sources + MIT license distribution.
+# ---------------------------------------------------------------------------
+
+if(EXISTS "${RHINE_FFX_FSR_DIR}/ffx-fsr/ffx_fsr1.h")
+    add_library(rhine_fidelityfx_fsr1_reference INTERFACE)
+    add_library(FidelityFX::fsr1_reference ALIAS rhine_fidelityfx_fsr1_reference)
+    target_sources(
+        rhine_fidelityfx_fsr1_reference
+        INTERFACE "${RHINE_FFX_FSR_DIR}/ffx-fsr/ffx_a.h"
+                  "${RHINE_FFX_FSR_DIR}/ffx-fsr/ffx_fsr1.h")
+    install(
+        FILES "${RHINE_FFX_FSR_DIR}/ffx-fsr/ffx_a.h"
+              "${RHINE_FFX_FSR_DIR}/ffx-fsr/ffx_fsr1.h"
+        DESTINATION share/rhine/reference/fsr1)
+endif()
+
+# MIT requires the copyright notice to travel with binary distributions.
+install(
+    FILES "${RHINE_FFX_SDK_DIR}/LICENSE.txt"
+    DESTINATION share/rhine/licenses
+    RENAME FidelityFX-SDK-LICENSE.txt)
+if(EXISTS "${RHINE_FFX_FSR_DIR}/license.txt")
+    install(
+        FILES "${RHINE_FFX_FSR_DIR}/license.txt"
+        DESTINATION share/rhine/licenses
+        RENAME FidelityFX-FSR-LICENSE.txt)
+endif()
+
+message(
+    STATUS
+        "FidelityFX: FSR3 components=ON vk=${RHINE_FFX_VK_AVAILABLE} dx12=${RHINE_FFX_DX12_AVAILABLE} shader_blobs=${RHINE_FFX_SHADER_BLOBS_AVAILABLE}"
+)

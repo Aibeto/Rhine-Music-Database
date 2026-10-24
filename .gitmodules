@@ -1,0 +1,44 @@
+# AMD FidelityFX SDK（FSR1 + FSR3.1，含 Vulkan 后端）。MIT 许可。
+#
+# 说明：git 只把 URL 记录在 .gitmodules，子模块的实际版本由索引里的 gitlink 提交对象
+# 决定。前三项已登记为 gitlink；glslang 内部的 spirv-tools / spirv-headers 无法在
+# submodule 工作树内再嵌套 gitlink，因此以 pinned-commit 键记录，克隆后按下面两节
+# 手工检出对应版本。cmake/FidelityFX.cmake 在配置时会校验 pinned-commit 并给出警告。
+#
+# 克隆时若直连 github.com 不通，可在地址前加加速站前缀：
+#   git -c url."https://v6.gh-proxy.org/https://github.com/".insteadOf="https://github.com/" clone ...
+# insteadOf 只在传输时改写，克隆下来的 origin 仍是原始地址，无需事后修改。
+[submodule "FidelityFX-SDK"]
+	path = FidelityFX-SDK
+	url = https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK.git
+	branch = v1.1.4
+	pinned-commit = c6efa6bf7f2027b3ec94f28578bb5965eabb9e55
+
+[submodule "third_party/dxc"]
+	path = third_party/dxc
+	url = https://github.com/microsoft/DirectXShaderCompiler.git
+	branch = main
+	pinned-commit = 1527671533a955c40a7e43a68f767fde734c4cb5
+
+# glslang 是构建期工具依赖：FidelityFX 的 Vulkan 后端把 GLSL 编译成 SPIR-V，而 SDK 只带
+# Windows 版 glslangValidator.exe。Rhine 不使用预编译二进制，因此从源码构建，
+# 见 cmake/Glslang.cmake。
+[submodule "third_party/glslang"]
+	path = third_party/glslang
+	url = https://github.com/KhronosGroup/glslang.git
+	branch = 16.6.0
+	pinned-commit = e1b562a8bed273a02f30b59b66a5d499793cede5
+
+# glslang 16.x 不再使用 git submodule：依赖由 third_party/glslang/known_good.json 固定，
+# 需手工克隆到 External/ 下。以下两项同样按 pinned-commit 记录版本。
+# SPIRV-Tools 必需而非可选：ffx_shader_compiler 给 glslang 传 -Os，SPIR-V 优化实现在
+# SPIRV-Tools 里。googletest 不需要（测试关闭）。
+[submodule "third_party/glslang/External/spirv-tools"]
+	path = third_party/glslang/External/spirv-tools
+	url = https://github.com/KhronosGroup/SPIRV-Tools.git
+	pinned-commit = ef96ed763b43b59b33b31b362f09a02b729fa1c9
+
+[submodule "third_party/glslang/External/spirv-tools/external/spirv-headers"]
+	path = third_party/glslang/External/spirv-tools/external/spirv-headers
+	url = https://github.com/KhronosGroup/SPIRV-Headers.git
+	pinned-commit = 496543121ce6419f23d6fa5d7194ba66c36212d2
