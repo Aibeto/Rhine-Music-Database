@@ -203,6 +203,23 @@ function(rhine_dxc_build out_exe out_dxcompiler)
         "-DCLANG_ENABLE_CLANGD=OFF"
         "-DCLANG_INCLUDE_TESTS=OFF"
         "-DLIBCLANG_BUILD_STATIC=ON"
+        # 不在构建里重生成写回源树的 hctgen 产物（HlslIntrinsicOp.h、DxilConstants.h、
+        # DxilInstructions.h、DxilSigPoint.inl、DxilCounters.h 等 7 个）。
+        #
+        # 这些文件在 dxc 仓库里本来就是「生成 + clang-format 格式化后提交」的产物，
+        # 而 HCT.cmake 每次构建都会重跑一遍 hctgen、用本机的 clang-format 重新格式化，
+        # 再 compare_files 与源树里的版本逐字节比对。clang-format 不同版本对同一份
+        # 代码的排版并不完全一致（我们源树里那批是某个特定版本排的），所以只要 runner
+        # 上装的 clang-format 版本不同，这 5 个校验就必然失败：
+        #   FAILED: include/dxc/DXIL/tmp/DxilConstants.h.stamp
+        # 且完全没有编译错误可看。
+        #
+        # 我们只需要 dxc 能编出来，不需要校验这些生成的源码是否与 hctdb 同步；
+        # 跳过重生成即可，源树里的文件已经是可用版本。
+        # 注意这个开关只影响「写回源树」的那几个（HCT.cmake 里的条件是
+        # `HLSL_DISABLE_SOURCE_GENERATION AND NOT ARG_BUILD_DIR`），带 BUILD_DIR 的
+        # 6 个仍会正常生成到构建目录，不会缺产物。
+        "-DHLSL_DISABLE_SOURCE_GENERATION=ON"
         # 见上面的行尾探测：显式指定，避免流程依赖 git 的 core.autocrlf 探测。
         "${_rhine_dxc_eol_arg}")
 
