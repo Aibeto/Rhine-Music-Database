@@ -444,7 +444,34 @@ function(_rhine_ffx_prepare_swapchain target sdk_dir glslang_executable)
         get_filename_component(name "${file}" NAME)
         list(FIND generated_headers "${name}" generated_index)
         if(generated_index EQUAL -1)
-            configure_file("${file}" "${stage}/${name}" COPYONLY)
+            # 交换链源码在 v1.1.4 里只随 Windows SDK 分发，上游从未在 MSVC 上编译过这个文件
+            # （此前 Windows 构建根本不启用 Vulkan 后端），因此有两处不合规写法需要改写。
+            file(READ "${file}" swapchain_contents)
+            # (1) waitForSemaphoreValue 的 waitCallback 形参是非 const wchar_t*，
+            #     第 338 行却传字符串字面量；MSVC 的 /Zc:strictStrings 直接报 C2664。
+            #     改用可写缓冲区承载名字：辅助函数插在 waitForSemaphoreValue 定义之前。
+            string(REPLACE "bool waitForSemaphoreValue(VkDevice device,"
+                           "// Rhine: 提供可写宽字符缓冲区，匹配 FfxWaitCallbackFunc 的非 const 形参。\nstatic wchar_t* rhineFenceName()\n{\n    static wchar_t name[] = L\"FenceName\";\n    return name;\n}\n\nbool waitForSemaphoreValue(VkDevice device,"
+                           swapchain_contents "${swapchain_contents}")
+            string(REPLACE "waitCallback(L\"FenceName\", value);"
+                           "waitCallback(rhineFenceName(), value);"
+                           swapchain_contents "${swapchain_contents}")
+            # (2) submit 的两个重载都要求 SubmissionSemaphores& 非 const 左值引用，
+            #     而这两处传的是临时对象 SubmissionSemaphores()——这是标准 C++ 就禁止的
+            #     写法（GCC/Clang 同样报错），在各自块内起名即成为合法的左值。
+            foreach(indent "                    " "        ")
+                string(REPLACE "if (toWait.count > 0)\n${indent}{\n"
+                               "if (toWait.count > 0)\n${indent}{\n${indent}    SubmissionSemaphores noSignal;\n"
+                               swapchain_contents "${swapchain_contents}")
+            endforeach()
+            string(REPLACE "submit(VK_NULL_HANDLE, toWait, SubmissionSemaphores())"
+                           "submit(VK_NULL_HANDLE, toWait, noSignal)"
+                           swapchain_contents "${swapchain_contents}")
+            if(swapchain_contents MATCHES "waitCallback\\(L\"FenceName\"" OR
+               swapchain_contents MATCHES "SubmissionSemaphores\\(\\)\\)")
+                message(FATAL_ERROR "FidelityFX: could not rewrite swapchain source ${file}")
+            endif()
+            file(WRITE "${stage}/${name}" "${swapchain_contents}")
         endif()
         get_filename_component(extension "${file}" EXT)
         if(extension STREQUAL ".cpp")
