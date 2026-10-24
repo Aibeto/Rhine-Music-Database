@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <numeric>
+#include <vector>
 
 namespace {
 double lerp(double from, double to, double amount) {
@@ -251,6 +253,49 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
         visibleMatrices.append(matrix.bytes());
         const auto theme = float(m_theme.sample(cell, time));
         themes.append(reinterpret_cast<const char *>(&theme), sizeof(theme));
+    }
+    // 不透明实例按相机距离前到后重排：early-z 能提前拒绝被遮挡片元，
+    // 避免 251 层卡片把昂贵的表面着色重复执行十余次。顺序不影响不透明结果。
+    if (m_drawnCells.size() > 1) {
+        std::vector<int> order(size_t(m_drawnCells.size()));
+        std::iota(order.begin(), order.end(), 0);
+        const auto distance = [&](int index) {
+            const auto &value = m_drawnMatrices[index].values;
+            const auto dx = value[12] - m_eye.x;
+            const auto dy = value[13] - m_eye.y;
+            const auto dz = value[14] - m_eye.z;
+            return dx * dx + dy * dy + dz * dz;
+        };
+        std::stable_sort(order.begin(), order.end(),
+                         [&](int left, int right) { return distance(left) < distance(right); });
+        // 视角与批次不变时顺序已经是从近到远，跳过重建，静止画面下每帧零分配。
+        bool reordered = false;
+        for (size_t index = 0; index < order.size(); ++index) {
+            if (order[index] != int(index)) {
+                reordered = true;
+                break;
+            }
+        }
+        if (reordered) {
+            QVector<Cell> cells;
+            QVector<Matrix> matrices;
+            QByteArray sortedMatrices;
+            QByteArray sortedThemes;
+            cells.reserve(m_drawnCells.size());
+            matrices.reserve(m_drawnMatrices.size());
+            sortedMatrices.reserve(visibleMatrices.size());
+            sortedThemes.reserve(themes.size());
+            for (const auto index : order) {
+                cells.append(m_drawnCells[index]);
+                matrices.append(m_drawnMatrices[index]);
+                sortedMatrices.append(m_drawnMatrices[index].bytes());
+                sortedThemes.append(themes.constData() + index * int(sizeof(float)), sizeof(float));
+            }
+            m_drawnCells = cells;
+            m_drawnMatrices = matrices;
+            visibleMatrices = sortedMatrices;
+            themes = sortedThemes;
+        }
     }
     if (themes.size() > m_themeStorage.size()) {
         m_instanceCapacity = std::max(int(themes.size() / 4), m_instanceCapacity * 2);

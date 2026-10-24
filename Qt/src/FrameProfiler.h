@@ -82,6 +82,7 @@ class FrameProfiler : public QObject {
     QList<FrameEvent> m_trace;
     quint64 m_omittedTraceFrames = 0;
     QString m_adapterName;
+    QString m_backendName;
     std::atomic<bool> m_capture{false};
     QString m_headline = QStringLiteral("等待采样");
     QString m_details;

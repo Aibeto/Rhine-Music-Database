@@ -21,6 +21,7 @@ struct Surface {
     vec4 extra;
     vec4 flags;
     vec4 darkColor;
+    vec4 atlas;
 };
 struct Out {
     vec4 position;
@@ -63,7 +64,6 @@ vec3 aces(vec3 c, float exposure) {
     vec3 b = c * (.983729 * c + .4329510) + .238081;
     return saturate(acesOutput * (a / b));
 }
-float getFace(vec3 d) {
 /** AO 的 4x4 盒式模糊：4 次双线性采样等价于 16 次点采样，半径按 AO 自身纹素算。 */
 float aoBlurred(sampler2D ao, vec2 uv) {
     vec2 px = 1.0 / vec2(textureSize(ao, 0).x, textureSize(ao, 0).y);
@@ -92,6 +92,7 @@ vec3 octDecode(vec2 e) {
     }
     return normalize(n);
 }
+float getFace(vec3 d) {
     vec3 a = abs(d);
     if (a.x > a.z) {
         return a.x > a.y ? (d.x > 0 ? 0 : 3) : (d.y > 0 ? 1 : 4);

@@ -292,6 +292,8 @@ QJsonObject NativeViewer::frame(QJsonObject base, const SceneAppearance &appeara
                 part["partIndex"] = templateParts.size();
                 part["mesh"] = label ? -1 : mesh;
                 part["asset"] = label ? "cassette" : "assembly";
+                // 封面纸片在装配视图里会转到背面：双面渲染，背面由着色器画成素面封底。
+                part["side"] = label ? 2 : part["side"].toInt();
                 part["castShadow"] = false;
                 auto position = label ? Vector{-1.36, 3.04, 0.255} : Vector{};
                 position.z += depth * m_spread.value;

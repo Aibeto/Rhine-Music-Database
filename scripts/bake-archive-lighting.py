@@ -7,8 +7,10 @@ import struct
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / "output/resources"
-FACE_SIZE = 96
-FIELD_SIZE = 64
+# 图集分辨率直接决定大面板上的采样精度：查看封面页的整块面板会放大单个面片，
+# 96×96 时柔和过渡会被放大成块状色斑，这里按 4 倍精度烘焙。
+FACE_SIZE = 384
+FIELD_SIZE = 128
 HEIGHT_SLICES = 8
 NORMALS = [(1, 0, 0), (0, 1, 0), (0, 0, 1), (-1, 0, 0), (0, -1, 0), (0, 0, -1)]
 EMITTERS = [
@@ -125,7 +127,7 @@ def bake_light_field():
 
 def bake_normal_response():
     """预积分倒角朝向的明暗与柔和高光，避免运行时计算 BRDF 或采样环境光。"""
-    size = 64
+    size = 128
     pixels = bytearray()
     for row in range(size * 2):
         dark = row >= size

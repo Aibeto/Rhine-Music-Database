@@ -53,6 +53,9 @@ chmod +x 'RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage'
 macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BACKEND=windows` 可临时对照原生后端。
 各平台播放都会跟随系统默认输出设备
 
+图形后端默认在 Windows 与 Linux 上优先使用 Vulkan，不可用时回退平台默认（Windows 为 Direct3D 12，其余为 OpenGL）；macOS 固定使用 Metal。
+`RHINE_GRAPHICS=vulkan|opengl|d3d12|auto` 可手动指定（`d3d12` 仅 Windows），`QSG_RHI_BACKEND` 的优先级更高，便于做后端对照。
+
 **面板内播放支持网易云、QQ 和酷狗音乐返回的可用音源。网易云官方客户端入口需要安装并注册网易云音乐；QQ 提供来源网页入口，酷狗提供官方网站入口。**
 
 ## 功能列表
@@ -177,15 +180,24 @@ Windows 的 `npm run share` 使用 [Inno Setup 6.3+ 或 7](https://jrsoftware.or
 
 ### Linux x86_64（AppImage）
 
-安装 Qt 6.12.0 开发包（含 Shader Tools、Multimedia 与私有头文件）、CMake、Ninja、GCC、Python 3 和 Node.js 22；若发行版尚未提供此版本，使用官方 desktop kit 并设置 `QT_ROOT`。Qt 由系统提供时 `QT_ROOT` 保持默认的 `/usr` 即可：
+安装 Qt 6.12.0 开发包（含 Shader Tools、Multimedia 与私有头文件）、CMake、Ninja、GCC、Python 3 和 Node.js ；若发行版尚未提供此版本，使用官方 desktop kit 并设置 `QT_ROOT`。Qt 由系统提供时 `QT_ROOT` 保持默认的 `/usr` 即可：
 
 ```sh
-export RHINE_NODE_BINARY="/absolute/path/to/node-v22.14.0-linux-x64/bin/node"
-export RHINE_NODE_LICENSE="/absolute/path/to/node-v22.14.0-linux-x64/LICENSE"
+curl -LO https://nodejs.org/dist/v26.11.1/node-v26.11.1-linux-x64.tar.xz
+mkdir -p output/node
+tar -xJf node-v26.11.1-linux-x64.tar.xz -C output/node
+# rm ./node-v26.11.1-linux-x64.tar.xz
 npm ci
-npm run build
-npm test
-npm run share
+env RHINE_NODE_BINARY=$PWD/output/node/node-v26.11.1-linux-x64/bin/node \
+    RHINE_NODE_LICENSE=$PWD/output/node/node-v26.11.1-linux-x64/LICENSE \
+    NPM_CONFIG_ALLOW_REMOTE=all npm run build
+
+# 增量构建测试
+cmake --build output/qt-build -j 8
+RHINE_RESOURCES=$PWD/output/resources ./output/qt-build/RhineMusicDatabase 2>&1
+
+# 关闭抗锯齿和超分辨率启动
+RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineMusicDatabase
 ```
 
 `npm run build` 先按依赖闭包收集 Qt 库、平台插件、图像与 TLS 插件和 QML 模块到 `output/RhineMusicDatabase.AppDir`，再用 `appimagetool` 生成 `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`。`appimagetool` 需自行安装并出现在 `PATH` 中，也可用 `APPIMAGE_TOOL` 指定路径；没有 FUSE 时脚本自动改用 `--appimage-extract-and-run`。

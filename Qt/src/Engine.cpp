@@ -12,6 +12,23 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+namespace {
+// Halton(2,3) 低差异序列：8 个相位平移到 [-0.5, 0.5) 像素，覆盖 ±0.5 像素抖动范围。
+QPointF haltonJitter(int phase) {
+    const auto halton = [](int index, int base) {
+        double fraction = 1.0;
+        double result = 0.0;
+        while (index > 0) {
+            fraction /= base;
+            result += fraction * (index % base);
+            index /= base;
+        }
+        return result;
+    };
+    const int index = (phase % 8) + 1;
+    return {halton(index, 2) - .5, halton(index, 3) - .5};
+}
+} // namespace
 bool runNativeHostChecks(const QString &root);
 bool runNativeMusicChecks(const QString &root);
 bool runGpuReferenceCheck(const QImage &expected, const QImage &actual);
@@ -19,6 +36,8 @@ bool runGpuReferenceCheck(const QImage &expected, const QImage &actual);
 /** 建立纯原生音乐、HUD 和场景状态；Qt 定时器只在输入或动画尚未收束时运行。 */
 Engine::Engine(QString path, bool offline, QObject *parent)
     : QObject(parent), host(path, offline), scene(path), m_glyphs(path) {
+    // FSR3 抖动默认关闭；环境变量在进程启动时读取一次，运行期不再变化。
+    m_jitterEnabled = qEnvironmentVariableIntValue("RHINE_JITTER") == 1;
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
     app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
     connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
@@ -202,6 +221,20 @@ void Engine::wake(bool input) {
         m_lastTick = now;
         timer.start(16);
     }
+}
+void Engine::resetTemporalState() {
+    // FSR 重置：抖动立即归零并回到第 0 相位；下一帧带 temporalReset 键，
+    // 渲染器据此清空上一帧模型矩阵，速度目标输出 0，避免时间累积残影。
+    m_jitterPhase = 0;
+    m_jitterOffset = {};
+    m_temporalResetPending = true;
+    m_frame["temporalReset"] = true;
+    m_frame.remove("jitter");
+    // 重置必须立即产生一帧：否则场景休眠时渲染器收不到 temporalReset，历史会留到下次唤醒。
+    m_sceneSleeping = false;
+    m_stableFrames = 0;
+    wake(false);
+    notifySceneRenderers(true);
 }
 void Engine::setVisible(bool value) {
     if (m_visible == value) {
@@ -505,8 +538,26 @@ void Engine::step(double time) {
     m_frame = scene.frame;
     m_frame["originalActorBlend"] = scene.originalActorBlend();
     auto signature = m_frame;
-    for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor", "originalActorBlend"}) {
+    for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor", "originalActorBlend",
+                            "jitter", "temporalReset"}) {
         signature.remove(key);
+    }
+    // FSR3 亚像素抖动：默认关闭；关闭时 frame 里没有 jitter 键，渲染路径与之前完全一致。
+    // 相位只在真正产生帧的 step 里推进，按 8 帧循环。
+    // 但时间性抗锯齿（FSR3/TAA）本身就是靠相位差累积历史，没有抖动它们只会反复混合
+    // 同一张图、等于白做，所以这两者开启时无条件打开。AA 模式每帧读环境变量，切换免重启。
+    const auto aaMode = qEnvironmentVariable("RHINE_AA_MODE");
+    const bool temporal = aaMode == "fsr3" || aaMode == "taa";
+    if (m_jitterEnabled || temporal) {
+        m_jitterOffset = haltonJitter(m_jitterPhase);
+        m_jitterPhase = (m_jitterPhase + 1) % 8;
+        m_frame["jitter"] = QJsonArray{m_jitterOffset.x(), m_jitterOffset.y()};
+    } else {
+        m_jitterOffset = {};
+    }
+    if (m_temporalResetPending) {
+        m_frame["temporalReset"] = true;
+        m_temporalResetPending = false;
     }
     bool stable =
         equivalent(signature, m_sceneSignature) && m_previousBuffers.size() == scene.drawBuffers.size();
@@ -556,9 +607,11 @@ void Engine::step(double time) {
     m_coverRevision = coverRevision;
     m_current = current;
     m_cover = object["cover"].toString();
+    // 图片缓存只在 GUI 线程读取，渲染线程通过 cover() 拿这份副本。
+    m_coverImage = host.image(m_cover);
     // 图形设备在后台可销毁；仅保存当前与可见归位卡片的图片，供恢复时重建纹理。
     const auto musicKey = current["key"].toString("empty");
-    m_musicTextures[musicKey] = {current, host.image(m_cover)};
+    m_musicTextures[musicKey] = {current, m_coverImage};
     QSet<QString> retainedKeys{musicKey};
     for (const auto &key : m_frame["returningMusicKeys"].toArray()) {
         retainedKeys.insert(key.toString());
@@ -701,6 +754,7 @@ int Engine::renderFixtures(QString source, QString output) {
         m_commands = app->hud.commands;
         m_current = app->music.current;
         m_cover.clear();
+        m_coverImage = QImage();
         const auto folder = output + "/" + fixture["name"].toString();
         snapshot(folder);
         QFile hitsFile(folder + "/qt-hits.json");

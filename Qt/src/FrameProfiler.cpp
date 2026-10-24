@@ -21,6 +21,29 @@
 #include <QJsonArray>
 #include <QQuickWindow>
 
+namespace {
+/** 当前场景图使用的图形 API 名；性能面板、设置页与环境诊断共用同一份显示文本。 */
+QString graphicsApiName(QQuickWindow *window) {
+    if (!window || !window->rendererInterface()) {
+        return {};
+    }
+    switch (window->rendererInterface()->graphicsApi()) {
+    case QSGRendererInterface::Metal:
+        return QStringLiteral("Metal");
+    case QSGRendererInterface::Direct3D12:
+        return QStringLiteral("Direct3D12");
+    case QSGRendererInterface::Vulkan:
+        return QStringLiteral("Vulkan");
+    case QSGRendererInterface::OpenGL:
+        return QStringLiteral("OpenGL");
+    case QSGRendererInterface::Software:
+        return QStringLiteral("Software");
+    default:
+        return {};
+    }
+}
+} // namespace
+
 /**
  * 复用原生计时与 Qt 渲染信号；关闭面板且没有录制时不运行采样定时器。
  * 命令行 CSV 保留原格式，用户诊断只记录白名单性能数值，不采集业务内容。
@@ -85,6 +108,7 @@ void FrameProfiler::attach(QQuickWindow *window) {
                     if (rhi) {
                         m_adapterName = QString::fromUtf8(rhi->driverInfo().deviceName);
                     }
+                    m_backendName = graphicsApiName(m_window);
                 }
             }
         },
@@ -275,6 +299,7 @@ void FrameProfiler::sample() {
     {
         QMutexLocker lock(&m_gapMutex);
         m_metrics.insert("gpuAdapter", m_adapterName);
+        m_metrics.insert("gpuBackend", m_backendName);
     }
     m_previousSampleNs = now;
     m_previousCpuNs = process.cpuNanoseconds;
@@ -345,37 +370,98 @@ void FrameProfiler::formatMetrics() {
                      .arg(audio.contains("networkReachability")
                               ? QString::number(audio.value("networkReachability").toInt())
                               : QStringLiteral("未采集"));
+    // 当前渲染配置：后端取自窗口实际使用的图形 API（不是启动时的选择，回退后也能看出来），
+    // 其余取自运行时环境变量——RhiScene 读的是同一份值，所以这里显示的就是真正生效的配置。
     const auto adapter = m_metrics.value("gpuAdapter").toString();
-    if (!adapter.isEmpty()) {
-        m_details.prepend(QStringLiteral("GPU 设备  %1\n").arg(adapter));
+    auto backend = m_metrics.value("gpuBackend").toString();
+    if (backend.isEmpty()) {
+        backend = graphicsApiName(m_window);
     }
+    if (backend.isEmpty()) {
+        backend = QStringLiteral("未知");
+    }
+    const auto aaMode = qEnvironmentVariable("RHINE_AA_MODE").toLower();
+    const auto aaName = [&aaMode]() -> QString {
+        if (aaMode.isEmpty() || aaMode == "off") {
+            return QStringLiteral("关闭");
+        }
+        if (aaMode == "fxaa") {
+            return QStringLiteral("FXAA");
+        }
+        if (aaMode == "ssaa") {
+            return QStringLiteral("SSAA 超采样");
+        }
+        if (aaMode == "msaa") {
+            return QStringLiteral("MSAA 多重采样");
+        }
+        if (aaMode == "taa") {
+            return QStringLiteral("TAA 时间抗锯齿");
+        }
+        // 设置页只有一个 FSR 选项；实际跑的是 FSR3 计算后端还是 EASU/RCAS 片元实现，
+        // 由下面附加的引擎标记区分，用户仍然能一眼看出走的是哪一代。
+        if (aaMode == "fsr" || aaMode == "fsr1" || aaMode == "fsr3") {
+            return QStringLiteral("FSR");
+        }
+        return aaMode;
+    }();
+    QString aaLine = aaName;
+    if (aaMode == "msaa") {
+        // 与 RhiScene::msaaSampleCount() 保持同一套默认值：未设置时目标 4x，
+        // 实际采样数由设备能力下取（这里只显示目标值，实际值要看画面）。
+        const int configured = qEnvironmentVariableIntValue("RHINE_MSAA");
+        const int wanted = configured > 1 ? qBound(2, configured, 8) : 4;
+        aaLine += QStringLiteral(" %1x").arg(wanted);
+        if (configured <= 1) {
+            aaLine += QStringLiteral("（自动）");
+        }
+    } else if (aaMode == "ssaa") {
+        aaLine += QStringLiteral(" · 倍率 %1%").arg(qEnvironmentVariableIntValue("RHINE_AA_SCALE"));
+    } else if (aaMode == "fsr" || aaMode == "fsr1" || aaMode == "fsr3") {
+        // 引擎由渲染器写入：fsr3 = FFX 计算后端，shader = EASU/RCAS 片元实现。
+        const auto engine = qEnvironmentVariable("RHINE_FSR_ENGINE");
+        aaLine += engine == "fsr3" ? QStringLiteral("（FSR3）")
+                                   : QStringLiteral("（FSR1 EASU/RCAS）");
+        // 档位和锐化都直接改变画面，放进监视窗方便和眼睛看到的对照。
+        const auto quality = qEnvironmentVariable("RHINE_FSR_QUALITY");
+        QString qualityName = QStringLiteral("原生 AA");
+        double divisor = 1.;
+        if (quality == "super") {
+            qualityName = QStringLiteral("超级性能");
+            divisor = 3.;
+        } else if (quality == "performance") {
+            qualityName = QStringLiteral("性能");
+            divisor = 2.;
+        } else if (quality == "balanced") {
+            qualityName = QStringLiteral("平衡");
+            divisor = 1.7;
+        } else if (quality == "quality") {
+            qualityName = QStringLiteral("高质量");
+            divisor = 1.5;
+        }
+        aaLine += QStringLiteral(" · %1 %2x").arg(qualityName).arg(divisor, 0, 'g', 3);
+        const int sharpness = qEnvironmentVariableIsEmpty("RHINE_FSR_SHARPNESS")
+                                  ? 50
+                                  : qEnvironmentVariableIntValue("RHINE_FSR_SHARPNESS");
+        aaLine += QStringLiteral(" · 锐化 %1%").arg(sharpness);
+    }
+    const int renderScale =
+        qEnvironmentVariableIsEmpty("RHINE_RENDER_SCALE") ? 100 : qEnvironmentVariableIntValue("RHINE_RENDER_SCALE");
+    const int supersample =
+        qEnvironmentVariableIsEmpty("RHINE_SUPERSAMPLE") ? 1 : qEnvironmentVariableIntValue("RHINE_SUPERSAMPLE");
+    QString renderLine = QStringLiteral("渲染 %1%").arg(renderScale);
+    if (supersample > 1) {
+        renderLine += QStringLiteral(" · 超采样 %1x").arg(supersample);
+    }
+    // 这一行既有抗锯齿也有 FSR 超分，所以叫"画质模式"；与上面"渲染后端"等宽以便对齐。
+    m_details.prepend(QStringLiteral("渲染后端  %1 · GPU 设备  %2\n画质模式  %3 · %4\n")
+                          .arg(backend, adapter.isEmpty() ? QStringLiteral("未知") : adapter, aaLine,
+                               renderLine));
 }
 
 QJsonObject FrameProfiler::environment() const {
-    QString backend = QStringLiteral("unknown");
-    if (m_window) {
-        switch (m_window->rendererInterface()->graphicsApi()) {
-        case QSGRendererInterface::Metal:
-            backend = "Metal";
-            break;
-        case QSGRendererInterface::Direct3D11:
-            backend = "Direct3D11";
-            break;
-        case QSGRendererInterface::Direct3D12:
-            backend = "Direct3D12";
-            break;
-        case QSGRendererInterface::Vulkan:
-            backend = "Vulkan";
-            break;
-        case QSGRendererInterface::OpenGL:
-            backend = "OpenGL";
-            break;
-        case QSGRendererInterface::Software:
-            backend = "Software";
-            break;
-        default:
-            break;
-        }
+    auto backend = graphicsApiName(m_window);
+    if (backend.isEmpty()) {
+        backend = QStringLiteral("unknown");
     }
     return {{"os", QSysInfo::prettyProductName()},
             {"architecture", QSysInfo::currentCpuArchitecture()},
