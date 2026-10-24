@@ -23,9 +23,19 @@
 #include <QTimer>
 #include <cstdio>
 #include <cstring>
-#if QT_CONFIG(vulkan) && !defined(Q_OS_MACOS)
+/* Qt 的 Vulkan 类型只在「Qt 带 Vulkan 特性」且「应用侧能看到 vulkan.h」时声明：
+ *   qvulkaninstance.h:  #if QT_CONFIG(vulkan) || defined(Q_QDOC)
+ *                      #if __has_include(<vulkan/vulkan.h>) || defined(Q_QDOC)
+ *   qrhi_platform.h:    #if (QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>)) || defined(Q_QDOC)
+ * 只判 QT_CONFIG(vulkan) 会在装了 Qt 但没装 Vulkan SDK 的机器上
+ * （如 Windows runner：Qt 自带 Vulkan 特性、系统无 vulkan.h）编译出使用未声明类型的代码，
+ * 表现为 QVulkanInstance 不完整类型与 VK_SUCCESS 未定义。守卫必须同时覆盖两半。 */
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_MACOS)
 #include <QVulkanFunctions>
 #include <QVulkanInstance>
+#define RHINE_HAVE_VULKAN_TYPES 1
+#else
+#define RHINE_HAVE_VULKAN_TYPES 0
 #endif
 int makeIcon(const QString &directory);
 int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, FrameProfiler &profiler);
@@ -38,7 +48,7 @@ void initializeWindowsGraphics();
  * Qt 的 QSG_RHI_BACKEND 没有后端回退列表，强制指定失败会直接终止，因此必须先探测。
  */
 static bool vulkanDeviceAvailable() {
-#if QT_CONFIG(vulkan)
+#if RHINE_HAVE_VULKAN_TYPES
     QVulkanInstance probe;
     probe.setApiVersion(QVersionNumber(1, 0));
     if (!probe.create()) {

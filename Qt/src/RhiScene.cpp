@@ -10,11 +10,17 @@
 #include <QMatrix4x4>
 #include <QOffscreenSurface>
 #include <QPainter>
-// Qt 6.8+ 的 qrhi.h 已提供各后端初始化参数，无需引用不存在的后端头文件。
+// Qt 6.8+ 的 qrhi.h 末尾会引入 rhi/qrhi_platform.h，各后端初始化参数由那里声明；
+// 但其中 Vulkan 结构体要求 (QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>))，
+// 只看 Qt 特性会在无 Vulkan SDK 的机器上编译出引用未声明类型的代码（Windows runner 即如此，
+// 报 QVulkanInstance 不完整类型、QRhiVulkanInitParams 与 VK_SUCCESS 未定义）。
 #include <rhi/qrhi.h>
-#if QT_CONFIG(vulkan) && !defined(Q_OS_MACOS)
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_MACOS)
 #include <QVulkanFunctions>
 #include <QVulkanInstance>
+#define RHINE_HAVE_VULKAN_TYPES 1
+#else
+#define RHINE_HAVE_VULKAN_TYPES 0
 #endif
 
 #include <algorithm>
@@ -2016,7 +2022,7 @@ QQuickRhiItemRenderer *RhiScene::createRenderer() {
 QImage renderReference(const QString &root, const QJsonObject &frame, const QJsonObject &item,
                        const QImage &cover, QSize size, const SceneDrawBuffers &buffers, quint64 *drawCalls) {
     // Vulkan 实例与离屏表面都必须比 QRhi 活得久：先声明者后析构。
-#if QT_CONFIG(vulkan) && !defined(Q_OS_MACOS)
+#if RHINE_HAVE_VULKAN_TYPES
     QVulkanInstance vulkan;
     vulkan.setApiVersion(QVersionNumber(1, 0));
     bool vulkanReady = false;
@@ -2031,7 +2037,7 @@ QImage renderReference(const QString &root, const QJsonObject &frame, const QJso
     // 离屏表面先声明，析构顺序才能晚于 QRhi：GL 后端在析构时会切回上下文。
     std::unique_ptr<QOffscreenSurface> surface;
     std::unique_ptr<QRhi> rhi;
-#if QT_CONFIG(vulkan) && !defined(Q_OS_MACOS)
+#if RHINE_HAVE_VULKAN_TYPES
     if (vulkanReady) {
         QRhiVulkanInitParams params;
         params.inst = &vulkan;
