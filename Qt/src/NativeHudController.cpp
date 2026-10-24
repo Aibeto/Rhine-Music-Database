@@ -269,6 +269,12 @@ void NativeHud::playerAction(const QStringList &parts) {
         lyricsMode = false;
     } else if (name == "lyrics-follow") {
         m_lyricsBrowse.reset();
+    } else if (name == "lyrics-offset") {
+        if (modal == "lyrics-offset" && !closing) {
+            closeModal();
+        } else {
+            openModal("lyrics-offset");
+        }
     } else if (name == "lyrics-earlier" || name == "lyrics-later") {
         player.lyrics.adjustOffset(name == "lyrics-earlier" ? 200 : -200);
     } else if (name == "lyrics-reset") {

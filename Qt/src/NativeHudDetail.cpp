@@ -210,7 +210,7 @@ void NativeHud::lyricsPanel(double x, double width) {
     limited(player.current.value("artist").toString(), x, 310, 13, width - 85);
     button("关闭", x + width - 60, 278, 60, 40, "player:lyrics-close", 14);
     if (m_music->isLocal() && player.current.value("provider") == "local") {
-        button("歌词来源 ⌃", x + width - 150, 320, 150, 32, "player:lyrics-sources", 13);
+        button("歌词来源 ⌃", x + 156, 914, 120, 32, "player:lyrics-sources", 13);
     }
     constexpr double top = 360;
     constexpr double bottom = 889;
@@ -319,24 +319,7 @@ void NativeHud::lyricsPanel(double x, double width) {
         }
     }
     restore();
-    button("歌词提前 0.2s", x, 914, 132, 32, "player:lyrics-earlier", 13);
-    button("歌词延后 0.2s", x + 142, 914, 132, 32, "player:lyrics-later", 13);
-    QString offsetLabel = "未校准";
-    if (lyrics.offsetMs != 0) {
-        const auto direction = lyrics.offsetMs > 0 ? "已提前 " : "已延后 ";
-        offsetLabel = QString(direction) + QString::number(std::abs(lyrics.offsetMs) / 1000, 'f', 1) + "s";
-    }
-    text(offsetLabel, x + 284, 922, 12, "regular", 0, muted);
-    if (lyrics.offsetMs != 0) {
-        button("重置", x + 394, 914, 54, 32, "player:lyrics-reset", 13);
-    } else {
-        text("重置", x + 394, 921, 13, "regular", 0, muted);
-    }
-    if (lyrics.offsetMs != lyrics.globalOffsetMs()) {
-        button("全局应用", x + 458, 914, 88, 32, "player:lyrics-apply-global", 13);
-    } else {
-        text("全局应用", x + 458, 921, 13, "regular", 0, muted);
-    }
+    button("歌词偏移 ⌃", x, 914, 144, 32, "player:lyrics-offset", 13);
     button("回到当前句", x + width - 125, 914, 125, 32, "player:lyrics-follow", 13);
 }
 

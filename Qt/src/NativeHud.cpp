@@ -134,8 +134,12 @@ void NativeHud::art(QString key, double x, double y, double size, int count, dou
 
 QRectF NativeHud::modalBounds(double width) const {
     if (modal == "lyrics-source") {
-        // 列表右缘与底部来源按钮对齐，向上展开并保留 8 px 间距。
-        return {width - 428, 674, 232, 232};
+        // 来源菜单
+        return {width * 0.56 + 156, 674, 232, 232};
+    }
+    if (modal == "lyrics-offset") {
+        // 偏移设置
+        return {width * 0.56, 690, 320, 216};
     }
     double modalWidth = std::min(1260.0, width - 100);
     if (modal == "search") {
