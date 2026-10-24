@@ -596,6 +596,9 @@ if(WIN32)
     # 修法：add_subdirectory 之前把这些幽灵路径建成真实文件。它们只是 ninja 的依赖
     # 占位，不是置换头本身（真正的 *_permutations.h 仍由 SDK 的 add_custom_command
     # 生成）。改 SDK 源码会脏化 submodule 工作树，且每次 configure 重写后又会复发。
+
+    # i nocticed github action inf load gif is slower than endfield Rekindled's bpm when fixing windows ci
+    # because th problem is so eh, is like many evils (oh thrers no neuro) so i should fix mang times
     set(_rhine_ffx_dx12_bin "${CMAKE_CURRENT_BINARY_DIR}/fidelityfx/dx12")
     file(MAKE_DIRECTORY "${_rhine_ffx_dx12_bin}")
     set(_rhine_ffx_dx12_ghosts)

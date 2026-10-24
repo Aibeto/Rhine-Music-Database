@@ -26,11 +26,11 @@
 
 构建产物位于：
 
-| 平台    | 程序                                                           |
-| ------- | -------------------------------------------------------------- |
-| macOS   | `output/RHINE MUSIC DATABASE.app`                              |
-| Windows | `output/RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe`       |
-| Linux   | `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`              |
+| 平台    | 程序                                                         |
+| ------- | ------------------------------------------------------------ |
+| macOS   | `output/RHINE MUSIC DATABASE.app`                            |
+| Windows | `output/RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe` |
+| Linux   | `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage` |
 
 **macOS 若提示应用已损坏，需要执行**
 
@@ -136,6 +136,21 @@ macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_
 - [ ] MV 播放
 
 **音质和完整播放取决于账号权限与音源可用性；返回试听时会明确提示。替代音源默认关闭，开启时使用锁定上游的匹配实现，音质由匹配来源决定，失败时可使用官方入口。本项目不提供音乐下载。**
+
+## 图形后端与功能
+
+| Platform | Vulkan | Direct3D 12 | OpenGL | Metal |
+| -------- | ------ | ----------- | ------ | ----- |
+| Windows  | - [x]  | - [x]       | - [ ]  | - [ ] |
+| macOS    | - [ ]  | - [ ]       | - [ ]  | - [x] |
+| Linux    | - [x]  | - [ ]       | - [x]  | - [ ] |
+
+| API         | FXAA  | SSAA  | MSAA  | TAA   | FSR Upscaling              |
+| ----------- | ----- | ----- | ----- | ----- | -------------------------- |
+| Vulkan      | - [x] | - [x] | - [x] | - [x] | EASU + RCAS                |
+| Direct3D 12 | - [x] | - [x] | - [x] | - [x] | EASU + RCAS / TU (default) |
+| OpenGL      | - [x] | - [x] | - [x] | - [x] | EASU + RCAS                |
+| Metal       | - [x] | - [x] | - [x] | - [x] | EASU + RCAS                |
 
 ## 从源码构建
 
@@ -258,7 +273,6 @@ GPU 耗时/占用未采集，同步和提交的 CPU 时间不代表 GPU 执行�
 - **[LyricsKit](https://github.com/MxIris-LyricsX-Project/LyricsKit)**：LRC、YRC、KRC 格式解析移植，
   `MusicBridge/lyrics-format.cjs` 单独采用 MPL-2.0，固定版本与许可随包保留。
 - **[Lyrimuse](https://github.com/Yudaotor/lyrimuse)**：统一时间轴、歌词同步与录音版本匹配思路参考。
-
 
 ## 开源许可
 
