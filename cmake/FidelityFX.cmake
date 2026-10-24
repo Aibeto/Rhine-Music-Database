@@ -584,7 +584,11 @@ if(WIN32)
     set(FFX_API_DX12 ON)
     set(FFX_PLATFORM_NAME x64)
     set(FFX_INCLUDE_PATH "${RHINE_FFX_SDK_DIR}/sdk/include")
-    set(FFX_LIB_PATH "${RHINE_FFX_SDK_DIR}/sdk/include")
+    # 不是 sdk/include：SDK 自己的 sdk/CMakeLists.txt:174 把 FFX_LIB_PATH 定义成
+    # <sdk>/libs，dx12 后端靠 `target_include_directories(... PUBLIC ${FFX_LIB_PATH})`
+    # 才能解析 antilag2/ffx_antilag2_dx12.h 与 pix/pix3.h 这两个头。写成 include
+    # 就会得到 "fatal error C1083: Cannot open include file: 'pix/pix3.h'"。
+    set(FFX_LIB_PATH "${RHINE_FFX_SDK_DIR}/sdk/libs")
     set(FFX_SHARED_PATH "${RHINE_FFX_SDK_DIR}/sdk/src/shared")
     set(FFX_HOST_PATH "${FFX_INCLUDE_PATH}/FidelityFX/host")
     set(FFX_GPU_PATH "${FFX_INCLUDE_PATH}/FidelityFX/gpu")
