@@ -363,6 +363,13 @@ void NativeHud::action(QString value) {
     }
     auto &music = *m_music;
     const auto parts = value.split(':');
+    if (value == "detail:copy") {
+        if (music.current.value("kind") == "song" && (tab == "overview" || tab == "notes")) {
+            // 复制详情
+            m_host->copy(body());
+        }
+        return;
+    }
     if (value == "archive:tab-mode") {
         if (modal.isEmpty() && supportsTrackList()) {
             trackListMode = !trackListMode;

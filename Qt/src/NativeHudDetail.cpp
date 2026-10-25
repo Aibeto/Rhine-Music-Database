@@ -205,6 +205,8 @@ void NativeHud::detail(double width, double opacity) {
         for (int index = 0; index < std::min(3, int(lines.size()) - bodyOffset); ++index) {
             text(lines.at(bodyOffset + index), x, 790 + index * 31, 16);
         }
+        hit(x, 786, usable, std::min(3, int(lines.size()) - bodyOffset) * 31, "detail:copy",
+            "点击复制完整内容");
     }
     if (PlatformFeatures::OfficialPlayback && !music.isLocal()) {
         actionButton(music.provider != "netease" ? music.providerName() + " ↗" : "官方客户端 ↗", x, 910,
