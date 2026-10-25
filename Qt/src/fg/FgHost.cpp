@@ -7,9 +7,22 @@
 #include <QQuickGraphicsDevice>
 #include <QQuickItem>
 #include <QQuickRenderControl>
-#include <QVulkanInstance>
 #include <QQuickRenderTarget>
 #include <QQuickWindow>
+
+/* QVulkanInstance 与 QQuickWindow::setVulkanInstance() 只在「Qt 带 Vulkan 特性」且
+ * 「应用侧能看到 vulkan.h」时存在，Qt 头里的守卫是两半：
+ *   qvulkaninstance.h: #if QT_CONFIG(vulkan) → #if __has_include(<vulkan/vulkan.h>)
+ * 只判其中一半，遇到「Qt 有特性但系统没 SDK」或「Qt 干脆没编 Vulkan」的机器就会编译失败。
+ * macOS 的 Qt 不构建 Vulkan 特性，头文件根本不存在；而 FgHost.cpp 挂在无条件的源列表里，
+ * 少这段守卫 macOS CI 直接停在 `fatal error: 'QVulkanInstance' file not found`。
+ * 条件与 main.cpp:38 / RhiScene.cpp:20 完全一致，避免三处判断分歧。 */
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_MACOS)
+#include <QVulkanInstance>
+#define RHINE_HAVE_VULKAN_TYPES 1
+#else
+#define RHINE_HAVE_VULKAN_TYPES 0
+#endif
 
 namespace {
 /**
@@ -106,12 +119,18 @@ bool FgHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUr
     m_scene.window->setGraphicsDevice(device);
     m_overlay.window->setGraphicsDevice(device);
 
+#if RHINE_HAVE_VULKAN_TYPES
     // QQuickRenderControl::initialize() 在 Vulkan 下强制要求窗口上有 QVulkanInstance
     // （Qt 内部要查实例级扩展/能力），只给 fromRhi(rhi) 是不够的。
     if (vulkanInstance) {
         m_scene.window->setVulkanInstance(vulkanInstance);
         m_overlay.window->setVulkanInstance(vulkanInstance);
     }
+#else
+    // 没有 Vulkan 类型可用时这条路径本来就不成立（FgShell 只在 Vulkan 构建里编）。
+    // 用 Q_UNUSED 标明参数是有意不用的，而不是漏传。
+    Q_UNUSED(vulkanInstance);
+#endif
 
     m_scene.window->setColor(kSceneClearColor);
     // UI 层必须透明清屏，否则 FG 合成时会把整帧盖住。
