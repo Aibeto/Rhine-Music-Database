@@ -357,27 +357,77 @@ void MusicLibrary::cancelLogin(Completion done) {
     });
 }
 
-void MusicLibrary::passwordLogin(QString method, QString account, QString password) {
-    if (isLocal()) {
+int MusicLibrary::smsRetrySeconds() const {
+    const auto remaining = m_smsRetryAtMs - QDateTime::currentMSecsSinceEpoch();
+    return int(std::max(qint64(0), (remaining + 999) / 1000));
+}
+
+void MusicLibrary::updateSmsCooldown() {
+    if (provider == "netease" && loginMethod == "phone") {
+        changed();
+    }
+    if (smsRetrySeconds() > 0) {
+        host->schedule(1000, [owner = QPointer(this)] {
+            if (owner) {
+                owner->updateSmsCooldown();
+            }
+        });
+    }
+}
+
+/**
+ * 发送短信验证码
+ */
+void MusicLibrary::sendLoginCode(QString phone) {
+    if (provider != "netease" || accountLoading || smsRetrySeconds() > 0) {
         return;
     }
-    if (accountLoading && loginMethod == method) {
-        return;
-    }
-    if (account.trimmed().isEmpty() || password.isEmpty()) {
-        loginStatus = QStringLiteral("请输入账号和密码");
+    phone = phone.trimmed();
+    if (!QRegularExpression("^1[0-9]{10}$").match(phone).hasMatch()) {
+        loginStatus = QStringLiteral("请输入有效的中国大陆手机号码");
         changed();
         return;
     }
     cancelLogin();
     const auto token = ++m_loginGeneration;
-    loginMethod = method;
+    loginMethod = "phone";
+    loginStatus = QStringLiteral("正在发送短信验证码…");
+    accountLoading = true;
+    // 这是应用侧的 60 秒重发间隔，不改变上游参数或重试策略。
+    constexpr qint64 SMS_RESEND_INTERVAL_MS = 60000;
+    m_smsRetryAtMs = QDateTime::currentMSecsSinceEpoch() + SMS_RESEND_INTERVAL_MS;
+    updateSmsCooldown();
+    api.request(
+        "/captcha/sent", {{"phone", phone}, {"ctcode", "86"}},
+        [this](MusicReply result) {
+            accountLoading = false;
+            loginStatus = result.ok() ? QStringLiteral("验证码已发送，请查看手机短信") : result.error;
+            changed();
+        },
+        valid(token, &m_loginGeneration));
+}
+
+/** 手机号验证码登录 */
+void MusicLibrary::captchaLogin(QString phone, QString captcha) {
+    if (provider != "netease" || accountLoading) {
+        return;
+    }
+    phone = phone.trimmed();
+    captcha = captcha.trimmed();
+    if (!QRegularExpression("^1[0-9]{10}$").match(phone).hasMatch() ||
+        !QRegularExpression("^[0-9]{4,8}$").match(captcha).hasMatch()) {
+        loginStatus = QStringLiteral("请输入中国大陆手机号码和短信验证码");
+        changed();
+        return;
+    }
+    cancelLogin();
+    const auto token = ++m_loginGeneration;
+    loginMethod = "phone";
     loginStatus = QStringLiteral("正在登录…");
     accountLoading = true;
     changed();
     api.request(
-        method == "phone" ? "/login/cellphone" : "/login",
-        {{method == "phone" ? "phone" : "email", account}, {"password", password}},
+        "/login/cellphone", {{"phone", phone}, {"captcha", captcha}, {"countrycode", "86"}},
         [this, token](MusicReply result) {
             if (!result.ok()) {
                 loginStatus = result.error;
@@ -401,12 +451,12 @@ void MusicLibrary::failLogin(const MusicReply &result) {
     }
 }
 
-void MusicLibrary::confirmLogin(quint64 token, bool password) {
+void MusicLibrary::confirmLogin(quint64 token, bool captcha) {
     api.call(
         "account", {},
-        [this, password](MusicReply result) {
+        [this, captcha](MusicReply result) {
             if (!result.ok()) {
-                if (password) {
+                if (captcha) {
                     loginStatus = result.error;
                     accountLoading = false;
                     changed();
@@ -417,7 +467,7 @@ void MusicLibrary::confirmLogin(quint64 token, bool password) {
             }
             const auto error = host->saveCredential();
             if (!error.isEmpty()) {
-                if (password) {
+                if (captcha) {
                     loginStatus = error;
                     accountLoading = false;
                     changed();
@@ -434,8 +484,8 @@ void MusicLibrary::confirmLogin(quint64 token, bool password) {
             rememberIdentityName(provider, nickname);
             loginStatus = QStringLiteral("已登录：") + nickname;
             refreshQQFeatures();
-            status = password ? loginStatus : QStringLiteral("已登录，可读取我的音乐");
-            if (!password) {
+            status = captcha ? loginStatus : QStringLiteral("已登录，可读取我的音乐");
+            if (!captcha) {
                 qr.clear();
                 qrKey.clear();
                 loginPhase = "complete";

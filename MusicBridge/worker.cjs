@@ -120,7 +120,7 @@ const routes = Object.freeze({
     '/playlist/name/update': 'playlist_name_update',
     '/playlist/tracks': 'playlist_tracks',
     '/login/cellphone': 'login_cellphone',
-    '/login': 'login',
+    '/captcha/sent': 'captcha_sent',
     '/song/url': 'song_url',
     '/song/url/v1': 'song_url_v1',
     '/personalized': 'personalized',

@@ -134,10 +134,10 @@ Window {
         stage: root
         backend: rhine
     }
-    // 密码只在输入组件和单次登录请求中短暂存在，提交后立即清空。
+    // 验证码只在输入组件和单次登录请求中短暂存在，提交后立即清空。
     Item {
         id: formFields
-        visible: rhine.state.modal === "playlist-form" || (rhine.state.modal === "login" && (rhine.state.loginMethod === "phone" || rhine.state.loginMethod === "email"))
+        visible: rhine.state.modal === "playlist-form" || (rhine.state.modal === "login" && rhine.state.loginMethod === "phone")
         x: (rhine.state.inputX || 0) * root.stageScale
         y: (rhine.state.modalOffset || 0) * root.stageScale
         width: (rhine.state.inputWidth || 0) * root.stageScale
@@ -145,19 +145,22 @@ Window {
         opacity: rhine.state.modalOpacity || 0
         onVisibleChanged: {
             accountField.text = "";
-            passwordField.text = "";
+            captchaField.text = "";
             if (visible) {
                 accountField.forceActiveFocus();
             }
         }
         function submit() {
-            rhine.submitForm(accountField.text, passwordField.text);
-            passwordField.text = "";
+            if (rhine.state.modal === "login" && rhine.state.loginBusy) {
+                return;
+            }
+            rhine.submitForm(accountField.text, captchaField.text);
+            captchaField.text = "";
         }
         Rectangle {
             x: 0
             y: 430 * root.stageScale
-            width: parent.width
+            width: rhine.state.modal === "login" ? parent.width - 180 * root.stageScale : parent.width
             height: 55 * root.stageScale
             color: rhine.state.dark ? "#30312b" : "#d9d8ce"
         }
@@ -166,22 +169,51 @@ Window {
             objectName: "accountField"
             x: 14 * root.stageScale
             y: 430 * root.stageScale
-            width: parent.width - 28 * root.stageScale
+            width: parent.width - (rhine.state.modal === "login" ? 208 : 28) * root.stageScale
             height: 55 * root.stageScale
             verticalAlignment: TextInput.AlignVCenter
             color: rhine.state.dark ? "#eeeeeb" : "#161914"
             font.pixelSize: 19 * root.stageScale
             cursorVisible: activeFocus && !rhine.performance.idle
-            maximumLength: 100
-            Accessible.name: rhine.state.modal === "playlist-form" ? "歌单名称" : "登录账号"
+            maximumLength: rhine.state.modal === "login" ? 11 : 100
+            enabled: rhine.state.modal !== "login" || !rhine.state.loginBusy
+            inputMethodHints: rhine.state.modal === "login" ? Qt.ImhDigitsOnly : Qt.ImhNone
+            Accessible.name: rhine.state.modal === "playlist-form" ? "歌单名称" : "手机号码"
             Keys.onReturnPressed: {
                 if (rhine.state.modal !== "login") {
                     formFields.submit();
                 } else {
-                    passwordField.forceActiveFocus();
+                    captchaField.forceActiveFocus();
                 }
             }
             Keys.onEscapePressed: rhine.action("close-modal")
+        }
+        Rectangle {
+            visible: rhine.state.modal === "login"
+            x: parent.width - width
+            y: 430 * root.stageScale
+            width: 170 * root.stageScale
+            height: 55 * root.stageScale
+            enabled: !rhine.state.loginBusy && rhine.state.smsRetrySeconds === 0 && accountField.text.length === 11
+            color: "#777b60"
+            opacity: enabled ? 1 : 0.5
+            Text {
+                anchors.centerIn: parent
+                text: rhine.state.smsRetrySeconds > 0 ? rhine.state.smsRetrySeconds + " 秒后重发" : "发送验证码"
+                color: "#f0eee5"
+                font.pixelSize: 14 * root.stageScale
+            }
+            Accessible.role: Accessible.Button
+            Accessible.name: "发送短信验证码"
+            Accessible.onPressAction: {
+                if (enabled) {
+                    rhine.sendLoginCode(accountField.text);
+                }
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: rhine.sendLoginCode(accountField.text)
+            }
         }
         Rectangle {
             visible: rhine.state.modal === "login"
@@ -192,8 +224,8 @@ Window {
             color: rhine.state.dark ? "#30312b" : "#d9d8ce"
         }
         TextInput {
-            id: passwordField
-            objectName: "passwordField"
+            id: captchaField
+            objectName: "captchaField"
             visible: rhine.state.modal === "login"
             x: 14 * root.stageScale
             y: 541 * root.stageScale
@@ -203,18 +235,21 @@ Window {
             color: rhine.state.dark ? "#eeeeeb" : "#161914"
             font.pixelSize: 19 * root.stageScale
             cursorVisible: activeFocus && !rhine.performance.idle
-            maximumLength: 256
-            echoMode: TextInput.Password
-            Accessible.name: "密码"
+            maximumLength: 8
+            enabled: !rhine.state.loginBusy
+            inputMethodHints: Qt.ImhDigitsOnly | Qt.ImhSensitiveData
+            Accessible.name: "短信验证码"
             Keys.onReturnPressed: formFields.submit()
             Keys.onEscapePressed: rhine.action("close-modal")
         }
         Rectangle {
             x: parent.width - width
             y: (rhine.state.modal === "login" ? 611 : 530) * root.stageScale
+            enabled: rhine.state.modal !== "login" || !rhine.state.loginBusy
             width: 170 * root.stageScale
             height: 36 * root.stageScale
             color: "#777b60"
+            opacity: enabled ? 1 : 0.5
             Text {
                 anchors.centerIn: parent
                 text: rhine.state.modal === "login" ? "登录 →" : "保存 →"
@@ -256,7 +291,7 @@ Window {
         target: rhine
         function onClearCredentials() {
             accountField.text = "";
-            passwordField.text = "";
+            captchaField.text = "";
         }
     }
 

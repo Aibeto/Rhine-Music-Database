@@ -178,6 +178,8 @@ QJsonObject NativeHud::state() const {
             {"seek", rect(playerSeekRect)},
             {"volume", rect(playerVolumeRect)},
             {"loginMethod", m_music->loginMethod},
+            {"loginBusy", m_music->accountLoading},
+            {"smsRetrySeconds", m_music->smsRetrySeconds()},
             {"localMusic", m_music->isLocal()},
             {"formKind", formKind},
             {"formPID", formPID},

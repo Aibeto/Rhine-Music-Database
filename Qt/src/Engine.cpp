@@ -342,17 +342,24 @@ void Engine::action(QString value) {
     wake();
 }
 /**
- * 将输入控件的原始数据转换为原生业务操作；密码不写入公开状态。
+ * 将输入控件的原始数据转换为原生业务操作
  */
-void Engine::submitForm(QString account, QString password) {
+void Engine::submitForm(QString account, QString captcha) {
     QJsonObject values;
     if (app->hud.modal == "login") {
-        values = {{"account", account}, {"password", password}};
+        values = {{"account", account}, {"captcha", captcha}};
     } else {
         values = {{"name", account}};
     }
     app->hud.form(values);
     wake();
+}
+
+void Engine::sendLoginCode(QString phone) {
+    if (app->hud.modal == "login" && app->music.loginMethod == "phone") {
+        app->music.sendLoginCode(phone);
+        wake();
+    }
 }
 void Engine::setWindow(QQuickWindow *window) {
     m_window = window;

@@ -110,11 +110,10 @@ void NativeHud::setQuery(QString value) {
 }
 
 void NativeHud::form(QJsonObject fields) {
-    if (modal == "login" && QStringList{"phone", "email"}.contains(m_music->loginMethod) &&
-        fields["account"].isString() && fields["password"].isString() &&
-        fields["account"].toString().size() <= 100 && fields["password"].toString().size() <= 256) {
-        m_music->passwordLogin(m_music->loginMethod, fields["account"].toString(),
-                               fields["password"].toString());
+    if (modal == "login" && m_music->loginMethod == "phone" && fields["account"].isString() &&
+        fields["captcha"].isString() && fields["account"].toString().size() <= 100 &&
+        fields["captcha"].toString().size() <= 8) {
+        m_music->captchaLogin(fields["account"].toString(), fields["captcha"].toString());
     }
     if (modal == "playlist-form" && fields["name"].isString()) {
         const QPointer<NativeHud> owner(this);

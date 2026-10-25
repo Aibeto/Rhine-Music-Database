@@ -43,7 +43,8 @@ class Engine : public QObject {
     Q_INVOKABLE void importLocal(QList<QUrl> urls);
     Q_INVOKABLE void resize(double width, double height);
     Q_INVOKABLE void action(QString action);
-    Q_INVOKABLE void submitForm(QString account, QString password);
+    Q_INVOKABLE void submitForm(QString account, QString captcha);
+    Q_INVOKABLE void sendLoginCode(QString phone);
     Q_INVOKABLE bool keyEvent(int key, int modifiers, QString text);
     Q_INVOKABLE void searchAccepted(QString text, int modifiers);
     Q_INVOKABLE void wheelInput(double x, double y, double pixelDelta, double angleDelta);

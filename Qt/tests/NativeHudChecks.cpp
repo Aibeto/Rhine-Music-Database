@@ -343,6 +343,20 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                 hud.openModal(panel);
                 hud.draw(archiveFrame, 1920, 50);
 
+                if (panel == "login" && provider == "netease") {
+                    if (!hasAction(hud.hits, "music:login-method:phone") ||
+                        hasAction(hud.hits, "music:login-method:email")) {
+                        qCritical() << "NetEase login must offer SMS without email password";
+                        ok = false;
+                    }
+                    hud.action("music:login-method:phone");
+                    hud.action("music:login-method:email");
+                    if (music->loginMethod != "phone") {
+                        qCritical() << "Disabled email login action was accepted";
+                        ok = false;
+                    }
+                }
+
                 if (hud.commands.isEmpty()) {
                     qCritical() << "Panel commands empty:" << panel << provider << (dark ? "dark" : "light");
                     ok = false;
