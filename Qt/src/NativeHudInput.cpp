@@ -101,8 +101,9 @@ void NativeHud::wheel(double x, double y, double delta, std::optional<int> steps
             return;
         }
         if (tab == "history") {
-            trackOffset = std::clamp(trackOffset + step, 0, std::max(0, int(music.tracks.size()) - 2));
-            music.loadTrackPage(trackOffset);
+            trackOffset =
+                std::clamp(trackOffset + step, 0, std::max(0, int(music.tracks.size()) - AlbumTrackRowCount));
+            music.loadTrackPage(trackOffset + AlbumTrackRowCount - 1);
         } else {
             const auto count = m_glyphs->wrap(body(), width * 0.44 - 59, 16).size();
             bodyOffset = std::clamp(bodyOffset + step, 0, std::max(0, int(count) - 3));

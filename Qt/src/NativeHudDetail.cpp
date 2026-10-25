@@ -138,37 +138,46 @@ void NativeHud::detail(double width, double opacity) {
     actionButton("加入队列", x + buttonWidth + gap, 498, buttonWidth, "music:enqueue");
     actionButton("下一首播放", x + (buttonWidth + gap) * 2, 498, buttonWidth, "music:play-next");
     rule(x, 565, usable, 0.4);
-    const auto column = (usable - gap) / 2;
-    QString playbackDescription = "面板内播放";
-    if (PlatformFeatures::OfficialPlayback) {
-        playbackDescription = music.isLocal() ? "本地文件 / 面板内播放" : "面板内播放 / 官方入口";
-    }
-    const QVector<QPair<QString, QString>> meta{{"ARTIST / 歌手", item["artist"].toString()},
-                                                {"ALBUM / 专辑", item["album"].toString()},
-                                                {"DURATION / 时长", MusicData::time(item)},
-                                                {"PLAYBACK / 播放方式", playbackDescription}};
-    for (int index = 0; index < meta.size(); ++index) {
-        const auto xx = x + (index % 2) * (column + gap);
-        const auto yy = 584 + (index / 2) * 64;
-        text(meta.at(index).first, xx, yy, 11);
-        const auto value = meta.at(index).second;
-        limited(value.isEmpty() ? "暂无" : value, xx, yy + 23, 16, column - 12);
+    const bool albumTracks = tab == "history";
+    if (!albumTracks) {
+        const auto column = (usable - gap) / 2;
+        QString playbackDescription = "面板内播放";
+        if (PlatformFeatures::OfficialPlayback) {
+            playbackDescription = music.isLocal() ? "本地文件 / 面板内播放" : "面板内播放 / 官方入口";
+        }
+        const QVector<QPair<QString, QString>> meta{{"ARTIST / 歌手", item["artist"].toString()},
+                                                    {"ALBUM / 专辑", item["album"].toString()},
+                                                    {"DURATION / 时长", MusicData::time(item)},
+                                                    {"PLAYBACK / 播放方式", playbackDescription}};
+        for (int index = 0; index < meta.size(); ++index) {
+            const auto xx = x + (index % 2) * (column + gap);
+            const auto yy = 584 + (index / 2) * 64;
+            text(meta.at(index).first, xx, yy, 11);
+            const auto value = meta.at(index).second;
+            limited(value.isEmpty() ? "暂无" : value, xx, yy + 23, 16, column - 12);
+        }
     }
     const QStringList keys{"overview", "notes", "history"};
     const QStringList labels{music.isLocal() ? "文件信息" : "歌曲百科", "专辑信息", "同专辑"};
+    const double tabsY = albumTracks ? 570 : 720;
     for (int index = 0; index < keys.size(); ++index) {
         const auto xx = x + index * usable / 3;
-        button(labels.at(index), xx, 720, usable / 3 - 12, 38, "tab:" + keys.at(index), 15);
+        auto label = labels.at(index);
+        if (index == 2 && albumTracks && !music.tracks.isEmpty()) {
+            label += " · " + QString::number(music.tracks.size()) + " 首";
+        }
+        button(label, xx, tabsY, usable / 3 - 12, 38, "tab:" + keys.at(index), 15);
         if (tab == keys.at(index)) {
-            rule(xx, 760, usable / 3 - 24, 1);
+            rule(xx, tabsY + 40, usable / 3 - 24, 1);
         }
     }
-    rule(x, 762, usable, 0.2);
-    if (tab == "history") {
-        const auto songs = MusicData::slice(music.tracks, trackOffset, 2);
+    rule(x, tabsY + 42, usable, 0.2);
+    if (albumTracks) {
+        trackOffset = std::clamp(trackOffset, 0, std::max(0, int(music.tracks.size()) - AlbumTrackRowCount));
+        const auto songs = MusicData::slice(music.tracks, trackOffset, AlbumTrackRowCount);
         for (int index = 0; index < songs.size(); ++index) {
             const auto song = songs.at(index).toObject();
-            const auto yy = 790 + index * 48;
+            const auto yy = AlbumTrackTop + index * AlbumTrackRowHeight;
             text(MusicData::pad(trackOffset + index + 1), x, yy, 11);
             limited(song["title"].toString() + " / " + song["artist"].toString(), x + 35, yy, 16,
                     usable - 115);
@@ -177,8 +186,18 @@ void NativeHud::detail(double width, double opacity) {
             hit(x, yy - 4, usable, 42, "music:track:" + QString::number(trackOffset + index),
                 song["title"].toString());
         }
+        if (music.tracks.size() > AlbumTrackRowCount) {
+            const auto height = AlbumTrackRowCount * AlbumTrackRowHeight - 12;
+            auto color = ink();
+            color[3] = 0.12;
+            fill(x + usable + 10, AlbumTrackTop - 4, 2, height, color);
+            const auto thumb = std::max(28.0, height * AlbumTrackRowCount / music.tracks.size());
+            const auto fraction = double(trackOffset) / (music.tracks.size() - AlbumTrackRowCount);
+            color[3] = 0.6;
+            fill(x + usable + 10, AlbumTrackTop - 4 + fraction * (height - thumb), 2, thumb, color);
+        }
         if (music.tracks.isEmpty()) {
-            text(music.detailLoading ? "正在载入曲目…" : "暂无曲目信息", x, 790, 17);
+            text(music.detailLoading ? "正在载入曲目…" : "暂无曲目信息", x, AlbumTrackTop, 17);
         }
     } else {
         const auto lines = m_glyphs->wrap(body(), usable, 16);
