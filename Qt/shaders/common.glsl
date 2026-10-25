@@ -21,6 +21,7 @@ struct Surface {
     vec4 extra;
     vec4 flags;
     vec4 darkColor;
+    vec4 atlas;
 };
 struct Out {
     vec4 position;
@@ -62,6 +63,34 @@ vec3 aces(vec3 c, float exposure) {
     vec3 a = c * (c + .0245786) - .000090537;
     vec3 b = c * (.983729 * c + .4329510) + .238081;
     return saturate(acesOutput * (a / b));
+}
+/** AO 的 4x4 盒式模糊：4 次双线性采样等价于 16 次点采样，半径按 AO 自身纹素算。 */
+float aoBlurred(sampler2D ao, vec2 uv) {
+    vec2 px = 1.0 / vec2(textureSize(ao, 0).x, textureSize(ao, 0).y);
+    const vec2 offsets[4] =
+        vec2[4](vec2(-1.5, -0.5), vec2(0.5, -0.5), vec2(-1.5, 1.5), vec2(0.5, 1.5));
+    float sum = 0.0;
+    for (int i = 0; i < 4; ++i) {
+        sum += texture(ao, rtUV(uv + offsets[i] * px)).r;
+    }
+    return sum * .25;
+}
+/** 八面体法线编码：把三通道法线压到两个通道，法线目标可以从 RGBA16F 降到 RGBA8。 */
+vec2 octEncode(vec3 n) {
+    n /= max(abs(n.x) + abs(n.y) + abs(n.z), 1e-6);
+    vec2 e = n.xy;
+    if (n.z < 0) {
+        e = (1 - abs(n.yx)) * vec2(n.x >= 0 ? 1 : -1, n.y >= 0 ? 1 : -1);
+    }
+    return e * .5 + .5;
+}
+vec3 octDecode(vec2 e) {
+    e = e * 2 - 1;
+    vec3 n = vec3(e, 1 - abs(e.x) - abs(e.y));
+    if (n.z < 0) {
+        n.xy = (1 - abs(n.yx)) * vec2(n.x >= 0 ? 1 : -1, n.y >= 0 ? 1 : -1);
+    }
+    return normalize(n);
 }
 float getFace(vec3 d) {
     vec3 a = abs(d);
@@ -205,7 +234,17 @@ vec4 bicubic(sampler2D tex, vec2 uv, float lod) {
     return c + g1.y * (g0.x * textureLod(tex, rtUV((i + vec2(h0.x, h1.y) - .5) / size), (lod)) +
                        g1.x * textureLod(tex, rtUV((i + vec2(h1.x, h1.y) - .5) / size), (lod)));
 }
-vec4 transmissionSample(sampler2D tex, vec2 uv, float lod) {
-    lod = clamp(lod, 0.0, float(int(floor(log2(float(textureSize(tex, 0).x)))) - 1));
-    return mix(bicubic(tex, uv, floor(lod)), bicubic(tex, uv, ceil(lod)), fract(lod));
+vec4 transmissionSample(sampler2D tex, sampler2D halfTex, sampler2D quarterTex,
+                         sampler2D eighthTex, vec2 uv, float lod) {
+    // 按粗糙度在抓屏金字塔里取层级：一次双线性采样就完成模糊。
+    // 原来的稀疏点采样位置固定在 UV 空间，硬边缘上会留下台阶，提高屏幕分辨率也只会
+    // 让台阶更细而不会消失；逐级盒式降采样得到的模糊边缘是连续的。
+    float m = clamp(lod, 0.0, 3.0);
+    if (m < 1.0) {
+        return mix(texture(tex, rtUV(uv)), texture(halfTex, rtUV(uv)), m);
+    }
+    if (m < 2.0) {
+        return mix(texture(halfTex, rtUV(uv)), texture(quarterTex, rtUV(uv)), m - 1.0);
+    }
+    return mix(texture(quarterTex, rtUV(uv)), texture(eighthTex, rtUV(uv)), clamp(m - 2.0, 0.0, 1.0));
 }

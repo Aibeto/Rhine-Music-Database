@@ -26,11 +26,11 @@
 
 构建产物位于：
 
-| 平台    | 程序                                                           |
-| ------- | -------------------------------------------------------------- |
-| macOS   | `output/RHINE MUSIC DATABASE.app`                              |
-| Windows | `output/RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe`       |
-| Linux   | `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`              |
+| 平台    | 程序                                                         |
+| ------- | ------------------------------------------------------------ |
+| macOS   | `output/RHINE MUSIC DATABASE.app`                            |
+| Windows | `output/RhineMusicDatabase-<构建标识>-Windows-x64-Setup.exe` |
+| Linux   | `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage` |
 
 **macOS 若提示应用已损坏，需要执行**
 
@@ -52,6 +52,12 @@ chmod +x 'RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage'
 
 macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BACKEND=windows` 可临时对照原生后端。
 各平台播放都会跟随系统默认输出设备
+
+图形后端默认在 Windows 与 Linux 上优先使用 Vulkan，不可用时回退平台默认（Windows 为 Direct3D 12，其余为 OpenGL）；macOS 固定使用 Metal。
+`RHINE_GRAPHICS=vulkan|opengl|d3d12|auto` 可手动指定（`d3d12` 仅 Windows），`QSG_RHI_BACKEND` 的优先级更高，便于做后端对照。
+
+Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生效。列表只显示序号（0 基，与 `/sys/class/drm` 的 `cardN` 顺序一致），保存的也是序号——型号会随驱动更新和换卡变化，序号才是稳定的东西。序号在下次启动时不存在（换卡、拔掉 eGPU 或配置被改坏）就自动回退到默认行为：不注入任何厂商变量，完全等同于此前的版本，设置页会注明「序号 N 不存在」。
+实现上按驱动分流：Mesa 系（i915 / xe / amdgpu / nouveau）用 `DRI_PRIME=pci-0000_01_00_0` 把目标卡排到物理设备列表首位，NVIDIA 专有驱动用 `__NV_PRIME_RENDER_OFFLOAD=1` 加 `__VK_LAYER_NV_optimus=NVIDIA_only`（选非 NVIDIA 卡时为 `non_NVIDIA_only`），Qt 取枚举到的第一块卡即等于选中。`RHINE_GPU_INDEX=N` 只对本次启动生效，不改配置，便于对照；`RHINE_SOFTWARE_GPU=1` 时不做任何选择。两张同型号 NVIDIA 显卡之间无法区分（NVIDIA 图层只能表达「要 / 不要 NVIDIA」），此时会打一条警告。
 
 **面板内播放支持网易云、QQ 和酷狗音乐返回的可用音源。网易云官方客户端入口需要安装并注册网易云音乐；QQ 提供来源网页入口，酷狗提供官方网站入口。**
 
@@ -134,11 +140,46 @@ macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_
 
 **音质和完整播放取决于账号权限与音源可用性；返回试听时会明确提示。替代音源默认关闭，开启时使用锁定上游的匹配实现，音质由匹配来源决定，失败时可使用官方入口。本项目不提供音乐下载。**
 
+## 图形后端与功能
+
+| Platform | Vulkan | Direct3D 12 | OpenGL | Metal |
+| -------- | ------ | ----------- | ------ | ----- |
+| Windows  | ✅     | ✅          | -      | -     |
+| macOS    | -      | -           | -      | ✅    |
+| Linux    | ✅     | -           | ✅     | -     |
+
+| API         | FXAA | SSAA   | MSAA   | TAA | FSR Upscaling              | FSR Frame Generation |
+| ----------- | ---- | ------ | ------ | --- | -------------------------- | -------------------- |
+| Vulkan      | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS                | ✅                   |
+| Direct3D 12 | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS / TU (default) | -                    |
+| OpenGL      | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS                | -                    |
+| Metal       | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS                | -                    |
+
+插帧（FSR Frame Generation）在 Vulkan 上是**常驻能力、即时开关**：只要设备支持，启动时应用就自建
+交换链接管窗口（呈现层常驻），设置页里的帧生成开关**点一下就生效、不需要重启**——它只决定每次呈现
+要不要插入一张插值帧，不参与呈现路径的选择。只有 3D 场景参与插值，UI 始终以原生分辨率叠加在插值结果
+之上（插值帧里文字不会重影）。任何一步失败都会自动回退到默认呈现路径，不影响启动；需要强制走默认
+路径时可用 `RHINE_FG_LAYER=off`（排障用）。标题栏右上角的性能面板在接管后会显示帧生成状态、呈现与
+渲染帧率、插值帧率、光流/插值/合成/取图/上屏分项耗时、交换链图像数与格式、深度与运动矢量是否就绪。
+Direct3D 12 与 Metal 的插帧尚未适配：FFX 的 FI/OF 组件在 SDK 里都给到了，但 Windows 侧还缺
+"自持 IDXGISwapChain3 的呈现层"与 FgBackend 的 D3D12 资源状态映射，本次没有可用的 Windows 机器
+编译与验证，因此保持未完成并继续走默认呈现路径。
+
 ## 从源码构建
 
-需要包含 Shader Tools 和 Multimedia 的 Qt **6.12+** desktop kit、CMake 3.24+、Ninja、Python 3、Node.js / npm，以及平台 C++ 编译器。本地与三平台自动构建统一使用 Qt 6.12.0，自动构建使用 Node.js 22.14.0。Linux 还需要 Qt 的私有开发头文件（发行版包名通常是 `qt6-base-private-dev`、`qt6-multimedia-private-dev`）。
+需要包含 Shader Tools 和 Multimedia 的 Qt **6.12+** desktop kit、CMake 3.24+、Ninja、Python 3、Node.js / npm，以及平台 C++ 编译器。本地与三平台自动构建统一使用 Qt 6.12.0，自动构建使用 Node.js 26.11.1。Linux 还需要 Qt 的私有开发头文件（发行版包名通常是 `qt6-base-private-dev`、`qt6-multimedia-private-dev`）。
 
 `QT_ROOT` 指向 Qt kit 根目录。`RHINE_NODE_BINARY` 和 `RHINE_NODE_LICENSE` 指向官方独立 Node 分发包中的可执行文件与对应许可证；该运行时会随应用打包，不提交到源码仓库。
+
+FSR3 超分与插帧依赖 `FidelityFX-SDK/`，着色器预编译依赖 `third_party/dxc` 与 `third_party/glslang`，三者都以 submodule 记录，克隆时需要递归检出：
+
+```sh
+git clone --recurse-submodules <仓库地址>
+# 已克隆的仓库补检出
+git submodule update --init --recursive
+```
+
+`FidelityFX-SDK/` 缺失时 CMake 只打印一条状态信息并跳过 FSR 目标，构建仍然成功但 FSR3 不会编入；`third_party/glslang` 缺失时回退到系统 `glslangValidator`；`third_party/dxc` 缺失在 Windows 上会直接报错。`spirv-tools` 与 `spirv-headers` 无法嵌套为 submodule，版本记录在 `.gitmodules` 的 `pinned-commit` 中。
 
 ### macOS
 
@@ -177,15 +218,24 @@ Windows 的 `npm run share` 使用 [Inno Setup 6.3+ 或 7](https://jrsoftware.or
 
 ### Linux x86_64（AppImage）
 
-安装 Qt 6.12.0 开发包（含 Shader Tools、Multimedia 与私有头文件）、CMake、Ninja、GCC、Python 3 和 Node.js 22；若发行版尚未提供此版本，使用官方 desktop kit 并设置 `QT_ROOT`。Qt 由系统提供时 `QT_ROOT` 保持默认的 `/usr` 即可：
+安装 Qt 6.12.0 开发包（含 Shader Tools、Multimedia 与私有头文件）、CMake、Ninja、GCC、Python 3 和 Node.js 26.11.1；若发行版尚未提供此版本，使用官方 desktop kit 并设置 `QT_ROOT`。Qt 由系统提供时 `QT_ROOT` 保持默认的 `/usr` 即可：
 
 ```sh
-export RHINE_NODE_BINARY="/absolute/path/to/node-v22.14.0-linux-x64/bin/node"
-export RHINE_NODE_LICENSE="/absolute/path/to/node-v22.14.0-linux-x64/LICENSE"
+curl -LO https://nodejs.org/dist/v26.11.1/node-v26.11.1-linux-x64.tar.xz
+mkdir -p output/node
+tar -xJf node-v26.11.1-linux-x64.tar.xz -C output/node
+# rm ./node-v26.11.1-linux-x64.tar.xz
 npm ci
-npm run build
-npm test
-npm run share
+env RHINE_NODE_BINARY=$PWD/output/node/node-v26.11.1-linux-x64/bin/node \
+    RHINE_NODE_LICENSE=$PWD/output/node/node-v26.11.1-linux-x64/LICENSE \
+    NPM_CONFIG_ALLOW_REMOTE=all npm run build
+
+# 增量构建测试
+cmake --build output/qt-build -j 8
+RHINE_RESOURCES=$PWD/output/resources ./output/qt-build/RhineMusicDatabase 2>&1
+
+# 关闭抗锯齿和超分辨率启动
+RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineMusicDatabase
 ```
 
 `npm run build` 先按依赖闭包收集 Qt 库、平台插件、图像与 TLS 插件和 QML 模块到 `output/RhineMusicDatabase.AppDir`，再用 `appimagetool` 生成 `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`。`appimagetool` 需自行安装并出现在 `PATH` 中，也可用 `APPIMAGE_TOOL` 指定路径；没有 FUSE 时脚本自动改用 `--appimage-extract-and-run`。
@@ -242,7 +292,6 @@ GPU 耗时/占用未采集，同步和提交的 CPU 时间不代表 GPU 执行�
 - **[LyricsKit](https://github.com/MxIris-LyricsX-Project/LyricsKit)**：LRC、YRC、KRC 格式解析移植，
   `MusicBridge/lyrics-format.cjs` 单独采用 MPL-2.0，固定版本与许可随包保留。
 - **[Lyrimuse](https://github.com/Yudaotor/lyrimuse)**：统一时间轴、歌词同步与录音版本匹配思路参考。
-
 
 ## 开源许可
 

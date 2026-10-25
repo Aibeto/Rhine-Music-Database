@@ -88,6 +88,8 @@ class NativeHud : public QObject {
     static constexpr double SettingsViewportBottom = 836;
     double settingsContentBottom = 1600;
     double settingsScroll = 0;
+    // 设置页下拉块：非空时该偏好行展开成选项列表（目前只有抗锯齿使用）。
+    QString expandedPreference;
     double settingsScrollMaximum() const {
         return settingsContentBottom - SettingsViewportBottom;
     }
@@ -96,6 +98,7 @@ class NativeHud : public QObject {
     bool startupAnimation = false;
     bool discRotation = false;
     bool sceneEnhancement = true;
+    bool vsync = true;
     int archiveMaskStrength = 50;
     bool closing = false;
     bool lyricsMode = false;

@@ -4,7 +4,7 @@
 #include <QCloseEvent>
 #include <QCursor>
 #include <QPainter>
-#include <QQuickWindow>
+#include <QWindow>
 
 namespace {
 QIcon trayIcon() {
@@ -33,7 +33,7 @@ QIcon trayIcon() {
 /**
  * 建立驻留图标与退出菜单
  */
-DesktopTray::DesktopTray(QQuickWindow *window, QObject *parent) : QObject(parent), m_window(window) {
+DesktopTray::DesktopTray(QWindow *window, QObject *parent) : QObject(parent), m_window(window) {
     m_icon.setObjectName("desktopTrayIcon");
     m_icon.setParent(this);
     m_icon.setIcon(trayIcon());

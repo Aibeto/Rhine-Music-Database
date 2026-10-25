@@ -4,6 +4,9 @@ set_target_properties(RhineMusicDatabase PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${
 set_source_files_properties(qml/Main.qml PROPERTIES QT_RESOURCE_ALIAS Main.qml)
 set_source_files_properties(qml/PerformancePanel.qml PROPERTIES QT_RESOURCE_ALIAS PerformancePanel.qml)
 set_source_files_properties(qml/WindowChrome.qml PROPERTIES QT_RESOURCE_ALIAS WindowChrome.qml)
+# FG 路径把 3D 与 UI 拆成两个可独立渲染的场景；Main.qml 的默认路径用同样两个组件组合， 所以两条路径共用同一份界面定义，不会各自漂移。
+set_source_files_properties(qml/Scene3D.qml PROPERTIES QT_RESOURCE_ALIAS Scene3D.qml)
+set_source_files_properties(qml/Overlay.qml PROPERTIES QT_RESOURCE_ALIAS Overlay.qml)
 set_source_files_properties(qml/IOSInput.qml PROPERTIES QT_RESOURCE_ALIAS IOSInput.qml)
 set_source_files_properties(qml/LocalMusicDialogs.qml PROPERTIES QT_RESOURCE_ALIAS LocalMusicDialogs.qml)
 qt_add_qml_module(
@@ -19,4 +22,6 @@ qt_add_qml_module(
     qml/IOSInput.qml
     qml/LocalMusicDialogs.qml
     qml/PerformancePanel.qml
-    qml/WindowChrome.qml)
+    qml/WindowChrome.qml
+    qml/Scene3D.qml
+    qml/Overlay.qml)

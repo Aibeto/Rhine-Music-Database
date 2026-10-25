@@ -16,7 +16,8 @@
         "format": "node scripts/format.cjs",
         "preview": "node scripts/preview-qt.cjs",
         "format:check": "node scripts/format.cjs --check",
-        "lint": "eslint ."
+        "lint": "eslint .",
+        "test:fg": "node scripts/test-fg.cjs"
     },
     "devDependencies": {
         "esbuild": "0.28.2",

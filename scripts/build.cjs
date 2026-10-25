@@ -37,6 +37,24 @@ function run(command, args = [], env = {}) {
     }
 }
 
+/** 读取实际执行的 npm 版本，用于判断新版本才有的安全开关。 */
+function npmVersion() {
+    const cli = process.env.npm_execpath;
+    const result = spawnSync(cli ? process.execPath : 'npm', cli ? [cli, '--version'] : ['--version'], {
+        encoding: 'utf8',
+    });
+    return result.status === 0 ? result.stdout.trim() : '';
+}
+
+/**
+ * npm 11.6 起默认拒绝安装 remote 类型的依赖，而锁定的酷狗 SDK 正是 codeload tarball。
+ * 只对声明在根 package.json 的远程来源放行，旧版 npm 不传该参数。
+ */
+function npmRemoteArgs() {
+    const [major, minor] = npmVersion().split('.').map(Number);
+    return major > 11 || (major === 11 && minor >= 6) ? ['--allow-remote=root'] : [];
+}
+
 function npmCi(folder) {
     run(process.execPath, [
         process.env.npm_execpath,
@@ -47,6 +65,7 @@ function npmCi(folder) {
         '--ignore-scripts',
         '--no-audit',
         '--no-fund',
+        ...npmRemoteArgs(),
     ]);
 }
 /**
@@ -111,9 +130,16 @@ function prepareResources() {
     const binary =
         process.env.RHINE_NODE_BINARY ||
         (mac && process.arch === 'arm64' ? path.resolve('vendor/node-arm64/node') : process.execPath);
-    const license = process.env.RHINE_NODE_LICENSE || path.join(path.dirname(binary), 'LICENSE');
-    if (!fs.existsSync(binary) || !fs.existsSync(license)) {
-        throw Error('Provide RHINE_NODE_BINARY and its matching RHINE_NODE_LICENSE');
+    // 官方独立分发包把 LICENSE 放在 bin 的上一级；两种解压布局都要能识别。
+    const license =
+        process.env.RHINE_NODE_LICENSE ||
+        [path.join(path.dirname(binary), 'LICENSE'), path.resolve(path.dirname(binary), '../LICENSE')].find(
+            (candidate) => fs.existsSync(candidate),
+        );
+    if (!fs.existsSync(binary) || !license) {
+        throw Error(
+            'Provide RHINE_NODE_BINARY and its matching RHINE_NODE_LICENSE (official standalone distribution)',
+        );
     }
     if (mac) {
         const deps = spawnSync('otool', ['-L', binary], {
@@ -134,14 +160,15 @@ function prepareResources() {
         if (deps.status !== 0) {
             throw Error('Node must be an official standalone distribution');
         }
-        // 官方静态包只依赖 glibc 运行库；出现其他动态依赖说明用的是发行版构建。
+        // 官方静态包只依赖 glibc 与 GCC 运行库；出现其他动态依赖说明用的是发行版构建。
+        // 部分官方构建会额外链接 libatomic（GCC 运行时自带的原子操作库）。
         const exposed = deps.stdout
             .split('\n')
             .filter((line) => line.includes('=>'))
             .map((line) => path.basename(line.split('=>')[0].trim()))
             .filter(
                 (name) =>
-                    !/^(?:ld-linux[\w.-]*|libc|libm|libmvec|libdl|libpthread|librt|libgcc_s|libstdc\+\+)\.so/.test(
+                    !/^(?:ld-linux[\w.-]*|libc|libm|libmvec|libdl|libpthread|librt|libgcc_s|libstdc\+\+|libatomic)\.so/.test(
                         name,
                     ),
             );

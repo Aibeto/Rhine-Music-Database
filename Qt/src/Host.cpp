@@ -1,3 +1,4 @@
+#include "fg/FgConfig.h"
 #include "Host.h"
 #include "AppStorage.h"
 #include <QBuffer>
@@ -914,74 +915,40 @@ void Host::invalidateMetadata() {
         metadata.remove(name);
     }
 }
+namespace {
+// 可读写的偏好键。读取与写入必须共用同一份名单：两份名单一旦分叉，写入会成功但读回
+// 为空，界面上的表现就是"设置完立刻跳回原值"。
+const QStringList &preferenceKeys() {
+    static const QStringList keys{
+        "search-history", "play-history", "local-cover-cache", "theme", "motion", "startup-animation",
+        "detail-autoplay", "single-play-mode", "disc-rotation", "scene-enhancement", "archive-mask-strength",
+        "graphics-backend",
+        // Linux 显卡选择：存的是 /sys/class/drm 里 cardN 的序号（0 基），不是型号。
+        // 换卡后序号可能指向另一张卡或不存在，启动时由 initializeLinuxGraphics 校验并回退。
+        "gpu-index", "vsync", "supersample", "render-scale", "aa-mode", "aa-scale", "msaa", "fsr-quality",
+        "fsr-sharpness", "fg", "auto-update", "volume", "quality", "alternate-source", "provider",
+        "lyrics-cache", "lyrics-global-offset-ms", "welcome-name-netease", "welcome-name-qq",
+        "welcome-name-kugou", "account-id-netease", "account-id-qq", "account-id-kugou", "kugou-edition",
+        "welcome-name-kugou-standard", "welcome-name-kugou-lite", "account-id-kugou-standard",
+        "account-id-kugou-lite"};
+    return keys;
+}
+} // namespace
 QString Host::preference(QString key) const {
-    if (offline || !QStringList{"search-history",
-                                "play-history",
-                                "local-cover-cache",
-                                "theme",
-                                "motion",
-                                "startup-animation",
-                                "detail-autoplay",
-                                "single-play-mode",
-                                "disc-rotation",
-                                "scene-enhancement",
-                                "archive-mask-strength",
-                                "auto-update",
-                                "volume",
-                                "quality",
-                                "alternate-source",
-                                "provider",
-                                "lyrics-cache",
-                                "lyrics-global-offset-ms",
-                                "welcome-name-netease",
-                                "welcome-name-qq",
-                                "welcome-name-kugou",
-                                "account-id-netease",
-                                "account-id-qq",
-                                "account-id-kugou",
-                                "kugou-edition",
-                                "welcome-name-kugou-standard",
-                                "welcome-name-kugou-lite",
-                                "account-id-kugou-standard",
-                                "account-id-kugou-lite"}
-                        .contains(key)) {
+    if (offline || !preferenceKeys().contains(key)) {
         return {};
     }
     return AppStorage::settings().value("panel/" + key).toString();
 }
 void Host::setPreference(QString key, QString value) {
-    if (!offline && value.size() < 262144 &&
-        QStringList{"search-history",
-                    "play-history",
-                    "local-cover-cache",
-                    "theme",
-                    "motion",
-                    "startup-animation",
-                    "detail-autoplay",
-                    "single-play-mode",
-                    "disc-rotation",
-                    "scene-enhancement",
-                    "archive-mask-strength",
-                    "auto-update",
-                    "volume",
-                    "quality",
-                    "alternate-source",
-                    "provider",
-                    "lyrics-cache",
-                    "lyrics-global-offset-ms",
-                    "welcome-name-netease",
-                    "welcome-name-qq",
-                    "welcome-name-kugou",
-                    "account-id-netease",
-                    "account-id-qq",
-                    "account-id-kugou",
-                    "kugou-edition",
-                    "welcome-name-kugou-standard",
-                    "welcome-name-kugou-lite",
-                    "account-id-kugou-standard",
-                    "account-id-kugou-lite"}
-            .contains(key)) {
+    if (!offline && value.size() < 262144 && preferenceKeys().contains(key)) {
         AppStorage::settings().setValue("panel/" + key, value);
+        // 帧生成开关是唯一"不必重启也能生效"的偏好：呈现层每帧解析 RHINE_FG，
+        // 所以这里写完磁盘再同步一次环境变量，设置页点一下就切换插值。
+        // 具体转换在 RhineFg::applyInterpolationPreference（有单测）。
+        if (key == QLatin1String("fg")) {
+            RhineFg::applyInterpolationPreference(value);
+        }
     }
 }
 bool Host::activates() const {

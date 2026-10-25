@@ -13,11 +13,12 @@
 
 class Engine;
 class QQuickWindow;
+class QWindow;
 
 // Windows 任务栏控制
 class WindowsTaskbar : public QObject, public QAbstractNativeEventFilter {
   public:
-    WindowsTaskbar(Engine *engine, QQuickWindow *window);
+    WindowsTaskbar(Engine *engine, QWindow *window);
     ~WindowsTaskbar() override;
     bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) override;
 
@@ -29,7 +30,7 @@ class WindowsTaskbar : public QObject, public QAbstractNativeEventFilter {
     QImage previewImage(QSize bounds) const;
     bool sendPreview(QSize bounds, bool live);
     Engine *m_engine;
-    QPointer<QQuickWindow> m_window;
+    QPointer<QWindow> m_window;
     HWND m_handle = nullptr;
     ITaskbarList3 *m_taskbar = nullptr;
     UINT m_createdMessage = 0;

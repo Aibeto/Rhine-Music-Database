@@ -10,7 +10,9 @@ endif()
 project(
     RhineMusicDatabase
     VERSION ${RHINE_VERSION}
-    LANGUAGES CXX)
+    # C is required by the vendored glslang/SPIRV-Tools that compiles the FidelityFX shader permutations at
+    # build time.
+    LANGUAGES CXX C)
 set(RHINE_APPLICATION_ID "rhine.music.database")
 find_package(Git QUIET)
 set(RHINE_COMMIT_SHA "unknown")
@@ -83,6 +85,9 @@ FetchContent_Declare(
     URL "${CMAKE_CURRENT_SOURCE_DIR}/vendor/taglib/taglib-2.1.1.tar.gz"
     URL_HASH SHA256=bd57924496a272322d6f9252502da4e620b6ab9777992e8934779ebd64babd6e)
 FetchContent_MakeAvailable(taglib)
+# AMD FidelityFX（FSR3 组件 + Vulkan 后端，DX12 仅在 Windows 下接入）。 SDK 目标由 RhineMusicDatabase 链接，见文件末尾的
+# FidelityFX::SDK 段。
+include(cmake/FidelityFX.cmake)
 # 自维护源码和锁定的二维码库构成独立应用目标。
 set(RHINE_APP_SOURCES
     Qt/src/AppUpdater.cpp
@@ -173,6 +178,13 @@ set(RHINE_APP_SOURCES
     Qt/src/Hud.h
     Qt/src/RhiScene.cpp
     Qt/src/RhiScene.h
+    Qt/src/fsr/Fsr3Backend.cpp
+    Qt/src/fsr/Fsr3Backend.h
+    Qt/src/fg/FgHost.cpp
+    Qt/src/fg/FgHost.h
+    Qt/src/fg/FgBackend.cpp
+    Qt/src/fg/FgBackend.h
+    Qt/src/fg/FgConfig.h
     Qt/src/OpticalScene.cpp
     Qt/src/OpticalScene.h
     Qt/src/Glyphs.cpp
@@ -183,10 +195,12 @@ if(APPLE)
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 20)
 endif()
-# 原生业务和场景由应用与独立回归共用，测试不需要复制整套源码目标。
+# 原生业务和场景由应用与独立回归共用，测试不需要复制整套源码目标。 FSR 与 FG 后端只被渲染器使用，跟 RhiScene 一起留在应用目标里，避免把 FidelityFX 与 Vulkan
+# 链接进每个回归测试。过滤条件必须同时覆盖 /fsr/ 与 /fg/：这两处的实现依赖 Qt6::Quick 与 GuiPrivate，而 RhineCore 只链
+# Core/Gui/Network/Concurrent/Multimedia。
 set(RHINE_CORE_SOURCES ${RHINE_APP_SOURCES})
 list(FILTER RHINE_CORE_SOURCES EXCLUDE REGEX
-     "/(main|Engine|Icon|RhiScene|OpticalScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/")
+     "/(main|Engine|Icon|RhiScene|OpticalScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/|/fsr/|/fg/")
 list(REMOVE_ITEM RHINE_APP_SOURCES ${RHINE_CORE_SOURCES})
 add_library(RhineCore STATIC ${RHINE_CORE_SOURCES})
 target_include_directories(
@@ -203,6 +217,26 @@ target_link_libraries(
     PRIVATE Qt6::MultimediaPrivate tag)
 add_subdirectory(Qt)
 target_link_libraries(RhineMusicDatabase PRIVATE RhineCore)
+# FSR 只挂在应用目标上：设置页要按编译期能力置灰，所以把可用性也传成宏。 FSR1 是纯着色器（EASU+RCAS），任何后端都能用；FSR3 需要 Vulkan 或 D3D12。
+if(TARGET FidelityFX::SDK)
+    target_link_libraries(RhineMusicDatabase PRIVATE FidelityFX::SDK)
+endif()
+if(RHINE_FFX_VK_AVAILABLE AND RHINE_FFX_SHADER_BLOBS_AVAILABLE)
+    target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_FSR3_VULKAN=1)
+    # 设置页编在 RhineCore 里，只凭"后端名"猜不出构建是否真编进了 FSR3：同一个后端 在不同构建配置下可能可用也可能不可用。把能力宏一并传给 RhineCore，让置灰逻辑
+    # 按实际编译结果判断。这里只传宏，不链接 FidelityFX。
+    target_compile_definitions(RhineCore PRIVATE RHINE_FSR3_VULKAN=1)
+    # VulkanPresenter 直接 #include <vulkan/vulkan.h>（头文件里没有平台守卫）， 所以只能在真有 Vulkan 头的构建里编。macOS 没有 Vulkan
+    # 头，无条件列入源列表 会让它在 `fatal error: 'vulkan/vulkan.h' file not found` 处直接失败。 FgBackend 与 Fsr3Backend 的 Vulkan
+    # 部分都在 RHINE_FSR3_VULKAN 守卫内，无需移出。
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/fg/VulkanPresenter.cpp Qt/src/fg/VulkanPresenter.h)
+    # FG 呈现层总装。头文件里包含 VulkanPresenter.h（连带 vulkan/vulkan.h）， 所以只能跟着 Vulkan 条件一起编。
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/fg/FgShell.cpp Qt/src/fg/FgShell.h)
+endif()
+if(RHINE_FFX_DX12_AVAILABLE)
+    target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_FSR3_DX12=1)
+    target_compile_definitions(RhineCore PRIVATE RHINE_FSR3_DX12=1)
+endif()
 set_source_files_properties(Qt/qml/Main.qml TARGET_DIRECTORY RhineMusicDatabase PROPERTIES QT_RESOURCE_ALIAS
                                                                                            Main.qml)
 target_include_directories(RhineMusicDatabase PRIVATE vendor/qrcodegen Qt/src)
@@ -249,13 +283,24 @@ qt_add_shaders(
     Qt/shaders/shadow.vert
     Qt/shaders/shadow.frag
     Qt/shaders/surface.frag
+    Qt/shaders/surfaceHashed.frag
     Qt/shaders/normal.frag
     Qt/shaders/quad.vert
     Qt/shaders/aoFragment.frag
     Qt/shaders/blurAO.frag
     Qt/shaders/combineAO.frag
+    Qt/shaders/copyColor.frag
     Qt/shaders/bokehFragment.frag
-    Qt/shaders/finalFragment.frag)
+    Qt/shaders/finalFragment.frag
+    Qt/shaders/aaFragment.frag
+    Qt/shaders/taa.frag
+    Qt/shaders/downsample.frag
+    Qt/shaders/velocity.vert
+    Qt/shaders/velocity.frag
+    Qt/shaders/fsr1_easu.frag
+    Qt/shaders/fsr1_rcas.frag
+    Qt/shaders/fgComposite.vert
+    Qt/shaders/fgComposite.frag)
 # 增强模式单独打包
 qt_add_shaders(
     RhineMusicDatabase
@@ -274,6 +319,7 @@ qt_add_shaders(
     Qt/shaders/enhancement/opticalGeometry.vert
     Qt/shaders/enhancement/opticalQuad.vert
     Qt/shaders/enhancement/opticalSurface.frag
+    Qt/shaders/enhancement/opticalGlass.frag
     Qt/shaders/enhancement/opticalFinalFragment.frag)
 target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}"
                                                       $<$<CONFIG:Debug>:QT_QML_DEBUG>)
@@ -310,7 +356,14 @@ elseif(APPLE)
                    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Qt/Info.plist.in")
 elseif(WIN32)
     target_sources(RhineMusicDatabase PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp)
-    target_link_libraries(RhineMusicDatabase PRIVATE dxgi d3d11 ole32 uuid gdi32 dwmapi)
+    target_link_libraries(RhineMusicDatabase PRIVATE dxgi d3d12 ole32 uuid gdi32 dwmapi)
+    # ffx_backend_vk 链接了 Vulkan 导入库，而该依赖 PUBLIC 传播到本目标，于是 vulkan-1.dll 成了加载期依赖。这与 README 承诺的「Vulkan
+    # 不可用时回退平台默认」 直接矛盾：缺少 Vulkan 运行库的机器（CI runner、虚拟机、远程桌面）会在进程启动 阶段就拿到 0xc0000135，main.cpp 里的
+    # vulkanDeviceAvailable() 探测和回退逻辑 根本没机会执行。改成延迟加载：不调用 Vulkan 就不加载，探测失败就正常回退。
+    if(MSVC AND RHINE_FFX_VK_AVAILABLE)
+        target_link_options(RhineMusicDatabase PRIVATE "/DELAYLOAD:vulkan-1.dll")
+        target_link_libraries(RhineMusicDatabase PRIVATE delayimp)
+    endif()
     configure_file(Qt/WindowsIcon.rc.in "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc" @ONLY)
     target_sources(RhineMusicDatabase PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc")
     target_link_libraries(RhineCore PRIVATE psapi)
@@ -322,6 +375,9 @@ elseif(WIN32)
 elseif(UNIX)
     # Linux 复用同一份原生场景实现；凭据、协议交付和媒体集成由本平台文件补齐。
     target_sources(RhineCore PRIVATE Qt/src/PlatformLinux.cpp)
+    # 显卡选择：Windows 那条直路是 DXGI + QT_D3D_ADAPTER_INDEX，Linux 只能把序号翻译成 驱动认识的环境变量，且必须在 QGuiApplication
+    # 之前完成，所以单独成文件、只挂主程序。
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/LinuxGraphics.cpp)
     # 安装后的程序按 AppImage 前缀查找同级 Qt 运行时；构建树仍用 CMake 生成的 kit 路径， 否则 CI 中装在独立目录的 Qt 会在运行测试时找不到。
     set_target_properties(RhineMusicDatabase PROPERTIES INSTALL_RPATH "\$ORIGIN/../lib")
     install(TARGETS RhineMusicDatabase RUNTIME DESTINATION bin)
@@ -432,6 +488,26 @@ if(MSVC)
     target_compile_options(RhineAudioPlaybackRegression PRIVATE /utf-8)
 endif()
 add_test(NAME qt_audio_playback_regression COMMAND RhineAudioPlaybackRegression)
+# 帧生成的纯逻辑（环境变量解析、能力快照、设置页三态、帧输入投递）不碰 GPU， 所以全平台都编、都跑：门控写错的后果是"该置灰的放开了"，只有用例拦得住。
+qt_add_executable(RhineFgCapabilityRegression Qt/tests/FgCapabilityChecks.cpp)
+target_include_directories(RhineFgCapabilityRegression PRIVATE Qt/src)
+target_link_libraries(RhineFgCapabilityRegression PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(RhineFgCapabilityRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_fg_capability_regression COMMAND RhineFgCapabilityRegression)
+
+# Linux 显卡选择里能离线验证的部分：PCI 地址解析、序号 → 环境变量的映射、序号失效时的回退。 写错的后果是"选错卡"或"配置失效后仍注入变量"，只能靠用例拦。三平台都编， sysfs
+# 相关用例在源码里按平台裁剪。
+qt_add_executable(RhineGpuChoiceRegression Qt/tests/LinuxGpuChecks.cpp Qt/src/LinuxGraphics.cpp
+                  Qt/src/AppStorage.cpp)
+target_include_directories(RhineGpuChoiceRegression PRIVATE Qt/src)
+target_link_libraries(RhineGpuChoiceRegression PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(RhineGpuChoiceRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_gpu_choice_regression COMMAND RhineGpuChoiceRegression)
+
 qt_add_executable(RhineAudioStreamRegression Qt/tests/AudioStreamChecks.cpp Qt/src/AudioPlayer.cpp
                   Qt/src/HttpAudioStream.cpp)
 target_include_directories(RhineAudioStreamRegression PRIVATE Qt/src)
@@ -493,3 +569,23 @@ endif()
 add_test(NAME qt_local_music_regression COMMAND RhineLocalMusicRegression
                                                 "${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
 set_tests_properties(qt_local_music_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# FG 闸门探针：验证「setQueueSubmitParams 对离屏帧生效」与「共享 device 上能建交换链」。 需要真实 GPU + 显示服务（或 xvfb + lavapipe），CI runner 没有
+# GPU，所以**不进默认 CTest 集合**：构建后用 `output/qt-build/RhineFgGateProbe` 手动运行，用它给出 "FG 架构成不成立"的硬结论。
+if(RHINE_FFX_VK_AVAILABLE AND TARGET Qt6::GuiPrivate)
+    # EXCLUDE_FROM_ALL：这是排障用的一次性探针，不该占用默认构建与 CI 的时间。 需要时显式 cmake --build output/qt-build --target
+    # RhineFgGateProbe。
+    qt_add_executable(RhineFgGateProbe Qt/tests/FgGateProbe.cpp)
+    set_target_properties(RhineFgGateProbe PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    target_include_directories(RhineFgGateProbe PRIVATE Qt/src)
+    target_sources(RhineFgGateProbe PRIVATE Qt/src/fg/VulkanPresenter.cpp Qt/src/fg/VulkanPresenter.h)
+    target_compile_definitions(RhineFgGateProbe PRIVATE RHINE_FFX_VK_AVAILABLE=1)
+    target_link_libraries(RhineFgGateProbe PRIVATE Qt6::Quick Qt6::GuiPrivate)
+    if(MSVC)
+        target_compile_options(RhineFgGateProbe PRIVATE /utf-8)
+    else()
+        # 保留符号：探针崩在 Qt 内部时，只有带 -g 才能看出是哪一步。
+        target_compile_options(RhineFgGateProbe PRIVATE -g)
+        target_link_options(RhineFgGateProbe PRIVATE -g)
+    endif()
+endif()

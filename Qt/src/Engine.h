@@ -3,6 +3,7 @@
 #include "Host.h"
 #include "NativeApplication.h"
 #include <QElapsedTimer>
+#include <QPointF>
 #include <QVariantMap>
 #include <QUrl>
 #include <QQuickWindow>
@@ -29,7 +30,9 @@ class Engine : public QObject {
         return m_current;
     }
     QImage cover() const {
-        return host.image(m_cover);
+        // 渲染线程读这里，不能直接访问 Host 的图片缓存（QCache 非线程安全）。
+        // m_coverImage 在 GUI 线程的 update() 里同步，QImage 的隐式共享保证拷贝安全。
+        return m_coverImage;
     }
     QJsonArray commands() const {
         return m_commands;
@@ -46,12 +49,17 @@ class Engine : public QObject {
     Q_INVOKABLE void submitForm(QString account, QString captcha);
     Q_INVOKABLE void sendLoginCode(QString phone);
     Q_INVOKABLE bool keyEvent(int key, int modifiers, QString text);
+    /// 真正的按键处理；keyEvent 负责探针记录后转发。
+    bool keyEventImpl(int key, int modifiers, QString text);
     Q_INVOKABLE void searchAccepted(QString text, int modifiers);
     Q_INVOKABLE void wheelInput(double x, double y, double pixelDelta, double angleDelta);
     Q_INVOKABLE void adjustPlayer(QString control, double x, double width);
     Q_INVOKABLE void toggleFullscreen();
     Q_INVOKABLE void minimizeWindow();
-    void setWindow(QQuickWindow *window);
+    // FG 路径呈现层是裸 QWindow（无 QQuickWindow），所以这里只要求 QWindow。
+    void setWindow(QWindow *window);
+    // 返回诊断帧间隔覆盖值，未指定时由呈现侧自适应限速。
+    int frameIntervalMs() const;
     Q_INVOKABLE void query(QString query);
     Q_INVOKABLE void key(QString key, bool command);
     Q_INVOKABLE void pointer(QString type, double x, double y);
@@ -85,6 +93,17 @@ class Engine : public QObject {
         m_opticalTextureBytes.store(0, std::memory_order_relaxed);
     }
     Q_INVOKABLE void setVisible(bool value);
+    // FSR3 接入接口：本帧投影使用的亚像素抖动（单位像素，屏幕坐标 x 向右、y 向下）。
+    // RHINE_JITTER=1 时按 Halton(2,3) 的 8 个相位循环；默认关闭且恒为 (0,0)。
+    QPointF jitterOffset() const {
+        return m_jitterOffset;
+    }
+    bool jitterEnabled() const {
+        return m_jitterEnabled;
+    }
+    // FSR 重置（画质切换、设备重建、分辨率变化）时调用：抖动归零、相位回到 0，
+    // 并让下一帧携带 temporalReset 键，渲染器据此丢弃上一帧运动矢量历史。
+    Q_INVOKABLE void resetTemporalState();
     void wake(bool input = true);
     void start();
     void recordRender(quint64 resources, quint64 bindings = 0, quint64 textureBytes = 0,
@@ -152,6 +171,10 @@ class Engine : public QObject {
     // 鼠标滚轮一格的距离，按帧衰减送入，触控板不经过这里。
     double m_wheelRemainingDistance = 0;
     qint64 m_lastTick = 0, m_lastInput = 0;
+    // 节拍诊断（RHINE_PACE_DIAG=1）：tick 间隔与 step 耗时的累计量。
+    qint64 m_paceEnterNs = 0, m_paceGapSum = 0, m_paceGapMax = 0;
+    qint64 m_paceStepSum = 0, m_paceStepMax = 0;
+    int m_paceTicks = 0;
     double m_animationTime = 0;
     double m_discAngle = 0;
     double m_discTime = 0;
@@ -159,6 +182,11 @@ class Engine : public QObject {
     QString m_discIdentity;
     quint64 m_steps = 0, m_sceneUpdates = 0, m_hudUpdates = 0;
     int m_stableFrames = 0;
+    // FSR3 亚像素抖动：默认关闭；开启后每帧推进一个相位，重置时归零。
+    bool m_jitterEnabled = false;
+    int m_jitterPhase = 0;
+    QPointF m_jitterOffset;
+    bool m_temporalResetPending = false;
     QJsonObject m_sceneSignature;
     SceneDrawBuffers m_previousBuffers;
     void tick();
@@ -172,9 +200,10 @@ class Engine : public QObject {
     QVariantList m_hits;
     QJsonObject m_frame, m_current;
     QJsonArray m_commands;
-    QPointer<QQuickWindow> m_window;
+    QPointer<QWindow> m_window;
     QWindow::Visibility m_windowedVisibility = QWindow::Windowed;
     QString m_loginMethod;
     QString m_cover;
+    QImage m_coverImage;
     qint64 m_coverRevision = 0;
 };

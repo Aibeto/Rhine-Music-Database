@@ -4,10 +4,13 @@
 #include <numbers>
 
 namespace {
+// Optical_Film 是包在唱片外的那层透明光学包裹，不能隐藏：隐藏后画面会少一层，
+// 详情页与查看封面页的玻璃包裹感也随之消失。
 const QSet<QString> hidden{"Internal_Ceramic",    "Optical_Edges", "Subsurface_Optics", "Optical_Film_Edge",
-                           "Amber_Optical_Inlay", "Optical_Film",  "Champagne_Index",   "Printed_Label"};
-const QSet<QString> arrays{"Frosted_Polymer", "Ivory_Edges", "Titanium_Fasteners", "Index_Inlay",
-                           "Optical_Diffuser"};
+                           "Amber_Optical_Inlay", "Champagne_Index", "Printed_Label"};
+// 实例化只保留构成卡片轮廓的部件。螺丝与贴片在远景卡片上不足一个像素，
+// 随 251 份实例绘制会占掉一半几何预算，因此只随焦点卡片绘制。
+const QSet<QString> arrays{"Frosted_Polymer", "Ivory_Edges", "Optical_Diffuser"};
 }
 
 QJsonArray SceneAppearance::color(QString hex) {
@@ -123,7 +126,11 @@ SceneAppearance::SceneAppearance(const QJsonObject &asset) {
             {"transparent", source["alphaMode"] == "BLEND"},
             {"depthWrite", true},
             {"order", 0},
-            {"side", source["doubleSided"].toBool() ? 2 : 0},
+            // 闭合且不参与透射的部件背面被正面完全遮挡，关闭双面渲染省下一整轮几何。
+            // 透射材质仍需双面，背面由 backs 通道提供内部反射。
+            {"side", entry["closed"].toBool(false) && high["transmission"].toDouble() <= 0.0
+                         ? 0
+                         : (source["doubleSided"].toBool() ? 2 : 0)},
             {"castShadow", name == "Optical_Diffuser"},
             {"localMatrix", SceneMath::Matrix().json()},
             {"base", high},
@@ -171,6 +178,27 @@ SceneAppearance::SceneAppearance(const QJsonObject &asset) {
                       {"opacity", 0},
                       {"clearcoat", 0},
                       {"clearcoatRoughness", 0}};
+    // 卡片正面的装饰文字单独成片：8 倍密度，几何已按卡片局部坐标定位，这里不再施加变换。
+    const auto letteringPart = [&](int mesh, const QString &name) {
+        actorTemplate.append(QJsonObject{{"partIndex", partIndex++},
+                                         {"mesh", mesh},
+                                         {"asset", "cassette"},
+                                         {"label", false},
+                                         {"name", name},
+                                         {"transparent", true},
+                                         {"depthWrite", false},
+                                         {"order", 0},
+                                         {"side", 2},
+                                         {"castShadow", false},
+                                         {"localMatrix", SceneMath::Matrix().json()},
+                                         {"base", label},
+                                         {"high", QJsonValue::Null},
+                                         {"low", QJsonValue::Null},
+                                         {"hasMap", true},
+                                         {"interpolateAttenuation", false}});
+    };
+    letteringPart(-6, "Case_Lettering_Front");
+    letteringPart(-7, "Case_Lettering_Spine");
     actorTemplate.append(
         QJsonObject{{"partIndex", partIndex},
                     {"mesh", -1},

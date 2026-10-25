@@ -15,7 +15,7 @@ constexpr int Segments = 192;
 struct Mesh {
     std::vector<float> vertices;
     int count() const {
-        return int(vertices.size() / 12);
+        return int(vertices.size() / 8);
     }
     QByteArray bytes() const;
 };

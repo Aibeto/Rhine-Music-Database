@@ -20,7 +20,9 @@ concurrency:
 jobs:
   build:
     name: ${{ matrix.name }}
-    timeout-minutes: 45
+    # Windows 需要从源码构建 LLVM 级的 dxc（cmake/Dxc.cmake 注释写明首次约需数十分钟），
+    # 45 分钟不足以覆盖，故按平台区分。
+    timeout-minutes: ${{ matrix.timeout || 45 }}
     strategy:
       fail-fast: false
       matrix:
@@ -45,16 +47,65 @@ jobs:
             node-platform: win-x64
             artifact: Windows-x64
             distribution: 'Windows-x64-Setup.exe'
+            timeout: 120
     runs-on: ${{ matrix.os }}
     env:
-      NODE_VERSION: '22.14.0'
+      NODE_VERSION: '26.11.1'
       RHINE_BUILD_TYPE: Release
       RHINE_VERSION: ${{ inputs.release_version || '' }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # FSR3 超分与插帧需要 FidelityFX SDK；着色器预编译需要 dxc 与 glslang。
+          # 三者都以 submodule 记录，缺 SDK 时 cmake 会静默跳过 FSR 目标，
+          # 因此必须显式递归检出，否则 CI 测不到 FSR 代码路径。
+          submodules: recursive
+      - name: Check out glslang vendored dependencies
+        # 只有 Vulkan 分支会解析 glslang，但不在 macOS 上跳过：万一 runner 带了
+        # MoltenVK 让 find_package(Vulkan) 成立，跳过就等于把 FSR3 静默关掉，
+        # 而本步骤失败只是告警，多跑一次的代价远小于静默禁用。
+        shell: bash
+        run: |
+          # glslang 16.x 用 known_good.json 而非 .gitmodules 固定依赖，因此
+          # `submodules: recursive` 不会拉取它们。缺任一目录时 cmake/Glslang.cmake
+          # 会回退到系统 glslangValidator，runner 上没有就退化为 FSR3 不可用。
+          set -uo pipefail
+          failed=0
+          clone_pinned() {
+            local subdir="$1" url="$2" commit="$3"
+            local dest="third_party/glslang/$subdir"
+            if [[ -f "$dest/CMakeLists.txt" ]]; then
+              echo "already present: $subdir"
+              return 0
+            fi
+            rm -rf "$dest"
+            mkdir -p "$(dirname "$dest")"
+            git init -q "$dest"
+            git -C "$dest" remote add origin "$url"
+            # 先按 commit 浅抓取；部分服务器不允许按 SHA 抓取，此时退回全量抓取。
+            # 注意全量抓取后必须 checkout 该 commit，不能用 FETCH_HEAD：不带 ref 的
+            # fetch 会让 FETCH_HEAD 指向默认分支最新提交，检出结果就偏离了 pin。
+            if ! git -C "$dest" fetch -q --depth 1 origin "$commit"; then
+              echo "shallow fetch by SHA failed, falling back to full fetch: $subdir"
+              git -C "$dest" fetch -q origin
+            fi
+            git -C "$dest" checkout -q "$commit"
+            test -f "$dest/CMakeLists.txt"
+          }
+          # 检出失败只影响「FSR3 Vulkan 走源码 glslang」这一条路径，不该让整个构建
+          # 直接失败：macOS 上无用，Windows 走 DX12 也不需要它。汇总后作为警告输出。
+          clone_pinned External/spirv-tools \
+            https://github.com/KhronosGroup/SPIRV-Tools.git \
+            ef96ed763b43b59b33b31b362f09a02b729fa1c9 || failed=1
+          clone_pinned External/spirv-tools/external/spirv-headers \
+            https://github.com/KhronosGroup/SPIRV-Headers.git \
+            496543121ce6419f23d6fa5d7194ba66c36212d2 || failed=1
+          if [[ "$failed" -ne 0 ]]; then
+            echo "::warning::glslang 依赖检出失败，FSR3 Vulkan 将回退到系统 glslangValidator"
+          fi
       - uses: actions/setup-node@v4
         with:
-          node-version: '22.14.0'
+          node-version: '26.11.1'
           cache: npm
           cache-dependency-path: |
             package-lock.json
@@ -67,13 +118,66 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
+      # Windows 与 Linux 的默认后端都是 Vulkan（README「图形后端」一节），
+      # 而 Windows runner 镜像不预装 Vulkan SDK：缺 vulkan.h 时 Qt 的
+      # QVulkanInstance / QRhiVulkanInitParams 不会声明，Vulkan 路径根本编不进来，
+      # 默认后端就只能退成 D3D12。装 SDK 让这条路径真正可编译。
+      - name: Install Vulkan SDK
+        if: runner.os == 'Windows'
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          # 只为编译期需要：头文件与 vulkan-1.lib。不装 SwiftShader / Lavapipe 软光栅，
+          # 运行期是否有可用的物理设备由 vulkanDeviceAvailable() 探测决定，
+          # 探测不到就回退 D3D12，不会因为缺 GPU 而让构建或测试失败。
+          install_runtime: true
+          cache: true
+          stripdown: true
+      - name: Resolve DXC cache key
+        # 复用签名 = 子模块 rev + 构建配方，而配方里含编译器/ninja/Python 的绝对路径。
+        # 因此 key 要同时带上 rev 和工具链标识：rev 换版本、镜像换工具链都会得到新 key，
+        # 缓存自然失效并重新保存。若只按 rev 取 key，actions/cache 不会覆盖已存在的
+        # key，镜像升级后就会永久命中旧缓存，而签名校验每次都判不等，退化成每次全量重建。
+        if: runner.os == 'Windows'
+        id: dxc
+        shell: bash
+        run: |
+          set -euo pipefail
+          rev=$(git -C third_party/dxc rev-parse HEAD)
+          {
+            cl 2>&1 | head -1 || true
+            ninja --version 2>/dev/null || echo "ninja: 未找到"
+            python -c 'import sys; print(sys.executable)' 2>/dev/null || echo "python: 未找到"
+          } > "$RUNNER_TEMP/dxc-tools.txt"
+          echo "rev=${rev}" >> "$GITHUB_OUTPUT"
+          echo "tools=$(sha256sum "$RUNNER_TEMP/dxc-tools.txt" | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - name: Restore DXC build
+        # generated/dxc 被 .gitignore 排除，干净检出后 RHINE_DXC_REUSE_BUILT 找不到
+        # 产物，Windows 每次都要从源码编一遍 LLVM 级的 dxc（约数十分钟）。这里缓存
+        # 的是本地从源码构建出来的产物，不是外来的预编译二进制；命中后签名校验通过，
+        # ExternalProject 那一层整个跳过。
+        #
+        # runner 每次都是全新机器，但这份缓存存在 GitHub 侧的远端缓存里（仓库级，
+        # 上限 10 GB），跨 runner、跨运行持久，与机器是否干净无关。它用的是 Actions
+        # 运行时 token，不受上面 permissions: contents: read 影响；唯一存不进去的
+        # 情况是来自 fork 的 pull_request——那种运行只能 restore。
+        #
+        # 拆成 restore/save 两步而不是单个 actions/cache：后者的保存在 post 步骤，
+        # job 被 timeout 掐掉时不执行，会出现“编完了但没存上、下次再编一遍”的死循环。
+        if: runner.os == 'Windows'
+        id: dxc-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: generated/dxc
+          key: dxc-win-${{ steps.dxc.outputs.rev }}-${{ steps.dxc.outputs.tools }}-${{ hashFiles('cmake/Dxc.cmake') }}
       - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
+          # libvulkan-dev 提供 vulkan.h：cmake/FidelityFX.cmake 用 find_package(Vulkan QUIET)
+          # 探测后端，缺头文件会静默跳过 FSR3 的 Vulkan 实现。
           sudo apt-get install --yes --no-install-recommends \
             cmake ninja-build file libgl1-mesa-dev libxkbcommon-dev \
-            libxkbcommon-x11-0 libxcb-cursor0
+            libxkbcommon-x11-0 libxcb-cursor0 libvulkan-dev
           # 构建脚本用 --appimage-extract-and-run 打包与冒烟测试，不依赖 FUSE；
           # 这里只为兼容手动验证，noble 已按 t64 改名，缺失不算失败。
           sudo apt-get install --yes --no-install-recommends libfuse2t64 || \
@@ -124,6 +228,36 @@ jobs:
         run: npm run build
         env:
           QT_ROOT: ${{ env.QT_ROOT_DIR }}
+      - name: Check DXC build completeness
+        # actions/cache 不会覆盖已存在的 key：一旦把半成品存进去，之后每次都会命中
+        # 这份坏缓存、签名校验失败、重新全量构建，而保存又被 cache-hit 挡住，就永远
+        # 修不好。dxc-source-revision.txt 由 ExternalProject 的 INSTALL 步骤最后写入，
+        # 它和两个 DLL 同时存在才代表 dxc/dxcompiler/dxildll 三个目标都编完了。
+        if: always() && runner.os == 'Windows'
+        id: dxc-artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f generated/dxc/dxc-source-revision.txt ] \
+             && [ -f generated/dxc/bin/dxcompiler.dll ] \
+             && [ -f generated/dxc/bin/dxil.dll ]; then
+            echo "complete=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "complete=false" >> "$GITHUB_OUTPUT"
+            echo "DXC 产物不完整，跳过缓存保存"
+          fi
+      - name: Save DXC build
+        # 紧跟构建之后显式保存，而不是等 actions/cache 的 post 步骤：这样即使后面的
+        # 测试或打包失败，这份来之不易的 DXC 产物也已经落地，下次直接命中。
+        #
+        # continue-on-error：来自 fork 的 PR 只有缓存读权限，保存会 403；配额或网络
+        # 出问题也一样。缓存只是加速手段，存不进去不该把构建判失败。
+        if: always() && runner.os == 'Windows' && steps.dxc-cache.outputs.cache-hit != 'true' && steps.dxc-artifacts.outputs.complete == 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v4
+        with:
+          path: generated/dxc
+          key: dxc-win-${{ steps.dxc.outputs.rev }}-${{ steps.dxc.outputs.tools }}-${{ hashFiles('cmake/Dxc.cmake') }}
       # 离线测试
       - name: Run offline regressions
         run: npm test

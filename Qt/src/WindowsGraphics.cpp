@@ -1,6 +1,6 @@
 #include <QDebug>
 #include <QtGlobal>
-#include <d3d11.h>
+#include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
 
@@ -11,13 +11,15 @@ __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
 using Microsoft::WRL::ComPtr;
 
+/**
+ * Windows 默认使用独立显卡：按 DXGI 的高性能偏好枚举适配器，确认能创建 D3D12 设备后
+ * 把索引交给 Qt——QRhiD3D12 读 QT_D3D_ADAPTER_INDEX，Vulkan/OpenGL 会忽略它。
+ * 用户已指定索引或要求软件渲染时不覆盖。
+ */
 void initializeWindowsGraphics() {
-    if (qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND")) {
-        qputenv("QSG_RHI_BACKEND", "d3d11");
-    }
     if (qEnvironmentVariableIsSet("QT_D3D_ADAPTER_INDEX") ||
         qEnvironmentVariableIntValue("QSG_RHI_PREFER_SOFTWARE_RENDERER") != 0 ||
-        qEnvironmentVariableIntValue("RHINE_SOFTWARE_GPU") == 1 || qgetenv("QSG_RHI_BACKEND") != "d3d11") {
+        qEnvironmentVariableIntValue("RHINE_SOFTWARE_GPU") == 1) {
         return;
     }
 
@@ -46,9 +48,9 @@ void initializeWindowsGraphics() {
             continue;
         }
 
-        ComPtr<ID3D11Device> probeDevice;
-        if (FAILED(D3D11CreateDevice(preferredAdapter.Get(), D3D_DRIVER_TYPE_UNKNOWN, nullptr, 0, nullptr, 0,
-                                     D3D11_SDK_VERSION, probeDevice.GetAddressOf(), nullptr, nullptr))) {
+        ComPtr<ID3D12Device> probeDevice;
+        if (FAILED(D3D12CreateDevice(preferredAdapter.Get(), D3D_FEATURE_LEVEL_11_0,
+                                     IID_PPV_ARGS(probeDevice.GetAddressOf())))) {
             continue;
         }
 
@@ -64,11 +66,11 @@ void initializeWindowsGraphics() {
             if (description.AdapterLuid.LowPart == preferredDescription.AdapterLuid.LowPart &&
                 description.AdapterLuid.HighPart == preferredDescription.AdapterLuid.HighPart) {
                 qputenv("QT_D3D_ADAPTER_INDEX", QByteArray::number(adapterIndex));
-                qInfo() << "Selected high-performance D3D11 adapter" << adapterIndex
+                qInfo() << "Selected high-performance D3D12 adapter" << adapterIndex
                         << QString::fromWCharArray(description.Description);
                 return;
             }
         }
     }
-    qWarning() << "No usable high-performance D3D11 adapter found; using Qt default adapter";
+    qWarning() << "No usable high-performance D3D12 adapter found; using Qt default adapter";
 }

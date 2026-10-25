@@ -1,3 +1,5 @@
+#include "fg/FgConfig.h"
+#include "GraphicsBackend.h"
 #include "NativeHud.h"
 #include "MusicData.h"
 #include "MusicDiscover.h"
@@ -31,6 +33,7 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     dark = themeMode == "system" ? host->systemDark() : themeMode == "dark";
     reduced = host->preference("motion") == "reduced";
     startupAnimation = host->preference("startup-animation") == "on";
+    vsync = host->preference("vsync") != "off";
     discRotation = host->preference("disc-rotation") == "on";
     sceneEnhancement = host->preference("scene-enhancement") != "off";
     bool hasMaskStrength = false;
@@ -59,6 +62,8 @@ void NativeHud::openModal(QString kind) {
     }
     modal = kind;
     closing = false;
+    // 换页时收起所有下拉块，避免展开状态跨页面残留。
+    expandedPreference.clear();
     motion.set(true, lastTime, reduced);
     query.clear();
     listOffset = 0;
@@ -614,12 +619,117 @@ void NativeHud::action(QString value) {
     } else if (value == "detail-autoplay") {
         const bool enabled = m_host->preference("detail-autoplay") == "on";
         m_host->setPreference("detail-autoplay", enabled ? "off" : "on");
+    } else if (value == "graphics-backend") {
+        // 后端切换需要重启生效：仅写入配置，由下次启动的 selectGraphicsBackend 应用。
+        // 顺序：默认（自动探测）→ Vulkan → OpenGL → Direct3D 12（仅 Windows）→ 默认。
+        // 非 Windows 没有 D3D12，OpenGL 之后直接回到默认。
+        const auto current = m_host->preference("graphics-backend");
+        QString next;
+        if (current.isEmpty()) {
+            next = QStringLiteral("vulkan");
+        } else if (current == "vulkan") {
+            next = QStringLiteral("opengl");
+#if defined(Q_OS_WIN)
+        } else if (current == "opengl") {
+            next = QStringLiteral("d3d12");
+#endif
+        }
+        m_host->setPreference("graphics-backend", next);
+    } else if (value.startsWith("gpu-index:")) {
+#if defined(Q_OS_LINUX)
+        // Linux 显卡选择：只写配置，下次启动由 initializeLinuxGraphics 校验序号并注入
+        // 驱动变量。"default" 表示清回默认——清空后启动不再注入任何厂商变量。
+        // 序号越界就丢弃：界面上本来不会出现这种项，防的是配置被外部改坏后传到启动侧。
+        const auto chosen = value.mid(10).trimmed();
+        bool numeric = false;
+        const int index = chosen.toInt(&numeric);
+        const int gpuCount = RhineGraphics::gpuDeviceCount();
+        if (chosen == QLatin1String("default")) {
+            m_host->setPreference("gpu-index", QString());
+        } else if (numeric && index >= 0 && index < gpuCount) {
+            m_host->setPreference("gpu-index", QString::number(index));
+        }
+        expandedPreference.clear();
+#endif
+    } else if (value.startsWith("expand:")) {
+        // 设置页下拉块：点标题行展开/收起对应选项列表（抗锯齿与 FSR 档位共用）。
+        // 列表高度参与内容总高度，所以展开后立即重新夹紧滚动位置，避免停在超出末尾的位置。
+        const auto key = value.mid(7);
+        expandedPreference = expandedPreference == key ? QString() : key;
+        settingsScroll = std::clamp(settingsScroll, 0., std::max(0., settingsScrollMaximum()));
+    } else if (value.startsWith("fsr-quality:")) {
+        // FSR 超分档位：渲染器每帧读取，下一帧生效（内部尺寸变化会触发渲染目标重建）。
+        const auto quality = value.mid(12);
+        if (quality == "super" || quality == "performance" || quality == "balanced" ||
+            quality == "quality" || quality == "native") {
+            m_host->setPreference("fsr-quality", quality);
+            qputenv("RHINE_FSR_QUALITY", quality.toUtf8());
+            expandedPreference.clear();
+        }
+    } else if (value.startsWith("fsr-sharpness:")) {
+        // 锐化强度 0–100，逐帧生效：FSR1 换算成 RCAS 的档，FSR3 直接取 0–1。
+        bool valid = false;
+        const auto percent = value.mid(14).toInt(&valid);
+        if (valid) {
+            const auto clamped = std::clamp(percent, 0, 100);
+            m_host->setPreference("fsr-sharpness", QString::number(clamped));
+            qputenv("RHINE_FSR_SHARPNESS", QByteArray::number(clamped));
+        }
+    } else if (value.startsWith("aa-mode:")) {
+        // 抗锯齿互斥单选，渲染器每帧读取该环境变量，切换后下一帧生效。
+        const auto mode = value.mid(8);
+        // fsr 是合并后的唯一超分选项；fsr1 / fsr3 仍接受，兼容旧偏好。
+        if (mode == "off" || mode == "fxaa" || mode == "ssaa" || mode == "msaa" || mode == "taa" ||
+            mode == "fsr" || mode == "fsr1" || mode == "fsr3") {
+            m_host->setPreference("aa-mode", mode);
+            qputenv("RHINE_AA_MODE", mode.toUtf8());
+            // 选中即收起，与原生下拉菜单的行为一致。
+            expandedPreference.clear();
+        }
+    } else if (value.startsWith("msaa:")) {
+        // MSAA 采样数：渲染器每帧读取，改变会触发渲染目标重建，不需要重启。
+        bool valid = false;
+        const auto samples = value.mid(5).toInt(&valid);
+        if (valid && (samples == 2 || samples == 4 || samples == 8)) {
+            m_host->setPreference("msaa", QString::number(samples));
+            qputenv("RHINE_MSAA", QByteArray::number(samples));
+        }
+    } else if (value.startsWith("aa-scale:")) {
+        bool valid = false;
+        const auto percent = value.mid(9).toInt(&valid);
+        if (valid) {
+            const auto clamped = std::clamp(percent, 100, 200);
+            m_host->setPreference("aa-scale", QString::number(clamped));
+            qputenv("RHINE_AA_SCALE", QByteArray::number(clamped));
+        }
+    } else if (value.startsWith("render-scale:")) {
+        // 渲染分辨率重启生效：内部目标按百分比创建，最终合成通道再缩放回窗口。
+        // 小于 100 换帧率，大于 100 是超采样换抗锯齿。
+        bool valid = false;
+        const auto percent = value.mid(13).toInt(&valid);
+        if (valid) {
+            const auto clamped = std::clamp(percent, 50, 100);
+            m_host->setPreference("render-scale", QString::number(clamped));
+            // 渲染器每帧读取该环境变量，改完下一帧即生效，不需要重启。
+            qputenv("RHINE_RENDER_SCALE", QByteArray::number(clamped));
+        }
+    } else if (value == "fg") {
+        // 帧生成与抗锯齿模式互不影响；呈现层每帧读取 RHINE_FG，切换后下一帧生效，
+        // 所以这个开关是设置页里唯一不需要重启的偏好。转换规则与 Host::setPreference
+        // 共用同一个函数，免得两处对"什么才算 on"产生分歧。
+        const auto enabled = m_host->preference("fg") == "on";
+        const auto next = enabled ? QStringLiteral("off") : QStringLiteral("on");
+        m_host->setPreference("fg", next);
+        RhineFg::applyInterpolationPreference(next);
     } else if (value == "single-play-mode") {
         const bool append = m_host->preference("single-play-mode") == "append";
         m_host->setPreference("single-play-mode", append ? "replace" : "append");
     } else if (value == "startup-animation") {
         startupAnimation = !startupAnimation;
         m_host->setPreference("startup-animation", startupAnimation ? "on" : "off");
+    } else if (value == "vsync") {
+        vsync = !vsync;
+        m_host->setPreference("vsync", vsync ? "on" : "off");
     } else if (value == "motion") {
         reduced = !reduced;
         m_scene.reduced(reduced);

@@ -112,7 +112,9 @@ QString NativeCards::expand(QJsonObject &frame, const QByteArray &bytes, SceneDr
             } else {
                 draw["quality"] = quality;
             }
-            draw["clarity"] = high.isEmpty() ? 0 : clarity;
+            // 没有 high 材质变体的部件也要跟随清晰/磨砂状态；
+            // 原先缺省为 0 会让这些部件永远处于磨砂，初始状态就不清晰。
+            draw["clarity"] = clarity;
             draw["theme"] = theme;
             draw["subdued"] = high.isEmpty() ? frame["globalSubdued"] : QJsonValue(subdued);
             draw["matrices"] = QJsonArray();

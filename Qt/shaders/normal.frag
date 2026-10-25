@@ -17,5 +17,6 @@ Out interpolated() {
 layout(location = 0) out vec4 normalColor;
 void main() {
     vec3 normal = normalize((g.view * vec4(v_normal, 0)).xyz);
-    normalColor = vec4(normal * .5 + .5, 1);
+    // 八面体编码写进 RG：AO 只需要方向，RGBA8 目标够用，写入带宽减半。
+    normalColor = vec4(octEncode(normal), 0, 1);
 }

@@ -8,10 +8,28 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QPainter>
+#include <QQuickWindow>
 #include <QThread>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+namespace {
+// Halton(2,3) 低差异序列：8 个相位平移到 [-0.5, 0.5) 像素，覆盖 ±0.5 像素抖动范围。
+QPointF haltonJitter(int phase) {
+    const auto halton = [](int index, int base) {
+        double fraction = 1.0;
+        double result = 0.0;
+        while (index > 0) {
+            fraction /= base;
+            result += fraction * (index % base);
+            index /= base;
+        }
+        return result;
+    };
+    const int index = (phase % 8) + 1;
+    return {halton(index, 2) - .5, halton(index, 3) - .5};
+}
+} // namespace
 bool runNativeHostChecks(const QString &root);
 bool runNativeMusicChecks(const QString &root);
 bool runGpuReferenceCheck(const QImage &expected, const QImage &actual);
@@ -19,6 +37,8 @@ bool runGpuReferenceCheck(const QImage &expected, const QImage &actual);
 /** 建立纯原生音乐、HUD 和场景状态；Qt 定时器只在输入或动画尚未收束时运行。 */
 Engine::Engine(QString path, bool offline, QObject *parent)
     : QObject(parent), host(path, offline), scene(path), m_glyphs(path) {
+    // FSR3 抖动默认关闭；环境变量在进程启动时读取一次，运行期不再变化。
+    m_jitterEnabled = qEnvironmentVariableIntValue("RHINE_JITTER") == 1;
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
     app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
     connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
@@ -37,6 +57,34 @@ Engine::Engine(QString path, bool offline, QObject *parent)
     connect(&timer, &QTimer::timeout, this, &Engine::tick);
     mediaTimer.setInterval(1000);
     connect(&mediaTimer, &QTimer::timeout, this, &Engine::pollMedia);
+    // 节拍诊断（RHINE_PACE_DIAG=1）：每秒打印一次「引擎 tick 数 vs 实际渲染数」，
+    // 用来判定帧率是被引擎定时器限住、还是被呈现侧限住。
+    if (qEnvironmentVariableIsSet("RHINE_PACE_DIAG")) {
+        auto *diag = new QTimer(this);
+        diag->setInterval(1000);
+        connect(diag, &QTimer::timeout, this, [this] {
+            static quint64 lastSteps = 0, lastScene = 0, lastHud = 0, lastRender = 0;
+            const quint64 render = m_renderFrames.load(std::memory_order_relaxed);
+            const double avgGap = m_paceTicks > 1 ? double(m_paceGapSum) / (m_paceTicks - 1) / 1e6 : 0;
+            const double avgStep = m_paceTicks > 0 ? double(m_paceStepSum) / m_paceTicks / 1e6 : 0;
+            qInfo("节拍诊断: tick/s=%llu sceneUpd/s=%llu hudUpd/s=%llu render/s=%llu "
+                  "interval=%dms timerActive=%d sleeping=%d sceneSleeping=%d rotating=%d "
+                  "hudAnimating=%d | 间隔均=%.2fms 最大=%.2fms step均=%.2fms 最大=%.2fms",
+                  qulonglong(m_steps) - lastSteps, qulonglong(m_sceneUpdates) - lastScene,
+                  qulonglong(m_hudUpdates) - lastHud, qulonglong(render) - lastRender, timer.interval(),
+                  int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping), int(m_discRotating),
+                  int(app->hud.animating(m_animationTime)), avgGap, double(m_paceGapMax) / 1e6, avgStep,
+                  double(m_paceStepMax) / 1e6);
+            lastSteps = qulonglong(m_steps);
+            lastScene = qulonglong(m_sceneUpdates);
+            lastHud = qulonglong(m_hudUpdates);
+            lastRender = render;
+            m_paceGapSum = m_paceGapMax = 0;
+            m_paceStepSum = m_paceStepMax = 0;
+            m_paceTicks = 0;
+        });
+        diag->start();
+    }
     if (!offline) {
         start();
     }
@@ -200,8 +248,23 @@ void Engine::wake(bool input) {
     if (m_started && m_visible && !timer.isActive()) {
         // 恢复时接续视觉时钟，不能把整段待机时间推进到弹簧和拖动惯性中。
         m_lastTick = now;
-        timer.start(16);
+        const int resumeMs = frameIntervalMs();
+        timer.start(resumeMs > 0 ? resumeMs : 0);
     }
+}
+void Engine::resetTemporalState() {
+    // FSR 重置：抖动立即归零并回到第 0 相位；下一帧带 temporalReset 键，
+    // 渲染器据此清空上一帧模型矩阵，速度目标输出 0，避免时间累积残影。
+    m_jitterPhase = 0;
+    m_jitterOffset = {};
+    m_temporalResetPending = true;
+    m_frame["temporalReset"] = true;
+    m_frame.remove("jitter");
+    // 重置必须立即产生一帧：否则场景休眠时渲染器收不到 temporalReset，历史会留到下次唤醒。
+    m_sceneSleeping = false;
+    m_stableFrames = 0;
+    wake(false);
+    notifySceneRenderers(true);
 }
 void Engine::setVisible(bool value) {
     if (m_visible == value) {
@@ -281,6 +344,13 @@ void Engine::flushPointer() {
  * 状态收束后允许待机，输入和后台数据失效会重新唤醒。
  */
 void Engine::tick() {
+    const qint64 enterNs = clock.nsecsElapsed();
+    if (m_paceEnterNs != 0) {
+        const qint64 gap = enterNs - m_paceEnterNs;
+        m_paceGapSum += gap;
+        m_paceGapMax = qMax(m_paceGapMax, gap);
+    }
+    m_paceEnterNs = enterNs;
     const auto now = clock.elapsed();
     m_animationTime += qMin<qint64>(now - m_lastTick, 50) / 1000.;
     m_lastTick = now;
@@ -305,14 +375,32 @@ void Engine::tick() {
     if (now - m_lastInput >= 750 && !m_pressed) {
         scene.energyIdle(true);
     }
+    const qint64 stepStartNs = clock.nsecsElapsed();
     step(m_animationTime);
-    // 只有盘面在运动时以 30Hz 刷新；交互和原有动画仍使用原频率。
-    timer.setInterval(m_discRotating && m_sceneSleeping && !app->hud.animating(m_animationTime) &&
-                              now - m_lastInput >= 750 && !m_pressed
-                          ? 33
-                          : 16);
-    if (now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
-        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame.value("mode") != "boot") {
+    const qint64 stepNs = clock.nsecsElapsed() - stepStartNs;
+    m_paceStepSum += stepNs;
+    m_paceStepMax = qMax(m_paceStepMax, stepNs);
+    ++m_paceTicks;
+    // 动态帧间隔：不设固定周期常数，帧率上限完全交给呈现侧（垂直同步/缓冲回收）。
+    // 用本帧实测的「呈现阻塞时长」决定要不要让出时间：
+    //   · 阻塞 > 2ms：呈现自己就在限速，连轴转（0ms），不额外加延迟；
+    //   · 阻塞 ≤ 2ms：说明呈现不阻塞，继续连轴转只会空转烧 CPU，让出 1ms。
+    // RHINE_TICK_MS 仍可作为排障时人为压帧的覆盖值（>0 时生效）。
+    const qint64 frameNs = clock.nsecsElapsed() - enterNs;
+    const qint64 blockedNs = frameNs - stepNs;
+    const int fixedMs = frameIntervalMs();
+    const bool rotationOnly = m_discRotating && m_sceneSleeping && !app->hud.animating(m_animationTime) &&
+                              now - m_lastInput >= 750 && !m_pressed;
+    int intervalMs = blockedNs > 2000000 ? 0 : 1;
+    if (rotationOnly) {
+        intervalMs = 33;
+    }
+    timer.setInterval(fixedMs > 0 ? fixedMs : intervalMs);
+    // 排障专用：RHINE_DIAG_ANIMATE=1 时永不休眠。静止场景下引擎会主动休眠、
+    // presented 不再增长，那时测出来的"帧率"是没有负载的数字，A/B 对比没有意义。
+    static const bool forceAnimate = qEnvironmentVariableIsSet("RHINE_DIAG_ANIMATE");
+    if (!forceAnimate && now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
+        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot") {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();
@@ -354,15 +442,26 @@ void Engine::submitForm(QString account, QString captcha) {
     app->hud.form(values);
     wake();
 }
+void Engine::setWindow(QWindow *window) {
+    m_window = window;
+}
+int Engine::frameIntervalMs() const {
+    // 返回 >0 表示「人为覆盖帧间隔」；返回 -1 表示交给 tick() 里的动态自适应。
+    // 刻意不设固定周期：任何常数都会把帧周期变成「工作量 + 常数」，机器再快也上不去。
+    // 也不从屏幕刷新率推导：上限应该由呈现侧决定，而不是先给自己设一道墙。
+    // RHINE_TICK_MS 仅保留为排障旋钮：想人为压低帧率时设 4..100。
+    static const int overrideMs = qEnvironmentVariableIntValue("RHINE_TICK_MS");
+    if (overrideMs >= 4 && overrideMs <= 100) {
+        return overrideMs;
+    }
+    return -1;
+}
 
 void Engine::sendLoginCode(QString phone) {
     if (app->hud.modal == "login" && app->music.loginMethod == "phone") {
         app->music.sendLoginCode(phone);
         wake();
     }
-}
-void Engine::setWindow(QQuickWindow *window) {
-    m_window = window;
 }
 /**
  * 最小化时保留最大化或全屏标记
@@ -387,6 +486,15 @@ void Engine::toggleFullscreen() {
     }
 }
 bool Engine::keyEvent(int keyCode, int modifiers, QString text) {
+    const bool accepted = keyEventImpl(keyCode, modifiers, text);
+    // 探针：确认按键真的走进了 QML 输入层，以及有没有被消费掉（RHINE_KEY_PROBE=1）。
+    if (qEnvironmentVariableIntValue("RHINE_KEY_PROBE") == 1) {
+        qInfo().noquote() << "按键到达输入层: 键" << keyCode << "接受" << accepted;
+    }
+    return accepted;
+}
+
+bool Engine::keyEventImpl(int keyCode, int modifiers, QString text) {
     switch (keyCode) {
     case Qt::Key_MediaTogglePlayPause:
     case Qt::Key_MediaPlay:
@@ -522,8 +630,26 @@ void Engine::step(double time) {
     m_frame = scene.frame;
     m_frame["originalActorBlend"] = scene.originalActorBlend();
     auto signature = m_frame;
-    for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor", "originalActorBlend"}) {
+    for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor", "originalActorBlend",
+                            "jitter", "temporalReset"}) {
         signature.remove(key);
+    }
+    // FSR3 亚像素抖动：默认关闭；关闭时 frame 里没有 jitter 键，渲染路径与之前完全一致。
+    // 相位只在真正产生帧的 step 里推进，按 8 帧循环。
+    // 但时间性抗锯齿（FSR3/TAA）本身就是靠相位差累积历史，没有抖动它们只会反复混合
+    // 同一张图、等于白做，所以这两者开启时无条件打开。AA 模式每帧读环境变量，切换免重启。
+    const auto aaMode = qEnvironmentVariable("RHINE_AA_MODE");
+    const bool temporal = aaMode == "fsr3" || aaMode == "taa";
+    if (m_jitterEnabled || temporal) {
+        m_jitterOffset = haltonJitter(m_jitterPhase);
+        m_jitterPhase = (m_jitterPhase + 1) % 8;
+        m_frame["jitter"] = QJsonArray{m_jitterOffset.x(), m_jitterOffset.y()};
+    } else {
+        m_jitterOffset = {};
+    }
+    if (m_temporalResetPending) {
+        m_frame["temporalReset"] = true;
+        m_temporalResetPending = false;
     }
     bool stable =
         equivalent(signature, m_sceneSignature) && m_previousBuffers.size() == scene.drawBuffers.size();
@@ -573,9 +699,11 @@ void Engine::step(double time) {
     m_coverRevision = coverRevision;
     m_current = current;
     m_cover = object["cover"].toString();
+    // 图片缓存只在 GUI 线程读取，渲染线程通过 cover() 拿这份副本。
+    m_coverImage = host.image(m_cover);
     // 图形设备在后台可销毁；仅保存当前与可见归位卡片的图片，供恢复时重建纹理。
     const auto musicKey = current["key"].toString("empty");
-    m_musicTextures[musicKey] = {current, host.image(m_cover)};
+    m_musicTextures[musicKey] = {current, m_coverImage};
     QSet<QString> retainedKeys{musicKey};
     for (const auto &key : m_frame.value("returningMusicKeys").toArray()) {
         retainedKeys.insert(key.toString());
@@ -688,7 +816,8 @@ int Engine::selfTest() {
         const QSize size(960, 540);
         const auto actual =
             renderReference(root(), m_frame, m_current, host.image(m_cover), size, scene.drawBuffers);
-        const auto original = renderReference(root(), legacy, m_current, host.image(m_cover), size);
+        const auto original =
+            renderReference(root(), legacy, m_current, host.image(m_cover), size, scene.drawBuffers);
         ok &= runGpuReferenceCheck(original, actual);
         if (!ok) {
             qCritical() << "Native GPU frame differs from original fixture";
@@ -729,6 +858,7 @@ int Engine::renderFixtures(QString source, QString output) {
         m_commands = app->hud.commands;
         m_current = app->music.current;
         m_cover.clear();
+        m_coverImage = QImage();
         const auto folder = output + "/" + fixture["name"].toString();
         snapshot(folder);
         QFile hitsFile(folder + "/qt-hits.json");

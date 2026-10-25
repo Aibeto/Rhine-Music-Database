@@ -2,6 +2,10 @@ import QtQuick
 import QtQuick.Window
 import Rhine.Native 1.0
 
+// 组合根：Window 只负责窗口本身与"必须挂在窗口上"的对象，画面内容拆成两层——
+// Scene3D.qml（3D，可被 FG 单独以渲染帧率出图并插值）与 Overlay.qml（UI，按显示帧率叠加）。
+// 默认路径（不开 FG）下两层仍由这个 Window 承载，渲染顺序、坐标、焦点与交互与拆分前一致；
+// FG 路径下由 FgHost 用两个 QQuickRenderControl 分别载入这两个文件（见 Qt/src/fg/FgHost.h）。
 Window {
     id: root
     readonly property bool ios: Qt.platform.os === "ios"
@@ -14,12 +18,15 @@ Window {
     flags: (windowsFrameless ? Qt.FramelessWindowHint : 0) | Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint | Qt.WindowFullscreenButtonHint
     title: "RHINE MUSIC DATABASE"
     color: "#e7e7e1"
+    // 原生对话框挂在真实窗口；iOS 使用独立的导入入口。
     Loader {
         active: !root.ios
         sourceComponent: LocalMusicDialogs {
             backend: rhine
         }
     }
+    // 舞台换算留在 Window 上：Overlay 注入后与原值完全相同，但公开属性不变，
+    // 外部（测试/后续 FG 宿主）仍可按原方式读取。
     property real stageScale: height / 1080
     property real stageWidth: width / stageScale
     onVisibilityChanged: function (visibility) {
@@ -29,338 +36,24 @@ Window {
     onHeightChanged: rhine.resize(width, height)
     Component.onCompleted: {
         rhine.resize(width, height);
-        inputLayer.forceActiveFocus();
+        // 焦点原本落在 Window 里的 inputLayer 上；拆层后它在 Overlay 内部。
+        overlay.focusInputLayer();
     }
-    Shortcut {
-        sequences: [StandardKey.Quit]
-        onActivated: Qt.quit()
-    }
-    Shortcut {
-        sequences: Qt.platform.os === "osx" ? [StandardKey.FullScreen, "F11"] : ["F11"]
-        onActivated: rhine.toggleFullscreen()
-    }
-    RhiScene {
-        id: originalScene
+    // 快捷键（Ctrl+Q / F11 / F10）已随 UI 层一起迁到 Overlay.qml。
+    // 原因：FG 路径根本不加载 Main.qml，留在 Window 侧等于 FG 完全没有快捷键；
+    // 而 Overlay.qml 在两条路径下都会被实例化，所以只保留那一份定义，
+    // 默认路径不会出现重复注册。
+    // 3D 层：原 Main.qml:60 的 RhiScene 与原 :67-77 的增强 Loader。
+    Scene3D {
         anchors.fill: parent
-        engine: rhine
-        // 增强画布完全遮住底层；原版只接收预热和取出唱片真正需要的更新。
-        visible: true
     }
-    Loader {
-        id: sceneEnhancementLoader
-        objectName: "sceneEnhancementLoader"
+    // UI 层：原 Main.qml:78-336 的 HUD、输入层、面板、搜索框、窗口边框与性能面板。
+    Overlay {
+        id: overlay
         anchors.fill: parent
-        active: rhine.state.sceneEnhancement === true
-        sourceComponent: OpticalScene {
-            objectName: "enhancementComposite"
-            engine: rhine
-            originalSource: originalScene
-        }
-    }
-    Hud {
-        anchors.fill: parent
-        engine: rhine
-    }
-    // 透明 QML 输入层使用原舞台坐标；可见画面由同一份字形和材质绘制。
-    MouseArea {
-        id: inputLayer
-        anchors.fill: parent
-        hoverEnabled: true
-        acceptedButtons: Qt.LeftButton
-        focus: true
-        onPressed: function (mouse) {
-            forceActiveFocus();
-            rhine.pointer("pointerdown", mouse.x / root.stageScale, mouse.y / root.stageScale);
-        }
-        onPositionChanged: function (mouse) {
-            rhine.pointer("pointermove", mouse.x / root.stageScale, mouse.y / root.stageScale);
-        }
-        onReleased: function (mouse) {
-            rhine.pointer("pointerup", mouse.x / root.stageScale, mouse.y / root.stageScale);
-        }
-        onExited: rhine.pointer("pointerleave", 0, 0)
-        onCanceled: rhine.pointer("pointercancel", 0, 0)
-        onWheel: function (wheel) {
-            rhine.wheelInput(wheel.x / root.stageScale, wheel.y / root.stageScale, wheel.pixelDelta.y, wheel.angleDelta.y);
-            wheel.accepted = true;
-        }
-        Keys.onPressed: function (event) {
-            event.accepted = rhine.keyEvent(event.key, event.modifiers, event.text);
-        }
-    }
-    Item {
-        id: controls
-        width: root.stageWidth
-        height: 1080
-        scale: root.stageScale
-        transformOrigin: Item.TopLeft
-        Repeater {
-            model: rhine.hits
-            delegate: Item {
-                required property var modelData
-                x: modelData.x
-                y: modelData.y + (rhine.state.modal && !modelData.fixed ? rhine.state.modalOffset || 0 : 0)
-                width: modelData.width
-                height: modelData.height
-                Accessible.role: Accessible.Button
-                Accessible.name: modelData.label
-                Accessible.onPressAction: rhine.action(modelData.action)
-                MouseArea {
-                    anchors.fill: parent
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    onEntered: rhine.pointer("pointerleave", 0, 0)
-                    onPressed: {
-                        inputLayer.forceActiveFocus();
-                        if (!root.ios) {
-                            rhine.action(modelData.action);
-                        }
-                    }
-                    onClicked: {
-                        if (root.ios) {
-                            rhine.action(modelData.action);
-                        }
-                    }
-                    onWheel: function (wheel) {
-                        var p = mapToItem(inputLayer, wheel.x, wheel.y);
-                        rhine.wheelInput(p.x / root.stageScale, p.y / root.stageScale, wheel.pixelDelta.y, wheel.angleDelta.y);
-                        wheel.accepted = true;
-                    }
-                }
-            }
-        }
-    }
-    IOSInput {
-        stage: root
-        backend: rhine
-    }
-    // 验证码只在输入组件和单次登录请求中短暂存在，提交后立即清空。
-    Item {
-        id: formFields
-        visible: rhine.state.modal === "playlist-form" || (rhine.state.modal === "login" && rhine.state.loginMethod === "phone")
-        x: (rhine.state.inputX || 0) * root.stageScale
-        y: (rhine.state.modalOffset || 0) * root.stageScale
-        width: (rhine.state.inputWidth || 0) * root.stageScale
-        height: root.height
-        opacity: rhine.state.modalOpacity || 0
-        onVisibleChanged: {
-            accountField.text = "";
-            captchaField.text = "";
-            if (visible) {
-                accountField.forceActiveFocus();
-            }
-        }
-        function submit() {
-            if (rhine.state.modal === "login" && rhine.state.loginBusy) {
-                return;
-            }
-            rhine.submitForm(accountField.text, captchaField.text);
-            captchaField.text = "";
-        }
-        Rectangle {
-            x: 0
-            y: 430 * root.stageScale
-            width: rhine.state.modal === "login" ? parent.width - 180 * root.stageScale : parent.width
-            height: 55 * root.stageScale
-            color: rhine.state.dark ? "#30312b" : "#d9d8ce"
-        }
-        TextInput {
-            id: accountField
-            objectName: "accountField"
-            x: 14 * root.stageScale
-            y: 430 * root.stageScale
-            width: parent.width - (rhine.state.modal === "login" ? 208 : 28) * root.stageScale
-            height: 55 * root.stageScale
-            verticalAlignment: TextInput.AlignVCenter
-            color: rhine.state.dark ? "#eeeeeb" : "#161914"
-            font.pixelSize: 19 * root.stageScale
-            cursorVisible: activeFocus && !rhine.performance.idle
-            maximumLength: rhine.state.modal === "login" ? 11 : 100
-            enabled: rhine.state.modal !== "login" || !rhine.state.loginBusy
-            inputMethodHints: rhine.state.modal === "login" ? Qt.ImhDigitsOnly : Qt.ImhNone
-            Accessible.name: rhine.state.modal === "playlist-form" ? "歌单名称" : "手机号码"
-            Keys.onReturnPressed: {
-                if (rhine.state.modal !== "login") {
-                    formFields.submit();
-                } else {
-                    captchaField.forceActiveFocus();
-                }
-            }
-            Keys.onEscapePressed: rhine.action("close-modal")
-        }
-        Rectangle {
-            visible: rhine.state.modal === "login"
-            x: parent.width - width
-            y: 430 * root.stageScale
-            width: 170 * root.stageScale
-            height: 55 * root.stageScale
-            enabled: !rhine.state.loginBusy && rhine.state.smsRetrySeconds === 0 && accountField.text.length === 11
-            color: "#777b60"
-            opacity: enabled ? 1 : 0.5
-            Text {
-                anchors.centerIn: parent
-                text: rhine.state.smsRetrySeconds > 0 ? rhine.state.smsRetrySeconds + " 秒后重发" : "发送验证码"
-                color: "#f0eee5"
-                font.pixelSize: 14 * root.stageScale
-            }
-            Accessible.role: Accessible.Button
-            Accessible.name: "发送短信验证码"
-            Accessible.onPressAction: {
-                if (enabled) {
-                    rhine.sendLoginCode(accountField.text);
-                }
-            }
-            MouseArea {
-                anchors.fill: parent
-                onClicked: rhine.sendLoginCode(accountField.text)
-            }
-        }
-        Rectangle {
-            visible: rhine.state.modal === "login"
-            x: 0
-            y: 541 * root.stageScale
-            width: parent.width
-            height: 55 * root.stageScale
-            color: rhine.state.dark ? "#30312b" : "#d9d8ce"
-        }
-        TextInput {
-            id: captchaField
-            objectName: "captchaField"
-            visible: rhine.state.modal === "login"
-            x: 14 * root.stageScale
-            y: 541 * root.stageScale
-            width: parent.width - 28 * root.stageScale
-            height: 55 * root.stageScale
-            verticalAlignment: TextInput.AlignVCenter
-            color: rhine.state.dark ? "#eeeeeb" : "#161914"
-            font.pixelSize: 19 * root.stageScale
-            cursorVisible: activeFocus && !rhine.performance.idle
-            maximumLength: 8
-            enabled: !rhine.state.loginBusy
-            inputMethodHints: Qt.ImhDigitsOnly | Qt.ImhSensitiveData
-            Accessible.name: "短信验证码"
-            Keys.onReturnPressed: formFields.submit()
-            Keys.onEscapePressed: rhine.action("close-modal")
-        }
-        Rectangle {
-            x: parent.width - width
-            y: (rhine.state.modal === "login" ? 611 : 530) * root.stageScale
-            enabled: rhine.state.modal !== "login" || !rhine.state.loginBusy
-            width: 170 * root.stageScale
-            height: 36 * root.stageScale
-            color: "#777b60"
-            opacity: enabled ? 1 : 0.5
-            Text {
-                anchors.centerIn: parent
-                text: rhine.state.modal === "login" ? "登录 →" : "保存 →"
-                color: "#f0eee5"
-                font.pixelSize: 14 * root.stageScale
-            }
-            Accessible.role: Accessible.Button
-            Accessible.name: "提交表单"
-            Accessible.onPressAction: formFields.submit()
-            MouseArea {
-                anchors.fill: parent
-                onClicked: formFields.submit()
-            }
-        }
-    }
-    Repeater {
-        model: root.ios ? ["seek"] : ["seek", "volume"]
-        delegate: MouseArea {
-            required property string modelData
-            property var region: rhine.state[modelData]
-            visible: !!region
-            enabled: visible && !rhine.state.closing
-            x: region ? region.x * root.stageScale : 0
-            y: region ? (region.y + (rhine.state.modal ? rhine.state.modalOffset || 0 : 0)) * root.stageScale : 0
-            width: region ? region.width * root.stageScale : 0
-            height: region ? region.height * root.stageScale : 0
-            cursorShape: Qt.PointingHandCursor
-            onPressed: function (mouse) {
-                rhine.adjustPlayer(modelData, mouse.x, width);
-            }
-            onPositionChanged: function (mouse) {
-                if (pressed) {
-                    rhine.adjustPlayer(modelData, mouse.x, width);
-                }
-            }
-        }
-    }
-    Connections {
-        target: rhine
-        function onClearCredentials() {
-            accountField.text = "";
-            captchaField.text = "";
-        }
-    }
-
-    Rectangle {
-        visible: searchInput.visible
-        x: searchInput.x
-        y: searchInput.y
-        width: searchInput.width
-        height: searchInput.height
-        color: rhine.state.dark ? "#ffffff" : "#141613"
-        opacity: (rhine.state.modalOpacity || 0) * 0.045
-    }
-    TextInput {
-        id: searchInput
-        objectName: "musicSearchInput"
-        verticalAlignment: TextInput.AlignVCenter
-        leftPadding: 14 * root.stageScale
-        rightPadding: 14 * root.stageScale
-        renderType: Text.NativeRendering
-        visible: rhine.state.modal === "search" || rhine.state.modal === "saved"
-        enabled: !rhine.state.closing
-        x: (rhine.state.inputX || 0) * root.stageScale
-        y: ((rhine.state.inputY || 302) + (rhine.state.modalOffset || 0)) * root.stageScale
-        width: (rhine.state.inputWidth || 0) * root.stageScale
-        height: 54 * root.stageScale
-        font.family: rhineFontFamily
-        font.pixelSize: 22 * root.stageScale
-        color: rhine.state.dark ? "#ebebeb" : "#141613"
-        opacity: rhine.state.modalOpacity || 0
-        clip: true
-        cursorVisible: activeFocus && !rhine.performance.idle
-        selectByMouse: true
-        Accessible.name: rhine.state.localMusic ? "检索本地歌曲、歌手、专辑或文件夹" : "搜索歌曲、歌手、专辑或歌单"
-        onTextEdited: rhine.query(text)
-        onVisibleChanged: {
-            if (visible) {
-                text = rhine.state.query || "";
-                forceActiveFocus();
-            } else {
-                inputLayer.forceActiveFocus();
-            }
-        }
-        Keys.onEscapePressed: rhine.action("close-modal")
-        Keys.onReturnPressed: function (event) {
-            rhine.searchAccepted(text, event.modifiers);
-        }
-        Text {
-            anchors.fill: parent
-            visible: searchInput.text.length === 0 && !searchInput.preeditText
-            text: rhine.state.localMusic ? "检索本地歌曲、歌手、专辑或文件夹" : "搜索歌曲、歌手、专辑或歌单"
-            font: searchInput.font
-            leftPadding: searchInput.leftPadding
-            verticalAlignment: Text.AlignVCenter
-            color: "#777777"
-        }
-    }
-    Shortcut {
-        sequence: "F10"
-        onActivated: profiler.toggleVisible()
-    }
-    WindowChrome {
-        window: root
-        onMinimizeRequested: rhine.minimizeWindow()
-        enabled: root.windowsFrameless
-        visible: enabled && root.visibility !== Window.FullScreen
-        dark: rhine.state.dark === true
-        z: 999
-    }
-    PerformancePanel {
-        z: 1000
+        stageScale: root.stageScale
+        stageWidth: root.stageWidth
+        hostWindow: root
+        frameless: root.windowsFrameless
     }
 }

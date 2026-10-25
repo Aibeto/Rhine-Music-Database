@@ -7,7 +7,7 @@
 #include <QIcon>
 #include <QPainter>
 #include <QPainterPath>
-#include <QQuickWindow>
+#include <QWindow>
 #include <QTimer>
 #include <cstring>
 #include <iterator>
@@ -97,7 +97,7 @@ HICON createButtonIcon(int kind) {
 }
 }
 
-WindowsTaskbar::WindowsTaskbar(Engine *engine, QQuickWindow *window)
+WindowsTaskbar::WindowsTaskbar(Engine *engine, QWindow *window)
     : QObject(window), m_engine(engine), m_window(window) {
     const auto initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     m_comInitialized = SUCCEEDED(initialized);

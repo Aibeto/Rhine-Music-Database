@@ -17,9 +17,12 @@ const rootFiles = new Set([
     '.editorconfig',
     '.gitattributes',
     '.gitignore',
+    '.gitmodules',
     '.prettierignore',
     '.prettierrc.json',
     'CMakeLists.txt',
+    // FidelityFX SDK 以 submodule 记录，源码随递归检出获得。
+    'FidelityFX-SDK',
     'LICENSE',
     'NOTICE',
     'README.md',
@@ -37,8 +40,14 @@ const sourceDirectories = new Set([
     'MusicBridge',
     'Qt',
     'Resources',
+    // 图形后端与着色器工具的 CMake 模块。
+    'cmake',
+    // 入库的 FSR Vulkan 置换头，缺 dxc/glslang 时也能直接构建。
+    'generated',
     'licenses',
     'scripts',
+    // dxc 与 glslang 以 submodule 记录。
+    'third_party',
     'vendor',
 ]);
 // 公开文档只保留应用说明，开发规范、整改方案和会话记录留在本机。

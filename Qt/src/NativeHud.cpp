@@ -200,6 +200,16 @@ QJsonObject NativeHud::state() const {
 
 /** 每帧清空绘制与命中数组，再按原顺序生成；文字动画由原生曲线维护。 */
 void NativeHud::draw(QJsonObject next, double stageWidth, double time) {
+    // 探针（RHINE_HUD_PROBE=1）：HUD 的舞台宽度必须等于"离屏层实际宽度 / (高度/1080)"，
+    // 否则所有按 width 相对定位的内容（导航、列表、弹窗右列）都会被画到层外。
+    // 只在宽度变化时输出一次，避免刷屏。
+    if (qEnvironmentVariableIntValue("RHINE_HUD_PROBE") == 1) {
+        static double lastProbeWidth = -1;
+        if (stageWidth != lastProbeWidth) {
+            lastProbeWidth = stageWidth;
+            qWarning().noquote() << "HUD 探针: 舞台宽度" << stageWidth << "模式" << next["mode"].toString();
+        }
+    }
     if (themeMode == "system" && dark != m_host->systemDark()) {
         dark = m_host->systemDark();
         m_scene.theme(dark);

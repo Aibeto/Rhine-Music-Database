@@ -1,4 +1,5 @@
 #include "OpticalScene.h"
+#include <cstdio>
 #include "DiscGeometry.h"
 #include "Engine.h"
 #include "Glyphs.h"
@@ -49,7 +50,8 @@ struct Instance {
 static_assert(sizeof(Globals) == 832);
 static_assert(sizeof(Surface) == 128);
 static_assert(sizeof(Instance) == 80);
-static constexpr qint64 MUSIC_TEXTURE_BUDGET_BYTES = 24 * 1024 * 1024;
+// 与主渲染路径一致：封面最高 1024²，带 mip 后单张约 5.3 MiB，预算需按此放宽。
+static constexpr qint64 MUSIC_TEXTURE_BUDGET_BYTES = 64 * 1024 * 1024;
 static QMatrix4x4 matrix(QJsonArray a, int offset = 0) {
     QMatrix4x4 m;
     for (int i = 0; i < 16; ++i) {
@@ -149,12 +151,16 @@ class Renderer {
     QRhiTexture *white = nullptr;
     QRhiTexture *depth = nullptr;
     QRhiBuffer *globalBuffer = nullptr, *floor = nullptr, *coverPlane = nullptr, *musicLabelPlane = nullptr,
-               *discBody = nullptr, *discHub = nullptr, *caseDecoration = nullptr;
+               *discBody = nullptr, *discHub = nullptr, *caseDecoration = nullptr,
+               *caseLetteringFront = nullptr, *caseLetteringSpine = nullptr;
     int discPrintCount = 0;
     int discBodyCount = 0;
     int discHubCount = 0;
-    QRhiTexture *decorationTexture = nullptr, *placeholderCover = nullptr;
+    QRhiTexture *decorationTextureHigh = nullptr, *decorationTextureLow = nullptr,
+                *placeholderCover = nullptr, *letteringTextureFront = nullptr,
+                *letteringTextureSpine = nullptr;
     QRhiSampler *linear = nullptr;
+    QRhiSampler *mipSampler = nullptr;
     Target color, target;
     QRhiResourceUpdateBatch *updates = nullptr;
     QHash<QString, QRhiGraphicsPipeline *> pipelines;
@@ -191,6 +197,7 @@ class Renderer {
     QStringList textureOrder;
     QSet<QString> activeTextureKeys;
     QSize size;
+    QSize viewSize;
     std::unique_ptr<Glyphs> glyphs;
     QJsonObject musicItem;
     QString revision;
@@ -205,7 +212,7 @@ class Renderer {
         return value;
     }
     QRhiBuffer *buffer(const QByteArray &data, QRhiBuffer::UsageFlags usage, bool temporary = false) {
-        // D3D11 不支持非动态 uniform buffer；类型与上传方式必须同时匹配。
+        // uniform 每帧变化，只能走 Dynamic；类型与上传方式必须同时匹配。
         const bool uniform = usage.testFlag(QRhiBuffer::UniformBuffer);
         auto b =
             own(rhi->newBuffer(uniform ? QRhiBuffer::Dynamic : QRhiBuffer::Immutable, usage, data.size()),
@@ -229,6 +236,25 @@ class Renderer {
         QRhiTextureSubresourceUploadDescription data(bytes);
         updates->uploadTexture(t, QRhiTextureUploadDescription({QRhiTextureUploadEntry(0, 0, data)}));
     }
+    /**
+     * 逐层生成并上传 mip 链，与主渲染路径保持一致。
+     * 后端对上传纹理的 generateMips 不一定填满每一层，缺层会让 GL 判为纹理不完整并采样为黑。
+     */
+    void uploadMipped(QRhiTexture *target, const QImage &image) {
+        QVector<QRhiTextureUploadEntry> entries;
+        auto level = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+        for (int index = 0;; ++index) {
+            entries.append(QRhiTextureUploadEntry(0, index, QRhiTextureSubresourceUploadDescription(level)));
+            if (level.width() == 1 && level.height() == 1) {
+                break;
+            }
+            level = level.scaled(qMax(1, level.width() / 2), qMax(1, level.height() / 2),
+                                 Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+        QRhiTextureUploadDescription description;
+        description.setEntries(entries.cbegin(), entries.cend());
+        updates->uploadTexture(target, description);
+    }
     Renderer(QString path, QRhi *device) : rhi(device), root(path) {
         updates = rhi->nextResourceUpdateBatch();
         glyphs = std::make_unique<Glyphs>(root);
@@ -248,11 +274,13 @@ class Renderer {
             return create(own(rhi->newSampler(filter, filter, mip, address, address)));
         };
         linear = sampler(QRhiSampler::Linear, QRhiSampler::None, QRhiSampler::ClampToEdge);
-        surfaceAtlas = texture({576, 192}, QRhiTexture::RGBA16F);
+        // 曲目标签与封面由 CPU 逐层上传 mip 链，采样需要三线性。
+        mipSampler = sampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::ClampToEdge);
+        surfaceAtlas = texture({2304, 768}, QRhiTexture::RGBA16F);
         upload(surfaceAtlas, read(root, "archive-baked-surface.bin"));
-        lightAtlas = texture({384, 512}, QRhiTexture::RGBA16F);
+        lightAtlas = texture({768, 1024}, QRhiTexture::RGBA16F);
         upload(lightAtlas, read(root, "archive-baked-light.bin"));
-        normalAtlas = texture({64, 128}, QRhiTexture::RGBA16F);
+        normalAtlas = texture({128, 256}, QRhiTexture::RGBA16F);
         upload(normalAtlas, read(root, "archive-baked-normal.bin"));
         white = texture({1, 1}, QRhiTexture::RGBA8);
         upload(white, QByteArray(4, char(255)));
@@ -270,29 +298,62 @@ class Renderer {
         discHubCount = hub.count();
         musicLabelPlane = plane(-.83, .07, -.03, .29, 0, -.83, .07, .8, .22);
         caseDecoration = plane(-2.5, 0, 2.5, 3.7, .222, -2.5, 0, 5, 3.7);
-        QImage decoration(1000, 740, QImage::Format_RGBA8888_Premultiplied);
-        decoration.fill(Qt::transparent);
-        QPainter painter(&decoration);
-        painter.setRenderHint(QPainter::Antialiasing);
+        // 与主渲染路径一致：背景按需分两档（低档 1 倍 / 高档 2 倍），文字独立成片 16 倍。
         const QColor ink(65, 70, 62, 170), accent(119, 123, 96, 195);
-        painter.setPen(QPen(ink, 1.4));
-        for (auto point : {QPointF(75, 60), QPointF(930, 60), QPointF(75, 685), QPointF(930, 685)}) {
-            painter.drawLine(point + QPointF(-10, 0), point + QPointF(10, 0));
-            painter.drawLine(point + QPointF(0, -10), point + QPointF(0, 10));
+        const auto paintDecoration = [&](QPainter &painter) {
+            painter.setRenderHint(QPainter::Antialiasing);
+            painter.setPen(QPen(ink, 1.4));
+            for (auto point : {QPointF(75, 60), QPointF(930, 60), QPointF(75, 685), QPointF(930, 685)}) {
+                painter.drawLine(point + QPointF(-10, 0), point + QPointF(10, 0));
+                painter.drawLine(point + QPointF(0, -10), point + QPointF(0, 10));
+            }
+            painter.drawEllipse(QRectF(875, 574, 55, 55));
+            painter.drawEllipse(QRectF(891, 574, 23, 55));
+            painter.drawLine(875, 601, 930, 601);
+            painter.fillRect(QRectF(875, 654, 25, 5), accent);
+        };
+        QImage decorationHigh(2000, 1480, QImage::Format_RGBA8888_Premultiplied);
+        decorationHigh.fill(Qt::transparent);
+        {
+            QPainter painter(&decorationHigh);
+            painter.scale(2, 2);
+            paintDecoration(painter);
         }
-        glyphs->text(painter, "MUSIC ARCHIVE / 001", 130, 688, 15, "regular", .5, ink);
-        painter.save();
-        painter.translate(75, 465);
-        painter.rotate(-90);
-        glyphs->text(painter, "RHINE LAB", 0, 0, 21, "demibold", 2, ink);
-        painter.restore();
-        painter.drawEllipse(QRectF(875, 574, 55, 55));
-        painter.drawEllipse(QRectF(891, 574, 23, 55));
-        painter.drawLine(875, 601, 930, 601);
-        painter.fillRect(QRectF(875, 654, 25, 5), accent);
-        painter.end();
-        decorationTexture = texture(decoration.size(), QRhiTexture::RGBA8);
-        updates->uploadTexture(decorationTexture, decoration);
+        decorationTextureHigh = texture(decorationHigh.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        uploadMipped(decorationTextureHigh, decorationHigh);
+        QImage decorationLow(1000, 740, QImage::Format_RGBA8888_Premultiplied);
+        decorationLow.fill(Qt::transparent);
+        {
+            QPainter painter(&decorationLow);
+            paintDecoration(painter);
+        }
+        decorationTextureLow = texture(decorationLow.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        uploadMipped(decorationTextureLow, decorationLow);
+        // 装饰文字独立成片，按原 1000×740 画布坐标放大 16 倍绘制。
+        const auto lettering = [&](QRect source, auto &&draw) {
+            QImage image(source.size() * 16, QImage::Format_RGBA8888_Premultiplied);
+            image.fill(Qt::transparent);
+            QPainter text(&image);
+            text.setRenderHint(QPainter::Antialiasing);
+            text.scale(16, 16);
+            text.translate(-source.x(), -source.y());
+            draw(text);
+            text.end();
+            auto result = texture(image.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+            uploadMipped(result, image);
+            return result;
+        };
+        letteringTextureFront = lettering(QRect(120, 664, 220, 46), [&](QPainter &text) {
+            glyphs->text(text, "MUSIC ARCHIVE / 001", 130, 688, 15, "regular", .5, ink);
+        });
+        letteringTextureSpine = lettering(QRect(62, 348, 46, 128), [&](QPainter &text) {
+            text.translate(75, 465);
+            text.rotate(-90);
+            glyphs->text(text, "RHINE LAB", 0, 0, 21, "demibold", 2, ink);
+        });
+        // 几何按原画布像素换算：200 px = 1 单位，x 从 -2.5 起、y 从 3.7 向下。
+        caseLetteringFront = plane(-1.9, 0.15, -0.8, 0.38, .2225, -1.9, 0.15, 1.1, 0.23);
+        caseLetteringSpine = plane(-2.19, 1.32, -1.96, 1.96, .2225, -2.19, 1.32, 0.23, 0.64);
         QImage placeholder(512, 512, QImage::Format_RGBA8888_Premultiplied);
         placeholder.fill(QColor(94, 115, 112));
         QPainter placeholderPainter(&placeholder);
@@ -301,8 +362,8 @@ class Renderer {
         placeholderPainter.drawEllipse(QRectF(52, 52, 408, 408));
         glyphs->text(placeholderPainter, "RHINE LAB", 130, 340, 34, "demibold", 1, QColor(215, 220, 204));
         placeholderPainter.end();
-        placeholderCover = texture(placeholder.size(), QRhiTexture::RGBA8);
-        updates->uploadTexture(placeholderCover, placeholder);
+        placeholderCover = texture(placeholder.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        uploadMipped(placeholderCover, placeholder);
     }
     ~Renderer() {
         if (updates) {
@@ -314,8 +375,8 @@ class Renderer {
         std::vector<float> vertices;
         for (auto v : {QVector2D{x0, y0}, QVector2D{x1, y0}, QVector2D{x1, y1}, QVector2D{x0, y0},
                        QVector2D{x1, y1}, QVector2D{x0, y1}}) {
-            float data[] = {
-                v.x(), v.y(), z, 1, 0, 0, 1, 0, uw ? (v.x() - ux) / uw : 0, uh ? (v.y() - uy) / uh : 0, 0, 0};
+            // 与主渲染路径一致的八分量顶点：位置、法线、UV。
+            float data[] = {v.x(), v.y(), z, 0, 0, 1, uw ? (v.x() - ux) / uw : 0, uh ? (v.y() - uy) / uh : 0};
             vertices.insert(vertices.end(), std::begin(data), std::end(data));
         }
         return buffer(QByteArray(reinterpret_cast<const char *>(vertices.data()), vertices.size() * 4),
@@ -349,22 +410,26 @@ class Renderer {
     }
     /** 仅分配颜色和深度；烘焙增强不创建实时透射、阴影、AO、景深或光晕目标。 */
     void resize(QSize value, bool needsReadbackTarget) {
-        if (size == value) {
+        if (viewSize == value) {
             return;
         }
+        viewSize = value;
+        // 与主渲染路径一致：RHINE_SUPERSAMPLE=2 时目标按两倍分辨率创建，合成时缩回窗口。
+        const auto sample = qBound(1, qEnvironmentVariableIntValue("RHINE_SUPERSAMPLE"), 2);
+        size = QSize(value.width() * sample, value.height() * sample);
         invalidateBindings();
         postBindings.clear();
         pipelines.clear();
         pipelineLayouts.clear();
         sized.clear();
-        size = value;
         cachedGeometryRevision.reset();
         auto rtFlags = QRhiTexture::RenderTarget;
         depth = texture(size, QRhiTexture::D32F, rtFlags, true);
         color = makeTarget(texture(size, QRhiTexture::RGBA16F, rtFlags, true), depth);
         target = {};
         if (needsReadbackTarget) {
-            target = makeTarget(texture(size, QRhiTexture::RGBA8, rtFlags, true));
+            // 读回目标固定为窗口尺寸：超采样只放大内部目标，合成通道按目标像素尺寸缩回。
+            target = makeTarget(texture(value, QRhiTexture::RGBA8, rtFlags, true));
         }
     }
     /** 从选中壳体的原生矩阵定位光源，并将场景参数复制到本分支的独立常量缓冲区。 */
@@ -375,8 +440,10 @@ class Renderer {
         bool hasEmitter = false;
         for (const auto &entry : f["draws"].toArray()) {
             const auto draw = entry.toObject();
-            if (draw["name"] == "Frosted_Polymer" && draw["musicSelected"].toBool() &&
-                !draw["shadowOnly"].toBool()) {
+            // 查看封面页的装配体部件不带"选中"标记，但同样是唱片壳，
+            // 只认 musicSelected 会让整页 lightPower 归零、光照全丢。
+            if (draw["name"] == "Frosted_Polymer" && !draw["shadowOnly"].toBool() &&
+                (draw["musicSelected"].toBool() || f["viewer"].toBool())) {
                 const auto bytes = matrixBytes(draw);
                 if (bytes.size() >= 64) {
                     memcpy(emitter.data(), bytes.constData(), 64);
@@ -406,7 +473,8 @@ class Renderer {
                 {rhi->isYUpInFramebuffer() ? 1.f : 0.f, 0, 0, 0},
                 emitter,
                 emitter.inverted(),
-                {lightPower, f["viewer"].toBool() ? 0.15f : 1.f, 0.62f,
+                // 查看封面页不再叠加原版像素，光照强度无需再压低，否则整页偏暗发平。
+                {lightPower, 1.f, 0.62f,
                  originalActorAvailable ? float(f["originalActorBlend"].toDouble()) : 0.f},
                 {1.f, 0.72f, 0.38f, 1.f},
                 actorEdges};
@@ -425,14 +493,30 @@ class Renderer {
     }
     Surface surface(QJsonObject d) {
         auto name = d["name"].toString();
+        // 诊断用：按绘制序号上色，把每个部件染成互不相同的纯色，用于在截图里认出
+        // 某个像素究竟由哪个部件画出。仅在 RHINE_DEBUG_TINT 下生效。
+        const bool tint = qEnvironmentVariableIsSet("RHINE_DEBUG_TINT");
+        if (tint) {
+            const int bits = d["debugIndex"].toInt();
+            d["color"] =
+                QJsonArray{(bits & 1) ? 1.0 : 0.15, (bits & 2) ? 1.0 : 0.15, (bits & 4) ? 1.0 : 0.15, 1.0};
+        }
         bool optical = name.startsWith("Optical_Glass") || name == "Optical_Bridge_Glass";
-        float type = d["mesh"].toInt() == -2                            ? 6
-                     : d["label"].toBool()                              ? 1
-                     : name == "Frosted_Polymer"                        ? 3
-                     : name == "Ivory_Edges"                            ? 4
-                     : name == "Optical_Diffuser"                       ? 5
+        float type = d["mesh"].toInt() == -2                               ? 6
+                     : d["mesh"].toInt() == -3 || d["mesh"].toInt() == -4  ? 8
+                     : d["mesh"].toInt() == -6 || d["mesh"].toInt() == -7  ? 7
+                     : d["label"].toBool()                                 ? 1
+                     : name == "Frosted_Polymer" || name == "Optical_Film" ? 3
+                     : name == "Ivory_Edges"                               ? 4
+                     : name == "Optical_Diffuser"                          ? 5
+                     : (name.startsWith("Optical_Film") || name.startsWith("Optical_Glass") ||
+                        name == "Optical_Bridge_Glass")
+                         ? 9
                      : !d["instanced"].toBool() && !d["floor"].toBool() ? 2
                                                                         : 0;
+        if (tint) {
+            type = 2;
+        }
         return {v4(vector(d["color"]), n(d, "opacity")),
                 {n(d, "roughness"), n(d, "metalness"), n(d, "transmission"), n(d, "thickness")},
                 {n(d, "ior"), n(d, "attenuationDistance"), name == "Index_Inlay" ? 1.f : 0.f,
@@ -446,9 +530,12 @@ class Renderer {
                 {d["musicSelected"].toBool() ? 1.f : 0.f, 0, 0, 0}};
     }
     QList<QJsonObject> musicDraws(QJsonObject f) {
-        static const QStringList removed = {"Internal_Ceramic",  "Optical_Edges",       "Subsurface_Optics",
-                                            "Optical_Film_Edge", "Amber_Optical_Inlay", "Optical_Film",
-                                            "Champagne_Index",   "Printed_Label"};
+        // Optical_Film 是包在唱片外的一层光学薄膜，详情页与查看封面页靠它出玻璃反射；
+        // 之前因为没有折射路径被整层丢弃，画面就少了一层。
+        // 只丢弃确实会穿帮的部件；Optical_Edges / Subsurface_Optics / Optical_Film_Edge
+        // 是最外那层透明光学包裹，丢掉它们外壳会少一层，必须保留。
+        static const QStringList removed = {"Internal_Ceramic", "Amber_Optical_Inlay", "Champagne_Index",
+                                            "Printed_Label"};
         QList<QJsonObject> result;
         for (auto v : f["draws"].toArray()) {
             auto d = v.toObject();
@@ -461,6 +548,14 @@ class Renderer {
             if (name == "Titanium_Fasteners") {
                 // 金属反射的暗底色也固定烘焙，避免取消实时环境光后螺钉变成白色圆点。
                 d["color"] = QJsonArray{0.065, 0.075, 0.08};
+            }
+            if (name.startsWith("Optical_Film") || name.startsWith("Optical_Glass") ||
+                name == "Optical_Bridge_Glass") {
+                // 薄膜只留高光与厚度色，本体几乎全透，必须走透明队列并关闭深度写入。
+                d["transparent"] = true;
+                d["depthWrite"] = false;
+                d["side"] = 2;
+                d["opacity"] = 0.35;
             }
             if (shell) {
                 // 固定透光外观来自烘焙图集；只有选中外壳用普通透明混合显示动态封面。
@@ -478,6 +573,7 @@ class Renderer {
                 }
                 d["opacity"] = opacity;
             }
+            d["debugIndex"] = int(result.size());
             result << d;
             // 密集背景采用透光档案壳，不在每个占位实例中塞入不透明的白色盘体。
             if (name != "Frosted_Polymer" || d["shadowOnly"].toBool() || d["instanced"].toBool()) {
@@ -563,9 +659,11 @@ class Renderer {
             }
             // 覆盖同一 key 时退休的是该 key 的旧对象，而非上一首当前曲目的对象。
             retire(labels.take(key));
-            const auto label = glyphs->label(value);
-            labels[key] = texture(label.size(), QRhiTexture::RGBA8);
-            updates->uploadTexture(labels[key], label);
+            // 与主渲染路径一致：绘制按 1024×440 排版，上传前减半以匹配实际屏幕尺寸。
+            const auto label =
+                glyphs->label(value).scaled(512, 220, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+            labels[key] = texture(label.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+            uploadMipped(labels[key], label);
             labelRevisions[key] = labelRevision;
         }
         if (!covers.contains(key) || (!image.isNull() && coverRevisions.value(key) != coverRevision)) {
@@ -590,8 +688,8 @@ class Renderer {
                     glyphs->text(painter, "RHINE LAB", 156, 370, 28, "demibold", 1, QColor(215, 220, 204));
                 }
                 painter.end();
-                const auto cover = texture(pixels.size(), QRhiTexture::RGBA8);
-                updates->uploadTexture(cover, pixels);
+                const auto cover = texture(pixels.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+                uploadMipped(cover, pixels);
                 coverTextures[coverRevision] = cover;
                 ++coverUploads;
             }
@@ -619,16 +717,19 @@ class Renderer {
         }
     }
     qint64 musicTextureBytes() const {
-        qint64 bytes = 0;
-        for (const auto texture : labels) {
+        // 与主渲染路径一致：mip 链使实际占用为基层的一又三分之一。
+        const auto bytes = [](QRhiTexture *texture) {
             const auto dimensions = texture->pixelSize();
-            bytes += qint64(dimensions.width()) * dimensions.height() * 4;
+            return qint64(dimensions.width()) * dimensions.height() * 4 * 4 / 3;
+        };
+        qint64 total = 0;
+        for (const auto texture : labels) {
+            total += bytes(texture);
         }
         for (const auto texture : coverTextures) {
-            const auto dimensions = texture->pixelSize();
-            bytes += qint64(dimensions.width()) * dimensions.height() * 4;
+            total += bytes(texture);
         }
-        return bytes;
+        return total;
     }
     QRhiShaderResourceBindings *bindings(std::vector<QRhiShaderResourceBinding> list,
                                          bool temporary = false) {
@@ -655,10 +756,10 @@ class Renderer {
                             {QRhiShaderStage::Fragment, shader(kind + ".frag")}});
         if (geo) {
             QRhiVertexInputLayout layout;
-            layout.setBindings({{48}, {80, QRhiVertexInputBinding::PerInstance}});
-            layout.setAttributes({{0, 0, QRhiVertexInputAttribute::Float4, 0},
-                                  {0, 1, QRhiVertexInputAttribute::Float4, 16},
-                                  {0, 2, QRhiVertexInputAttribute::Float4, 32},
+            layout.setBindings({{32}, {80, QRhiVertexInputBinding::PerInstance}});
+            layout.setAttributes({{0, 0, QRhiVertexInputAttribute::Float3, 0},
+                                  {0, 1, QRhiVertexInputAttribute::Float3, 12},
+                                  {0, 2, QRhiVertexInputAttribute::Float2, 24},
                                   {1, 3, QRhiVertexInputAttribute::Float4, 0},
                                   {1, 4, QRhiVertexInputAttribute::Float4, 16},
                                   {1, 5, QRhiVertexInputAttribute::Float4, 32},
@@ -745,6 +846,7 @@ class Renderer {
         state.used = generation;
         return state.buffer;
     }
+    bool detailMode = false;
     QByteArray matrixBytes(const QJsonObject &draw) const {
         const auto native = nativeBuffers.constFind(draw["id"].toInt());
         if (native != nativeBuffers.constEnd()) {
@@ -778,7 +880,10 @@ class Renderer {
             } else if (i < themes.size()) {
                 theme = float(themes[i].toDouble());
             }
-            value.state = {n(draw, "quality"), n(draw, "clarity"), theme, 0};
+            // state.w 标记"被聚焦的主体"：详情页与查看封面页只有焦点唱片用玻璃壳与主光。
+            // 详情页背景仍是实例化的唱片墙，若按整帧置位会把这些卡片一起改掉。
+            const bool hero = detailMode && !draw["instanced"].toBool();
+            value.state = {n(draw, "quality"), n(draw, "clarity"), theme, hero ? 1.f : 0.f};
             values.push_back(value);
         }
         const QByteArray bytes(reinterpret_cast<const char *>(values.data()),
@@ -794,7 +899,7 @@ class Renderer {
         int count;
         QRhiShaderResourceBindings *bindings;
     };
-    QList<Draw> prepare(const QList<QJsonObject> &draws) {
+    QList<Draw> prepare(const QList<QJsonObject> &draws, bool decorationHigh) {
         QList<Draw> result;
         const auto stages = QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage;
         for (auto d : draws) {
@@ -816,6 +921,10 @@ class Renderer {
                 count = discHubCount;
             } else if (mesh == -5) {
                 vertices = caseDecoration;
+            } else if (mesh == -6) {
+                vertices = caseLetteringFront;
+            } else if (mesh == -7) {
+                vertices = caseLetteringSpine;
             } else if (mesh >= 0 && meshes.contains(d["asset"].toString()) &&
                        mesh < meshes[d["asset"].toString()].parts.size()) {
                 auto m = meshes[d["asset"].toString()];
@@ -841,12 +950,19 @@ class Renderer {
                 d["musicSelected"].toBool() ? musicItem["key"].toString() : d["musicKey"].toString();
             QRhiTexture *label = white;
             if (mesh == -5) {
-                label = decorationTexture;
+                label = decorationHigh ? decorationTextureHigh : decorationTextureLow;
+            } else if (mesh == -6) {
+                label = letteringTextureFront;
+            } else if (mesh == -7) {
+                label = letteringTextureSpine;
             } else if (d["label"].toBool()) {
                 label = labels.value(key, labelTexture ? labelTexture : white);
             }
             // 着色器只有盘面读取封面，只有标签读取文字；其他表面绑定稳定的占位纹理。
-            const auto cover = mesh == -2 ? covers.value(key, placeholderCover) : placeholderCover;
+            // 查看封面页的绘制来自装配体，key 不是曲目 key，直接查表会落回占位图，
+            // 表现成"封面没贴上去、只看到烘焙壳体"。查不到时用当前曲目的封面。
+            const auto currentCover = covers.value(musicItem["key"].toString("empty"), placeholderCover);
+            const auto cover = mesh == -2 ? covers.value(key, currentCover) : placeholderCover;
             // 缓存命中仍可能换曲，同一个 draw 的绑定必须跟随实际纹理指针。
             if (state.label != label || state.cover != cover) {
                 retire(state.bindings);
@@ -863,9 +979,9 @@ class Renderer {
                      QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
                                                                lightAtlas, linear),
                      QRhiShaderResourceBinding::sampledTexture(4, QRhiShaderResourceBinding::FragmentStage,
-                                                               label, linear),
+                                                               label, mipSampler),
                      QRhiShaderResourceBinding::sampledTexture(5, QRhiShaderResourceBinding::FragmentStage,
-                                                               cover, linear),
+                                                               cover, mipSampler),
                      QRhiShaderResourceBinding::sampledTexture(6, QRhiShaderResourceBinding::FragmentStage,
                                                                normalAtlas, linear)},
                     false);
@@ -981,6 +1097,10 @@ class Renderer {
                 QRhiRenderTarget *finalTarget = nullptr, const Engine::MusicTextures &musicTextures = {},
                 QRhiTexture *originalActor = nullptr) {
         transient.clear();
+        if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
+            qWarning("optical render mode=%s size=%dx%d actor=%d", qPrintable(frame["mode"].toString()),
+                     dimensions.width(), dimensions.height(), originalActor != nullptr ? 1 : 0);
+        }
         if (!updates) {
             updates = rhi->nextResourceUpdateBatch();
         }
@@ -1013,9 +1133,20 @@ class Renderer {
             }
         }
         updateMusic(item, cover);
+        detailMode = frame["mode"].toString() == "detail" || frame["viewer"].toBool();
         auto draws = musicDraws(frame);
         // 即使被原版唱片覆盖，也保留烘焙唱片资源，归位时不再重建材质绑定和实例缓冲。
-        auto data = prepare(draws);
+        auto data = prepare(draws, frame["mode"].toString() == "detail");
+        if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
+            for (const auto &draw : data) {
+                std::fprintf(
+                    stderr, "draw #%02d %-26s mesh=%d type=%.0f side=%.0f opacity=%.2f transparent=%d\n",
+                    draw.data["debugIndex"].toInt(), qPrintable(draw.data["name"].toString()),
+                    draw.data["mesh"].toInt(), surface(draw.data).flags.x(), draw.data["side"].toDouble(),
+                    draw.data["opacity"].toDouble(), draw.data["transparent"].toBool() ? 1 : 0);
+            }
+            std::fflush(stderr);
+        }
         for (auto it = materials.begin(); it != materials.end();) {
             if (it->used != generation) {
                 retire(it->bindings);
@@ -1148,6 +1279,11 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         }
     }
     void render(QRhiCommandBuffer *cb) override {
+        if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
+            std::fprintf(stderr, "optical item render empty=%d mode=%s time=%.2f\n", frame.isEmpty() ? 1 : 0,
+                         qPrintable(frame["mode"].toString()), frame["time"].toDouble());
+            std::fflush(stderr);
+        }
         // 系统可能先请求绘制再生成首帧，相机未就绪时只清空目标，禁止读取空矩阵。
         const bool cameraReady = frame.value("projection").toArray().size() == 16 &&
                                  frame.value("aoProjection").toArray().size() == 16 &&
