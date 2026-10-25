@@ -1,4 +1,6 @@
 #include "FrameProfiler.h"
+
+#include "fg/FgCapability.h"
 #include "Engine.h"
 #include "ProcessMetrics.h"
 #include <QCoreApplication>
@@ -212,8 +214,18 @@ void FrameProfiler::openReportFolder() {
 }
 
 /** 只在需要时开启原生计时，重置统计基线，避免把暂停期间的时间当成卡顿。 */
+bool FrameProfiler::windowShown() const {
+    if (m_window) {
+        return m_window->isVisible() && m_window->visibility() != QWindow::Minimized;
+    }
+    // FG 呈现层接管窗口时 attach() 从未被调用，这里没有 QQuickWindow 可问。
+    // 退回看呈现层的统计，否则 shown 恒为 false、采样器永远不启动，
+    // 面板就停在"等待采样"——帧生成模式下监视器全空就是这个原因。
+    return RhineFg::stats().layerActive;
+}
+
 void FrameProfiler::updateSampling() {
-    const bool shown = m_window && m_window->isVisible() && m_window->visibility() != QWindow::Minimized;
+    const bool shown = windowShown();
     const bool enabled = (m_visible && shown) || m_recording || file.isOpen();
     m_engine->host.enablePlaybackDiagnostics((m_visible && shown) || m_recording);
     const bool previous = m_enabled.exchange(enabled, std::memory_order_relaxed);
@@ -301,6 +313,55 @@ void FrameProfiler::sample() {
         m_metrics.insert("gpuAdapter", m_adapterName);
         m_metrics.insert("gpuBackend", m_backendName);
     }
+    // —— 帧生成呈现层 ——
+    // FG 路径把 present 收归呈现层自己，Qt 的 frameSwapped 永远不会触发：上面的
+    // qtFps / 帧间隔在那种模式下恒定是 0。所以这里改成读呈现层自己的统计，
+    // 并在它接管时用它的数字覆盖同一批字段，保持下面 formatMetrics 的写法不变。
+    const RhineFg::Stats fg = RhineFg::stats();
+    const double fgPresentedFps = (fg.presented - m_previousFgPresented) * 1000000000. / elapsedNs;
+    const double fgInterpolatedFps = (fg.interpolated - m_previousFgInterpolated) * 1000000000. / elapsedNs;
+    const double fgRenderFps = (fg.rendered - m_previousFgRendered) * 1000000000. / elapsedNs;
+    m_previousFgPresented = fg.presented;
+    m_previousFgInterpolated = fg.interpolated;
+    m_previousFgRendered = fg.rendered;
+    m_metrics.insert("fgLayerActive", fg.layerActive);
+    m_metrics.insert("fgPresentedFps", fgPresentedFps);
+    m_metrics.insert("fgInterpolatedFps", fgInterpolatedFps);
+    m_metrics.insert("fgRenderFps", fgRenderFps);
+    m_metrics.insert("fgInterpolationWanted", fg.interpolationWanted);
+    m_metrics.insert("fgInterpolationAvailable", fg.interpolationAvailable);
+    m_metrics.insert("fgInterpolationActive", fg.interpolationActive);
+    m_metrics.insert("fgAcquireMs", fg.acquireMs);
+    m_metrics.insert("fgSceneMs", fg.sceneMs);
+    m_metrics.insert("fgPrepareMs", fg.prepareMs);
+    m_metrics.insert("fgDispatchMs", fg.dispatchMs);
+    m_metrics.insert("fgCompositeMs", fg.compositeMs);
+    m_metrics.insert("fgPresentMs", fg.presentMs);
+    m_metrics.insert("fgSwapchainImages", fg.swapchainImages);
+    m_metrics.insert("fgSwapchainFormat", fg.swapchainFormat);
+    m_metrics.insert("fgAdapter", fg.adapterName);
+    m_metrics.insert("fgBackend", fg.backendName);
+    m_metrics.insert("fgDepthReady", fg.depthReady);
+    m_metrics.insert("fgMotionVectorsReady", fg.motionVectorsReady);
+    m_metrics.insert("fgRenderSize", fg.renderSize);
+    m_metrics.insert("fgDisplaySize", fg.displaySize);
+    if (fg.layerActive) {
+        // 呈现层接管时，屏幕上真正发生的事只有它知道：用它的间隔与计数覆盖。
+        m_metrics.insert("qtFps", fgPresentedFps);
+        m_metrics.insert("presentCount", qulonglong(fg.presented));
+        m_metrics.insert("gapSamples", fg.sampleCount);
+        m_metrics.insert("gapP50Ms", fg.gapP50Ms);
+        m_metrics.insert("gapP95Ms", fg.gapP95Ms);
+        m_metrics.insert("gapP99Ms", fg.gapP99Ms);
+        m_metrics.insert("gapMaxMs", fg.gapMaxMs);
+        m_metrics.insert("over33ms", fg.over33);
+        m_metrics.insert("over50ms", fg.over50);
+        m_metrics.insert("over100ms", fg.over100);
+        if (!fg.adapterName.isEmpty())
+            m_metrics.insert("gpuAdapter", fg.adapterName);
+        if (!fg.backendName.isEmpty())
+            m_metrics.insert("gpuBackend", fg.backendName);
+    }
     m_previousSampleNs = now;
     m_previousCpuNs = process.cpuNanoseconds;
     m_previousPresents = count;
@@ -335,14 +396,68 @@ void FrameProfiler::formatMetrics() {
     const bool idle = m_metrics.value("idle").toBool();
     const auto residentBytes = m_metrics.value("mainProcessResidentBytes").toLongLong();
     const auto cpu = m_metrics.value("mainProcessCpuOneCorePercent").toDouble();
-    m_headline =
-        QStringLiteral("%1 FPS · %2")
-            .arg(number("qtFps"), shown ? (idle ? QStringLiteral("按需休眠") : QStringLiteral("活动"))
-                                        : QStringLiteral("后台"));
+    const bool fgActive = m_metrics.value("fgLayerActive").toBool();
+    // 呈现层接管后 qtFps 已经被替换成它的实测呈现帧率（见 sample()），所以 headline
+    // 的结构不用变，变的只是"%2"那段状态说明要讲清楚现在是不是在插值。
+    QString stateLabel;
+    if (!fgActive) {
+        stateLabel = shown ? (idle ? QStringLiteral("按需休眠") : QStringLiteral("活动"))
+                           : QStringLiteral("后台");
+    } else if (!m_metrics.value("fgInterpolationAvailable").toBool()) {
+        stateLabel = QStringLiteral("帧生成 · 仅合成");
+    } else if (!m_metrics.value("fgInterpolationWanted").toBool()) {
+        stateLabel = QStringLiteral("帧生成 · 插值关");
+    } else if (!shown) {
+        stateLabel = QStringLiteral("后台");
+    } else if (idle) {
+        stateLabel = QStringLiteral("帧生成 · 按需休眠");
+    } else {
+        stateLabel = QStringLiteral("帧生成 · 插值中");
+    }
+    m_headline = QStringLiteral("%1 FPS · %2").arg(number("qtFps"), stateLabel);
     const auto memory = residentBytes < 0 ? QStringLiteral("不可用")
                                           : QString::number(residentBytes / 1048576., 'f', 1) + " MiB";
-    m_details =
-        QStringLiteral("场景提交      %1 FPS\nQt 帧间隔 P50 / P95  %2 / %3 ms\n"
+    // 帧生成块排在最前：接管呈现后，屏幕上真正发生的是什么只有这几行说得清。
+    QString fgDetails;
+    if (!fgActive && RhineFg::capability().compiledIn) {
+        // 没接管时也给一行：否则用户看不出"这台机器本可以插帧，只是这次走了默认路径"。
+        const auto &capability = RhineFg::capability();
+        const auto note = !capability.presentLayerActive
+                              ? (capability.reason.isEmpty() ? QStringLiteral("默认呈现路径")
+                                                             : capability.reason)
+                              : QStringLiteral("暂不可用");
+        fgDetails = QStringLiteral("帧生成        未接管 · %1\n\n").arg(note);
+    } else if (fgActive) {
+        const auto ready = [this](const char *key) {
+            return m_metrics.value(key).toBool() ? QStringLiteral("就绪") : QStringLiteral("等待");
+        };
+        const auto sizeText = [this](const char *key) {
+            const auto size = m_metrics.value(key).toSize();
+            return QStringLiteral("%1×%2").arg(size.width()).arg(size.height());
+        };
+        const auto millis = [&number](const char *key) {
+            return number(key, 2);
+        };
+        const auto interpolationState =
+            !m_metrics.value("fgInterpolationAvailable").toBool()
+                ? QStringLiteral("插值 不可用")
+                : (m_metrics.value("fgInterpolationWanted").toBool() ? QStringLiteral("插值 开")
+                                                                    : QStringLiteral("插值 关"));
+        fgDetails =
+            QStringLiteral("帧生成        %1 · %2\n呈现 / 渲染    %3 / %4 FPS · 插值 %5 FPS\n")
+                .arg(QStringLiteral("已接管"), interpolationState, number("fgPresentedFps"),
+                     number("fgRenderFps"), number("fgInterpolatedFps"))
+            + QStringLiteral("每帧耗时      取图 %1 · 场景 %2 · 光流+重建 %3 · 插值 %4 ms\n")
+                  .arg(millis("fgAcquireMs"), millis("fgSceneMs"), millis("fgPrepareMs"),
+                       millis("fgDispatchMs"))
+            + QStringLiteral("              合成 / 上屏  %1 / %2 ms\n")
+                  .arg(millis("fgCompositeMs"), millis("fgPresentMs"))
+            + QStringLiteral("交换链        %1 张 · %2 · %3 → %4\n深度 / 运动矢量  %5 / %6\n\n")
+                  .arg(number("fgSwapchainImages", 0), m_metrics.value("fgSwapchainFormat").toString(),
+                       sizeText("fgRenderSize"), sizeText("fgDisplaySize"), ready("fgDepthReady"),
+                       ready("fgMotionVectorsReady"));
+    }
+    m_details = fgDetails + QStringLiteral("场景提交      %1 FPS\nQt 帧间隔 P50 / P95  %2 / %3 ms\n"
                        "P99 / 峰值    %4 / %5 ms\n>33 / 50 / 100 ms   %6 / %7 / %8\n"
                        "逻辑 CPU 均值 / 峰值  %9 / %10 ms\n同步 / 提交 CPU  %11 / %12 ms\n"
                        "主进程 CPU    %13%\n主进程常驻内存  %14\n"

@@ -1,3 +1,4 @@
+#include "fg/FgConfig.h"
 #include "NativeHud.h"
 #include "MusicData.h"
 #include "MusicDiscover.h"
@@ -674,11 +675,13 @@ void NativeHud::action(QString value) {
             qputenv("RHINE_RENDER_SCALE", QByteArray::number(clamped));
         }
     } else if (value == "fg") {
-        // 帧生成与抗锯齿模式互不影响；渲染器每帧读取该环境变量，切换后下一帧生效。
+        // 帧生成与抗锯齿模式互不影响；呈现层每帧读取 RHINE_FG，切换后下一帧生效，
+        // 所以这个开关是设置页里唯一不需要重启的偏好。转换规则与 Host::setPreference
+        // 共用同一个函数，免得两处对"什么才算 on"产生分歧。
         const auto enabled = m_host->preference("fg") == "on";
         const auto next = enabled ? QStringLiteral("off") : QStringLiteral("on");
         m_host->setPreference("fg", next);
-        qputenv("RHINE_FG", next.toUtf8());
+        RhineFg::applyInterpolationPreference(next);
     } else if (value == "single-play-mode") {
         const bool append = m_host->preference("single-play-mode") == "append";
         m_host->setPreference("single-play-mode", append ? "replace" : "append");

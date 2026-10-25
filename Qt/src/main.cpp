@@ -1,6 +1,10 @@
 #include "AppIdentity.h"
 #include "AppStorage.h"
 #include "Engine.h"
+#include "fg/FgCapability.h"
+#if defined(RHINE_FSR3_VULKAN) && RHINE_FSR3_VULKAN
+#include "fg/FgShell.h"
+#endif
 #include "FrameProfiler.h"
 #include "GraphicsBackend.h"
 #include "Hud.h"
@@ -289,6 +293,13 @@ int main(int argc, char **argv) {
     applyRenderScaleSetting();
     applyAntialiasingSetting();
     applyFrameGenerationSetting();
+    // 写给设置界面的能力快照：先按"没编进来"落盘，下面的 FG 分支真正接管后再改写。
+    // 设置界面在 RhineCore 里，不能反向 include 依赖 vulkan.h 的实现，只能读这份结论。
+#if defined(RHINE_FSR3_VULKAN) && RHINE_FSR3_VULKAN
+    RhineFg::publishCapability(true, false, false);
+#else
+    RhineFg::publishCapability(false, false, false, QStringLiteral("此构建未编入 Vulkan 帧生成"));
+#endif
     const auto args = application.arguments();
     if (args.contains("--make-icon")) {
         return makeIcon(args.value(args.indexOf("--make-icon") + 1));
@@ -357,6 +368,45 @@ int main(int argc, char **argv) {
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
         [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
+#if defined(RHINE_FSR3_VULKAN) && RHINE_FSR3_VULKAN
+    // FG 路径：能力可用时**常驻**接管窗口，用自带交换链的呈现层替代默认 QQuickWindow。
+    //
+    // 为什么不再用 RHINE_FG 当门控：用户要的是"设置里点一下立刻生效、永不重启"。
+    // 插值能不能跑取决于是否持有交换链，所以只能让呈现层一直在、把开关下移成
+    // "每帧要不要插一张补偿帧"（FgShell::step 每帧重读 RHINE_FG）。代价是关掉帧
+    // 生成时也走自建交换链而不是 QQuickWindow——已实测渲染结果一致、无校验错误。
+    // RHINE_FG_LAYER=off 留作现场排障时的退路，可以强制走默认路径。
+    // 任何一步失败都回退到下面的默认路径——FG 是可选增强，不能阻断启动。
+    // 自检/抓屏/视觉基准都依赖 QQuickWindow 的读回路径，所以这些模式下不接管。
+    const bool fgLayerDisabled = qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0;
+    const bool fgCandidate = !test && !visual && !args.contains("--ui-self-test")
+                             && !args.contains("--capture") && !fgLayerDisabled
+                             && RhineGraphics::activeBackend() == QLatin1String("vulkan")
+                             && FgShell::compiledIn();
+    if (fgCandidate) {
+        // FG 路径从不调用 QQmlApplicationEngine::load()（Main.qml 不加载，两个离屏层
+        // 都是手工用 QQuickRenderControl 建的），而"QML 里的 Qt.quit() 真能退出进程"
+        // 正是 load() 内部接的那根线。少了它，Overlay.qml 的 Ctrl+Q 会打出
+        // "Signal QQmlEngine::quit() emitted, but no receivers connected to handle it."
+        // 然后什么都不发生——快捷键看着触发了，进程却不退。
+        auto shell = std::make_unique<FgShell>(engine, backend);
+        // 退出顺序有讲究：先拆呈现层（VkSwapchainKHR / VkSurfaceKHR），再让事件循环退出。
+        // 反过来的话窗口先被关闭，驱动 WSI 会对已销毁的 wl_surface 做 roundtrip，
+        // 退出时 SIGABRT/SIGSEGV（实测两条都复现过）。Win32 的 HWND、X11 的 Window
+        // 是同一类问题，所以这条顺序修在公共路径，不进平台分支。
+        QObject::connect(&engine, &QQmlEngine::quit, &application,
+                         [&application, raw = shell.get()]() {
+                             if (raw)
+                                 raw->shutdown();
+                             QCoreApplication::quit();
+                         });
+        if (shell->start() && shell->run() == 0) {
+            return application.exec();
+        }
+        qWarning().noquote() << "FG: 呈现层启动失败，回退默认路径：" << shell->lastError();
+        RhineFg::publishInactive(shell->lastError());
+    }
+#endif
     engine.loadFromModule("RhineMusic", "Main");
     if (engine.rootObjects().isEmpty()) {
         return 1;

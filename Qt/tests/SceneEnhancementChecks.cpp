@@ -1,4 +1,5 @@
 #include "Engine.h"
+#include "fsr/FsrSharpness.h"
 #include "MusicData.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -134,6 +135,20 @@ bool runSceneEnhancementChecks(Engine &backend, QQuickWindow *window, const QStr
     // 恢复初始状态
     hud.sceneEnhancement = false;
     refresh();
+
+    // === 测试 11: FSR 锐化随放大倍数收敛 ===
+    // 用户设置页显示的是原始百分比，运行时按 1/√放大倍数 衰减，压掉暗色封面上的边缘亮环。
+    // 4 倍放大（316 → 1262）时 80% 收敛到 40%，3 倍（421 → 1262）收敛到 46%。
+    check(RhineFsr::effectiveSharpnessPercent(80, QSize(316, 343), QSize(1262, 1370)) == 40,
+          "sharpness converges to 40% at 4x upscale");
+    check(RhineFsr::effectiveSharpnessPercent(80, QSize(421, 457), QSize(1262, 1370)) == 46,
+          "sharpness converges to 46% at 3x upscale");
+    check(RhineFsr::effectiveSharpnessPercent(80, QSize(1262, 1370), QSize(1262, 1370)) == 80,
+          "sharpness unchanged at native scale");
+    check(RhineFsr::effectiveSharpnessPercent(80, QSize(1262, 1370), QSize(631, 685)) == 80,
+          "sharpness unchanged when the target is larger than the display");
+    check(RhineFsr::effectiveSharpnessPercent(0, QSize(316, 343), QSize(1262, 1370)) == 0,
+          "zero sharpness stays zero");
 
     qInfo() << "Scene enhancement core tests:" << testCount << (ok ? "passed" : "FAILED");
     return ok;

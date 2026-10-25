@@ -52,7 +52,10 @@ class Engine : public QObject {
     Q_INVOKABLE void wheelInput(double x, double y, double pixelDelta, double angleDelta);
     Q_INVOKABLE void adjustPlayer(QString control, double x, double width);
     Q_INVOKABLE void toggleFullscreen();
-    void setWindow(QQuickWindow *window);
+    // FG 路径呈现层是裸 QWindow（无 QQuickWindow），所以这里只要求 QWindow。
+    void setWindow(QWindow *window);
+    /// 每帧调度间隔：跟着屏幕刷新率走，必须和 vblank 成整数关系（见实现里的注释）。
+    int frameIntervalMs() const;
     Q_INVOKABLE void query(QString query);
     Q_INVOKABLE void key(QString key, bool command);
     Q_INVOKABLE void pointer(QString type, double x, double y);
@@ -189,7 +192,7 @@ class Engine : public QObject {
     QVariantList m_hits;
     QJsonObject m_frame, m_current;
     QJsonArray m_commands;
-    QPointer<QQuickWindow> m_window;
+    QPointer<QWindow> m_window;
     QWindow::Visibility m_windowedVisibility = QWindow::Windowed;
     QString m_loginMethod;
     QString m_cover;

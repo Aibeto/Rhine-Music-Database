@@ -3,7 +3,9 @@
 #include "Engine.h"
 #include "Glyphs.h"
 #include "fsr/Fsr1Constants.h"
+#include "fsr/FsrSharpness.h"
 #include "fsr/Fsr3Backend.h"
+#include "fg/FgFrameTap.h"
 #include <QFile>
 #include <QElapsedTimer>
 #include <QJsonDocument>
@@ -198,6 +200,9 @@ class Renderer {
     std::unique_ptr<Fsr3Backend> fsr3;
     // 上一帧写入 FSR3 的抖动偏移；投影矩阵与本值必须同源，否则重投影会偏。
     QPointF jitterPixels;
+    // FG 宿主的每帧输入：独立于 FSR3 的计时器与相机参数（见 render() 开头）。
+    QElapsedTimer fgClock;
+    float fgCameraNear = 0.1f, fgCameraFar = 5000.f, fgCameraFovY = 1.0f, fgFrameTimeMs = 16.6667f;
     // FSR3 的帧间隔由渲染器自己计时：帧协议里没有时间戳，而 frameTimeDelta 只影响
     // 时间性启发式，用实测间隔比用固定 16.67 更稳。
     QElapsedTimer fsrClock;
@@ -581,7 +586,8 @@ class Renderer {
             qWarning() << "FSR state: mode" << aaMode << "quality"
                        << qEnvironmentVariable("RHINE_FSR_QUALITY") << "divisor" << fsrDivisor
                        << "size" << nextSize << "view" << value << "sharpness"
-                       << fsrSharpnessPercent();
+                       << fsrSharpnessPercent() << "effectiveSharpness"
+                       << RhineFsr::effectiveSharpnessPercent(fsrSharpnessPercent(), nextSize, value);
         }
         sizedAaMode = aaMode;
         sampleCount = nextSamples;
@@ -1634,6 +1640,40 @@ class Renderer {
             updates = rhi->nextResourceUpdateBatch();
         }
         resize(dimensions, !finalTarget);
+        // FG 需要相机 near/far/fov、抖动与帧间隔。这里独立算一份，不复用下面 FSR3
+        // 那段里的局部变量：FSR 关掉时 FG 仍然要工作，而 fsrClock 只能 restart 一次。
+        {
+            float frameTimeMs = 16.6667f;
+            if (fgClock.isValid()) {
+                frameTimeMs = float(fgClock.restart()) / 1e6f;
+            } else {
+                fgClock.start();
+            }
+            fgFrameTimeMs = frameTimeMs;
+            const auto projection = frame["projection"].toArray();
+            fgCameraNear = 0.1f;
+            fgCameraFar = 5000.f;
+            fgCameraFovY = 1.0f;
+            if (projection.size() == 16) {
+                const float c = float(projection.at(10).toDouble());
+                const float d = float(projection.at(14).toDouble());
+                if (std::abs(c - 1.f) > 1e-6f) {
+                    fgCameraNear = d / (c - 1.f);
+                }
+                if (std::abs(c + 1.f) > 1e-6f) {
+                    fgCameraFar = d / (c + 1.f);
+                }
+                // 标准透视投影里 m[5] = 1/tan(fovY/2)，反解出竖直视场角。
+                const float m5 = float(projection.at(5).toDouble());
+                if (std::abs(m5) > 1e-6f) {
+                    fgCameraFovY = 2.f * std::atan(1.f / m5);
+                }
+            }
+            const auto jitter = frame["jitter"].toArray();
+            jitterPixels = jitter.size() == 2
+                               ? QPointF(jitter.at(0).toDouble(), jitter.at(1).toDouble())
+                               : QPointF();
+        }
         // FSR3 的上下文与目标尺寸绑定，必须在任何渲染通道之外重建。相机 near/far 直接从
         // 投影矩阵反解（Rhine 用标准 OpenGL 式透视：m[10]=c, m[14]=d，near=d/(c-1)、
         // far=d/(c+1)），这样列表页与查看封面页各自不同的 near/far 都能自动跟上。
@@ -1866,7 +1906,7 @@ class Renderer {
                      fsrOutput.texture, destination->pixelSize(),
                      // 界面上的锐化百分比与 RCAS 的"档"方向相反：0% 最柔（2 档），100% 最锐（0 档）。
                      Fsr1Constants::rcas(destination->pixelSize(),
-                                         float(100 - fsrSharpnessPercent()) / 100.f * 2.f));
+                                         float(100 - RhineFsr::effectiveSharpnessPercent(fsrSharpnessPercent(), size, viewSize)) / 100.f * 2.f));
         } else if (taa) {
             // TAA 要同时读“当前帧”和“历史帧”，所以当前帧先落到 ldr（与 FXAA 共用的中间目标）。
             quad(cb, "finalFragment", ldr.rt, ldr.rp, compositeList, QSize());
@@ -1927,6 +1967,23 @@ class Renderer {
                     ++it;
                 }
             }
+        }
+        // 每帧无条件发布一次：publish() 内部在 FG 宿主没打开 tap 时会直接空转，
+        // 所以默认路径的额外开销只有一次原子读。深度/运动矢量都是渲染器成员，
+        // 尺寸重建后指针会变，因此必须每帧重发而不是缓存。
+        {
+            RhineFg::FrameInputs inputs;
+            inputs.depth = depth;
+            inputs.motionVectors = velocity.texture;
+            inputs.renderSize = size;
+            inputs.displaySize = viewSize;
+            inputs.nearPlane = fgCameraNear;
+            inputs.farPlane = fgCameraFar;
+            inputs.fovYRadians = fgCameraFovY;
+            inputs.frameTimeMs = fgFrameTimeMs;
+            inputs.jitter = jitterPixels;
+            inputs.reset = frame["temporalReset"].toBool();
+            RhineFg::publish(inputs);
         }
     }
 };

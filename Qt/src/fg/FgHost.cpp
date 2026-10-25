@@ -7,8 +7,34 @@
 #include <QQuickGraphicsDevice>
 #include <QQuickItem>
 #include <QQuickRenderControl>
+#include <QVulkanInstance>
 #include <QQuickRenderTarget>
 #include <QQuickWindow>
+
+namespace {
+/**
+ * 离屏窗口的"内容变脏"监听器。
+ * FgHost 本身不是 QObject，装不了事件过滤器；而 QML 里任何改动最终都会给
+ * 离屏窗口投一个 QEvent::UpdateRequest，所以用一个极小的 QObject 转一道。
+ * 没有 Q_OBJECT 也不需要：只覆盖虚函数 eventFilter。
+ */
+class DirtyWatcher : public QObject
+{
+public:
+    explicit DirtyWatcher(bool *flag, QObject *parent = nullptr)
+        : QObject(parent), m_flag(flag) {}
+
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::UpdateRequest && m_flag)
+            *m_flag = true;
+        return QObject::eventFilter(watched, event);
+    }
+
+private:
+    bool *m_flag = nullptr;
+};
+}  // namespace
 #include <rhi/qrhi.h>
 
 namespace {
@@ -38,18 +64,20 @@ bool FgHost::fail(const QString &message)
     return false;
 }
 
-bool FgHost::start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi)
+bool FgHost::start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
+                   QVulkanInstance *vulkanInstance)
 {
     // 失败时立刻回收半成品：调用方会回退到默认路径，本对象可能被直接丢弃，
     // 不能把还挂着 QRhi 引用的窗口/纹理留给析构时机不确定的路径。
-    if (!startInternal(engine, scene3dUrl, overlayUrl, rhi)) {
+    if (!startInternal(engine, scene3dUrl, overlayUrl, rhi, vulkanInstance)) {
         teardown();
         return false;
     }
     return true;
 }
 
-bool FgHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi)
+bool FgHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
+                           QVulkanInstance *vulkanInstance)
 {
     if (m_valid)
         return fail(QStringLiteral("start() 被重复调用"));
@@ -78,9 +106,21 @@ bool FgHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUr
     m_scene.window->setGraphicsDevice(device);
     m_overlay.window->setGraphicsDevice(device);
 
+    // QQuickRenderControl::initialize() 在 Vulkan 下强制要求窗口上有 QVulkanInstance
+    // （Qt 内部要查实例级扩展/能力），只给 fromRhi(rhi) 是不够的。
+    if (vulkanInstance) {
+        m_scene.window->setVulkanInstance(vulkanInstance);
+        m_overlay.window->setVulkanInstance(vulkanInstance);
+    }
+
     m_scene.window->setColor(kSceneClearColor);
     // UI 层必须透明清屏，否则 FG 合成时会把整帧盖住。
     m_overlay.window->setColor(Qt::transparent);
+
+    // 脏标记：QML 里任何东西变化时 Qt 都会给离屏窗口投一个 UpdateRequest，
+    // 呈现层据此决定"这一步要不要真的渲染"。没有它就只能每帧盲渲。
+    m_scene.window->installEventFilter(new DirtyWatcher(&m_contentDirty, m_scene.window.get()));
+    m_overlay.window->installEventFilter(new DirtyWatcher(&m_contentDirty, m_overlay.window.get()));
 
     // 两个窗口都不 show()：RenderControl 下没有原生窗口，show() 会破坏离屏语义。
     if (!m_scene.control->initialize())
@@ -232,7 +272,25 @@ bool FgHost::renderFrame()
         return false;
     if (!renderLayer(m_overlay, "UI"))
         return false;
+    // 这一帧已经把两层的当前内容都画进纹理了，脏标记到此为止；
+    // 之后再有 QML 变化会重新把它置起来。
+    m_contentDirty = false;
     return true;
+}
+
+QQuickWindow *FgHost::overlayWindow() const
+{
+    return m_overlay.window.get();
+}
+
+QQuickWindow *FgHost::sceneWindow() const
+{
+    return m_scene.window.get();
+}
+
+QQuickItem *FgHost::overlayRootItem() const
+{
+    return m_overlay.rootItem;
 }
 
 void FgHost::resize(QSize size)
@@ -261,6 +319,8 @@ void FgHost::resize(QSize size)
     qInfo().noquote() << QStringLiteral("FgHost: 离屏目标已重建为 %1x%2")
                              .arg(m_size.width())
                              .arg(m_size.height());
+    // 换了渲染目标，两张纹理的内容都是新的（未定义），必须重画一次。
+    m_contentDirty = true;
 }
 
 QRhiTexture *FgHost::sceneTexture() const

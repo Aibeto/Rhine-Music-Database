@@ -231,6 +231,9 @@ if(RHINE_FFX_VK_AVAILABLE AND RHINE_FFX_SHADER_BLOBS_AVAILABLE)
     # 会让它在 `fatal error: 'vulkan/vulkan.h' file not found` 处直接失败。
     # FgBackend 与 Fsr3Backend 的 Vulkan 部分都在 RHINE_FSR3_VULKAN 守卫内，无需移出。
     target_sources(RhineMusicDatabase PRIVATE Qt/src/fg/VulkanPresenter.cpp Qt/src/fg/VulkanPresenter.h)
+    # FG 呈现层总装。头文件里包含 VulkanPresenter.h（连带 vulkan/vulkan.h），
+    # 所以只能跟着 Vulkan 条件一起编。
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/fg/FgShell.cpp Qt/src/fg/FgShell.h)
 endif()
 if(RHINE_FFX_DX12_AVAILABLE)
     target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_FSR3_DX12=1)
@@ -297,7 +300,9 @@ qt_add_shaders(
     Qt/shaders/velocity.vert
     Qt/shaders/velocity.frag
     Qt/shaders/fsr1_easu.frag
-    Qt/shaders/fsr1_rcas.frag)
+    Qt/shaders/fsr1_rcas.frag
+    Qt/shaders/fgComposite.vert
+    Qt/shaders/fgComposite.frag)
 # 增强模式单独打包
 qt_add_shaders(
     RhineMusicDatabase
@@ -468,6 +473,16 @@ if(MSVC)
     target_compile_options(RhineAudioPlaybackRegression PRIVATE /utf-8)
 endif()
 add_test(NAME qt_audio_playback_regression COMMAND RhineAudioPlaybackRegression)
+# 帧生成的纯逻辑（环境变量解析、能力快照、设置页三态、帧输入投递）不碰 GPU，
+# 所以全平台都编、都跑：门控写错的后果是"该置灰的放开了"，只有用例拦得住。
+qt_add_executable(RhineFgCapabilityRegression Qt/tests/FgCapabilityChecks.cpp)
+target_include_directories(RhineFgCapabilityRegression PRIVATE Qt/src)
+target_link_libraries(RhineFgCapabilityRegression PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(RhineFgCapabilityRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_fg_capability_regression COMMAND RhineFgCapabilityRegression)
+
 qt_add_executable(RhineAudioStreamRegression Qt/tests/AudioStreamChecks.cpp Qt/src/AudioPlayer.cpp
                   Qt/src/HttpAudioStream.cpp)
 target_include_directories(RhineAudioStreamRegression PRIVATE Qt/src)
@@ -529,3 +544,25 @@ endif()
 add_test(NAME qt_local_music_regression COMMAND RhineLocalMusicRegression
                                                 "${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
 set_tests_properties(qt_local_music_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# FG 闸门探针：验证「setQueueSubmitParams 对离屏帧生效」与「共享 device 上能建交换链」。
+# 需要真实 GPU + 显示服务（或 xvfb + lavapipe），CI runner 没有 GPU，所以**不进默认
+# CTest 集合**：构建后用 `output/qt-build/RhineFgGateProbe` 手动运行，用它给出
+# "FG 架构成不成立"的硬结论。
+if(RHINE_FFX_VK_AVAILABLE AND TARGET Qt6::GuiPrivate)
+    # EXCLUDE_FROM_ALL：这是排障用的一次性探针，不该占用默认构建与 CI 的时间。
+    # 需要时显式 cmake --build output/qt-build --target RhineFgGateProbe。
+    qt_add_executable(RhineFgGateProbe Qt/tests/FgGateProbe.cpp)
+    set_target_properties(RhineFgGateProbe PROPERTIES EXCLUDE_FROM_ALL TRUE)
+    target_include_directories(RhineFgGateProbe PRIVATE Qt/src)
+    target_sources(RhineFgGateProbe PRIVATE Qt/src/fg/VulkanPresenter.cpp Qt/src/fg/VulkanPresenter.h)
+    target_compile_definitions(RhineFgGateProbe PRIVATE RHINE_FFX_VK_AVAILABLE=1)
+    target_link_libraries(RhineFgGateProbe PRIVATE Qt6::Quick Qt6::GuiPrivate)
+    if(MSVC)
+        target_compile_options(RhineFgGateProbe PRIVATE /utf-8)
+    else()
+        # 保留符号：探针崩在 Qt 内部时，只有带 -g 才能看出是哪一步。
+        target_compile_options(RhineFgGateProbe PRIVATE -g)
+        target_link_options(RhineFgGateProbe PRIVATE -g)
+    endif()
+endif()

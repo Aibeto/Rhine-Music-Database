@@ -14,6 +14,7 @@ class QRhiTextureRenderTarget;
 class QQuickItem;
 class QQuickRenderControl;
 class QQuickWindow;
+class QVulkanInstance;
 QT_END_NAMESPACE
 
 /**
@@ -55,7 +56,12 @@ public:
      * engine 必须已经设置好 rhine / profiler / rhineFontFamily 这些根上下文属性。
      * 初始尺寸是兜底值，调用方应在 start() 成功后立刻用真实窗口尺寸调用 resize()。
      */
-    bool start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi);
+    /// vulkanInstance 必须与 rhi 同源（同一个 QVulkanInstance 建的设备）。
+    /// Qt 的 QQuickRenderControl::initialize() 即使拿到 fromRhi(rhi) 也仍然要求
+    /// QQuickWindow 上有 QVulkanInstance，否则直接失败并报
+    /// "No QVulkanInstance set for QQuickWindow, cannot initialize"。
+    bool start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
+               QVulkanInstance *vulkanInstance = nullptr);
 
     /** 两个场景各走一遍 polishItems → beginFrame → sync → render → endFrame。 */
     bool renderFrame();
@@ -68,9 +74,30 @@ public:
     /** UI 层渲染结果，内容是预乘 alpha（Qt Quick 的合成语义），FG 侧按 usePremulAlpha 消费。 */
     QRhiTexture *overlayTexture() const;
 
+    /// 两个离屏窗口。FG 宿主需要把输入事件转发给 UI 层（QQuickRenderControl 下
+    /// 事件必须由调用方手动投递），3D 层只用于取景不做交互。
+    QQuickWindow *overlayWindow() const;
+    QQuickWindow *sceneWindow() const;
+
+    /// UI 层（Overlay.qml）的根条目。
+    /// 离屏窗口永远不会被平台激活，Qt 也不会像默认路径那样把焦点自动落到输入层，
+    /// 所以 FG 路径需要拿它显式做一次焦点初始化（Overlay.qml 导出 focusInputLayer()）。
+    QQuickItem *overlayRootItem() const;
+
     bool isValid() const { return m_valid; }
     QSize size() const { return m_size; }
     QString lastError() const { return m_lastError; }
+
+    /**
+     * 内容有没有变化。
+     * 两个离屏窗口收到 Qt 的 UpdateRequest（QML 里任何东西改了都会发）或者被
+     * resize()/输入转发显式标脏时为真。呈现层只在为真时渲染：静止画面下继续
+     * "渲染→合成→present"是纯浪费，实测这条路径每步仍在消耗 GPU，还会把
+     * 呈现节奏挤到 40ms 一帧。
+     */
+    bool contentDirty() const { return m_contentDirty; }
+    /// 外部改了离屏窗口内容（比如转发输入）时显式标脏。
+    void markContentDirty() { m_contentDirty = true; }
 
 private:
     struct Layer {
@@ -83,7 +110,8 @@ private:
     };
 
     bool fail(const QString &message);
-    bool startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi);
+    bool startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
+                       QVulkanInstance *vulkanInstance);
     bool createLayerTargets(Layer &layer, const char *name);
     void releaseLayerTargets(Layer &layer);
     bool loadLayer(Layer &layer, QQmlEngine &engine, const QUrl &url, const char *name);
@@ -95,6 +123,8 @@ private:
     Layer m_overlay;
     QRhi *m_rhi = nullptr;
     QSize m_size;
+    /// 首帧必须渲染，所以初值为真；renderFrame() 成功后清零。
+    bool m_contentDirty = true;
     bool m_valid = false;
     QString m_lastError;
 };

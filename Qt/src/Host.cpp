@@ -1,3 +1,4 @@
+#include "fg/FgConfig.h"
 #include "Host.h"
 #include "AppStorage.h"
 #include <QBuffer>
@@ -956,6 +957,12 @@ QString Host::preference(QString key) const {
 void Host::setPreference(QString key, QString value) {
     if (!offline && value.size() < 262144 && preferenceKeys().contains(key)) {
         AppStorage::settings().setValue("panel/" + key, value);
+        // 帧生成开关是唯一"不必重启也能生效"的偏好：呈现层每帧解析 RHINE_FG，
+        // 所以这里写完磁盘再同步一次环境变量，设置页点一下就切换插值。
+        // 具体转换在 RhineFg::applyInterpolationPreference（有单测）。
+        if (key == QLatin1String("fg")) {
+            RhineFg::applyInterpolationPreference(value);
+        }
     }
 }
 bool Host::activates() const {

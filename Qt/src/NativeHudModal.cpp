@@ -1,5 +1,6 @@
 #include "NativeHud.h"
 #include "GraphicsBackend.h"
+#include "fg/FgCapability.h"
 #include "MusicData.h"
 #include <algorithm>
 
@@ -375,15 +376,23 @@ bool backendRunsFsr3(const Host *host) {
 #endif
 }
 /**
- * 帧生成与 FSR3 共用同一批后端能力，但额外依赖"由应用自己拥有交换链并负责呈现"。
- * Rhine 目前走 QQuickRhiItem，交换链归 Qt/QRhi 所有，FG 的呈现路径尚未接通，
- * 因此这里恒返回 false，设置页把该行置灰并显示未启用，避免出现点了没有任何效果的开关。
- * 接通 FG 时只需放开这里的条件，偏好与 RHINE_FG 的下发链路已经就绪。
+ * 帧生成这一行的结论：判定本身在 RhineFg::frameGenerationUi（可单测），
+ * 这里只负责把当前进程的能力快照与用户偏好喂进去。
+ *
+ * 后端能力看的是"这次启动实际选中的后端"而不是持久化偏好：RHINE_GRAPHICS 覆盖、
+ * 或者 Vulkan 设备缺失导致回退时，偏好里写的还是 vulkan，但真正跑的已经不是它了。
+ * 帧生成目前只有 Vulkan 实现，所以这里要求恰好是 vulkan。
  */
-bool backendRunsFrameGeneration(const Host *host) {
-    Q_UNUSED(host);
-    return false;
+RhineFg::FrameGenerationUi frameGenerationUi(const Host *host, bool preferenceOn) {
+    const auto &capability = RhineFg::capability();
+    const auto active = RhineGraphics::activeBackend();
+    const bool backendCapable = active.isEmpty() ? host->preference("graphics-backend") != "opengl"
+                                                : active == QLatin1String("vulkan");
+    return RhineFg::frameGenerationUi(capability.compiledIn, capability.presentLayerActive,
+                                      capability.interpolationAvailable, capability.reason,
+                                      backendCapable, preferenceOn);
 }
+
 } // namespace
 
 void NativeHud::settings(double x, double y, double width) {
@@ -449,7 +458,7 @@ void NativeHud::settings(double x, double y, double width) {
     // 抗锯齿互斥单选，默认关闭；倍率只对 SSAA 生效，与渲染分辨率相乘。
     const auto aaMode = m_host->preference("aa-mode");
     const auto aaScale = m_host->preference("aa-scale").toInt();
-    const bool fgUsable = backendRunsFrameGeneration(m_host);
+    const auto fgUi = frameGenerationUi(m_host, m_host->preference("fg") == "on");
     // 这一栏同时包含抗锯齿与超分（FSR），所以标题不能只写"抗锯齿"。
     rows.append({"AA & UPSCALING / 抗锯齿与超分辨率", "", "aa-mode"});
     // 下拉块选项表在建表时确定：展开高度与绘制共用同一份列表，避免两处不一致。
@@ -509,12 +518,9 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"FSR QUALITY / FSR 档位", "", "fsr-quality"});
         rows.append({"FSR SHARPNESS / 锐化", "", "fsr-sharpness"});
     }
-    // 帧生成是独立开关，不随抗锯齿模式循环；当前未接入呈现层，只显示状态、不注册点击。
-    // 措辞刻意不用"当前后端不支持"：后端其实是支持的（Vulkan/D3D12 的 FI 与 OF 组件
-    // 都已编译进二进制），缺的是由应用自己拥有交换链并负责呈现这一层。
-    rows.append({"FRAME GENERATION / 帧生成", fgUsable ? (m_host->preference("fg") == "on" ? "开启" : "关闭")
-                                                       : "尚未接入",
-                 fgUsable ? "fg" : "fg:unavailable"});
+    // 帧生成是独立开关，不随抗锯齿模式循环。呈现层在能力可用时常驻接管窗口，
+    // 所以这里的开关即时生效、不需要重启；不可用时整行置灰并写明原因。
+    rows.append({"FRAME GENERATION / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
     // 内容高度随平台可用选项变化
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;

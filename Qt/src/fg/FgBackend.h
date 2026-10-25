@@ -63,6 +63,7 @@ public:
     /// 销毁上下文与内部资源。调用前必须保证 GPU 不再使用这些资源。
     void release();
 
+
     /// 相机参数。fovYRadians 是弧度；frameTimeMs 是毫秒。
     void setCamera(float nearPlane, float farPlane, float fovYRadians, float frameTimeMs);
 

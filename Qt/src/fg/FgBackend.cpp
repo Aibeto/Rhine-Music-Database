@@ -3,6 +3,8 @@
 #include "FgConfig.h"
 
 #include <QDebug>
+
+#include <cstring>
 #include <QSize>
 #include <QVector3D>
 
@@ -209,10 +211,17 @@ VkImageLayout layoutForFfxState(FfxResourceStates state)
 }
 
 /// 把 QRhi 纹理包成 FfxResource。FG 不接管所有权：QRhi 纹理继续由 QRhi 管理。
-/// storage 表示这张图会不会被当成 UAV 写：深度图只读，传 false 可以避免给
-/// 深度资源挂上 UAV 用法（Vulkan 下 D32F 的 STORAGE 用法并不普遍支持）。
+///
+/// usage 决定 FFX 为这张图创建哪些视图：ffx_vk.cpp 的 ffxGetImageResourceDescriptionVK
+/// 只要在 VkImageCreateInfo 里看到 STORAGE_BIT 就打上 UAV 标志。早先这里对所有资源
+/// 都写 SAMPLED|STORAGE，等于把只读的颜色图、运动矢量图也声明成 UAV，SDK 会为它们
+/// 建出非法的 storage 视图，随后在 ExecuteGpuJobsVK 里崩在驱动内部——Fsr3Backend.cpp
+/// 踩过同一个坑（见那里的注释）。这里改成按 usage 推导。
+///
+/// storage 参数保留给"语义上确实会被写、但 usage 里没标 UAV"的场景（当前没有调用点），
+/// 默认 false：只有显式声明 FFX_RESOURCE_USAGE_UAV 的资源才加 STORAGE_BIT。
 FfxResource wrapTexture(QRhiTexture *texture, FfxResourceUsage usage, const wchar_t *name,
-                        FfxResourceStates state, bool storage = true)
+                        FfxResourceStates state, bool storage = false)
 {
     if (!texture)
         return {};
@@ -231,9 +240,14 @@ FfxResource wrapTexture(QRhiTexture *texture, FfxResourceUsage usage, const wcha
     info.arrayLayers = 1;
     info.samples = VK_SAMPLE_COUNT_1_BIT;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
-    info.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (storage)
-        info.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    VkImageUsageFlags vkUsage = VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (storage || (usage & FFX_RESOURCE_USAGE_UAV))
+        vkUsage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if (usage & FFX_RESOURCE_USAGE_DEPTHTARGET)
+        vkUsage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (usage & FFX_RESOURCE_USAGE_RENDERTARGET)
+        vkUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    info.usage = vkUsage;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -362,6 +376,43 @@ bool createRawImage(VkDevice device, const VkFns &fns,
 
     *out = result;
     return true;
+}
+
+/// FFX 的 Vulkan 后端按"扩展名"去查设备函数（ffx_vk.cpp 里查
+/// vkGetBufferMemoryRequirements2KHR 等），但 Qt 建 VkDevice 时并没有启用
+/// VK_KHR_get_memory_requirements2 之类的扩展 —— 这些功能在 Vulkan 1.1 已并入核心，
+/// 按 KHR 别名查询只会拿到空指针，SDK 随后在 CreateBackendContextVK 里直接调用它，
+/// 实测就是一次 SIGSEGV（Fsr3Backend 踩过同一个坑，见那边的注释）。
+/// KHR 与核心版本的签名、结构体定义完全相同，所以把别名指向核心名字即可。
+PFN_vkGetDeviceProcAddr g_fgRealGetDeviceProcAddr = nullptr;
+
+PFN_vkVoidFunction fgGetDeviceProcAddr(VkDevice device, const char *name)
+{
+    if (!g_fgRealGetDeviceProcAddr)
+        return nullptr;
+    // 只映射设备级函数：实例级函数不该经 vkGetDeviceProcAddr 取，映射了也不会生效。
+    static const struct
+    {
+        const char *alias;
+        const char *core;
+    } kAliases[] = {
+        {"vkGetBufferMemoryRequirements2KHR", "vkGetBufferMemoryRequirements2"},
+        {"vkGetImageMemoryRequirements2KHR", "vkGetImageMemoryRequirements2"},
+        {"vkBindBufferMemory2KHR", "vkBindBufferMemory2"},
+        {"vkBindImageMemory2KHR", "vkBindImageMemory2"},
+        {"vkGetSemaphoreCounterValueKHR", "vkGetSemaphoreCounterValue"},
+        {"vkWaitSemaphoresKHR", "vkWaitSemaphores"},
+        {"vkSignalSemaphoreKHR", "vkSignalSemaphore"},
+    };
+    for (const auto &mapping : kAliases)
+    {
+        if (std::strcmp(name, mapping.alias) == 0)
+        {
+            name = mapping.core;
+            break;
+        }
+    }
+    return g_fgRealGetDeviceProcAddr(device, name);
 }
 
 bool loadVkFns(const QRhiVulkanNativeHandles *handles, VkFns *fns, QString *error)
@@ -580,7 +631,10 @@ bool FgBackend::resize(QRhi *rhi, QSize renderSize, QSize displaySize,
     VkDeviceContext deviceContext{};
     deviceContext.vkDevice = handles->dev;
     deviceContext.vkPhysicalDevice = handles->physDev;
-    deviceContext.vkDeviceProcAddr = d->fns.getDeviceProcAddr;
+    // 必须用别名 shim 而不是原始 getDeviceProcAddr，否则 SDK 会在
+    // CreateBackendContextVK 里对空指针发一次调用。
+    g_fgRealGetDeviceProcAddr = d->fns.getDeviceProcAddr;
+    deviceContext.vkDeviceProcAddr = fgGetDeviceProcAddr;
     // ffxGetDeviceVK 把这份上下文拷进后端的一个静态变量，所以两个 effect 共用
     // 同一个 FfxDevice 就够了；它不接管设备生命周期。
     d->ffxDevice = ffxGetDeviceVK(&deviceContext);
@@ -735,6 +789,7 @@ bool FgBackend::resize(QRhi *rhi, QSize renderSize, QSize displaySize,
     return true;
 #endif
 }
+
 
 void FgBackend::release()
 {

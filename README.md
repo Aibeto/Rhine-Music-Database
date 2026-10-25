@@ -147,10 +147,20 @@ macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_
 
 | API         | FXAA  | SSAA   | MSAA   | TAA   | FSR Upscaling              | FSR Frame Generation |
 | ----------- | ----- | ------ | ------ | ----- | -------------------------- | -------------------- |
-| Vulkan      | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [ ]                |
+| Vulkan      | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [x]                |
 | Direct3D 12 | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS / TU (default) | - [ ]                |
 | OpenGL      | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [ ]                |
 | Metal       | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [ ]                |
+
+插帧（FSR Frame Generation）在 Vulkan 上是**常驻能力、即时开关**：只要设备支持，启动时应用就自建
+交换链接管窗口（呈现层常驻），设置页里的帧生成开关**点一下就生效、不需要重启**——它只决定每次呈现
+要不要插入一张插值帧，不参与呈现路径的选择。只有 3D 场景参与插值，UI 始终以原生分辨率叠加在插值结果
+之上（插值帧里文字不会重影）。任何一步失败都会自动回退到默认呈现路径，不影响启动；需要强制走默认
+路径时可用 `RHINE_FG_LAYER=off`（排障用）。标题栏右上角的性能面板在接管后会显示帧生成状态、呈现与
+渲染帧率、插值帧率、光流/插值/合成/取图/上屏分项耗时、交换链图像数与格式、深度与运动矢量是否就绪。
+Direct3D 12 与 Metal 的插帧尚未适配：FFX 的 FI/OF 组件在 SDK 里都给到了，但 Windows 侧还缺
+"自持 IDXGISwapChain3 的呈现层"与 FgBackend 的 D3D12 资源状态映射，本次没有可用的 Windows 机器
+编译与验证，因此保持未完成并继续走默认呈现路径。
 
 ## 从源码构建
 

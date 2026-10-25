@@ -1,4 +1,5 @@
 #include "Fsr3Backend.h"
+#include "FsrSharpness.h"
 
 #include <QDebug>
 #include <QLibrary>
@@ -574,8 +575,12 @@ bool Fsr3Backend::dispatch(QRhi *rhi, QRhiCommandBuffer *commandBuffer, QRhiText
     const int sharpnessPercent = qEnvironmentVariableIsEmpty("RHINE_FSR_SHARPNESS")
                                      ? 50
                                      : qBound(0, qEnvironmentVariableIntValue("RHINE_FSR_SHARPNESS"), 100);
-    description.enableSharpening = sharpnessPercent > 0;
-    description.sharpness = float(sharpnessPercent) / 100.f;
+    // 与 FSR1 RCAS 同一条规则：放大倍数越高，锐化越容易在边缘留下亮环与散点，
+    // 所以按实际放大倍率（renderSize -> displaySize）衰减有效强度。
+    const int effectiveSharpness =
+        RhineFsr::effectiveSharpnessPercent(sharpnessPercent, d->renderSize, d->displaySize);
+    description.enableSharpening = effectiveSharpness > 0;
+    description.sharpness = float(effectiveSharpness) / 100.f;
     description.frameTimeDelta = d->frameTimeMs;
     description.preExposure = 1.0f;
     description.reset = d->reset;

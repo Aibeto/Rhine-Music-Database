@@ -1,4 +1,6 @@
 #pragma once
+#include "fg/FgStats.h"
+
 #include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
@@ -63,6 +65,8 @@ class FrameProfiler : public QObject {
 
   private:
     void updateSampling();
+    /// 窗口是否处于可见状态：FG 呈现层接管时没有 QQuickWindow，改看呈现层统计。
+    bool windowShown() const;
     void sample();
     void collectStep();
     void formatMetrics();
@@ -98,6 +102,10 @@ class FrameProfiler : public QObject {
     qint64 m_previousCpuNs = -1;
     quint64 m_previousPresents = 0;
     quint64 m_previousSceneFrames = 0;
+    // 帧生成呈现层自己做 present，Qt 侧收不到 frameSwapped，所以它的累计计数在这里取差值。
+    quint64 m_previousFgPresented = 0;
+    quint64 m_previousFgInterpolated = 0;
+    quint64 m_previousFgRendered = 0;
     quint64 m_stepCount = 0;
     double m_stepTotalMs = 0;
     double m_stepMaxMs = 0;

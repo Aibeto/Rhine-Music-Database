@@ -219,7 +219,7 @@ void Engine::wake(bool input) {
     if (m_started && m_visible && !timer.isActive()) {
         // 恢复时接续视觉时钟，不能把整段待机时间推进到弹簧和拖动惯性中。
         m_lastTick = now;
-        timer.start(16);
+        timer.start(frameIntervalMs());
     }
 }
 void Engine::resetTemporalState() {
@@ -343,7 +343,7 @@ void Engine::tick() {
     timer.setInterval(m_discRotating && m_sceneSleeping && !app->hud.animating(m_animationTime) &&
                               now - m_lastInput >= 750 && !m_pressed
                           ? 33
-                          : 16);
+                          : frameIntervalMs());
     if (now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
         !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot") {
         timer.stop();
@@ -387,8 +387,19 @@ void Engine::submitForm(QString account, QString password) {
     app->hud.form(values);
     wake();
 }
-void Engine::setWindow(QQuickWindow *window) {
+void Engine::setWindow(QWindow *window) {
     m_window = window;
+}
+int Engine::frameIntervalMs() const
+{
+    // 刻意**不**从屏幕刷新率推导：渲染侧允许跑得比显示器快（超采、性能测试、
+    // 以及帧生成要拿到的真实帧都靠这条），把自己锁在刷新率上等于先给自己设上限。
+    // 默认沿用原来的 16ms 节奏；RHINE_TICK_MS 只是排障用的旋钮。
+    static const int overrideMs = qEnvironmentVariableIntValue("RHINE_TICK_MS");
+    if (overrideMs >= 4 && overrideMs <= 100) {
+        return overrideMs;
+    }
+    return 16;
 }
 void Engine::toggleFullscreen() {
     if (!m_window) {

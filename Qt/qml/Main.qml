@@ -58,15 +58,10 @@ Window {
         // 焦点原本落在 Window 里的 inputLayer 上；拆层后它在 Overlay 内部。
         overlay.focusInputLayer();
     }
-    // Shortcut 需要窗口级上下文（Qt 用窗口分发快捷键），留在 Window 侧。
-    Shortcut {
-        sequences: [StandardKey.Quit]
-        onActivated: Qt.quit()
-    }
-    Shortcut {
-        sequences: Qt.platform.os === "osx" ? [StandardKey.FullScreen, "F11"] : ["F11"]
-        onActivated: rhine.toggleFullscreen()
-    }
+    // 快捷键（Ctrl+Q / F11 / F10）已随 UI 层一起迁到 Overlay.qml。
+    // 原因：FG 路径根本不加载 Main.qml，留在 Window 侧等于 FG 完全没有快捷键；
+    // 而 Overlay.qml 在两条路径下都会被实例化，所以只保留那一份定义，
+    // 默认路径不会出现重复注册。
     // 3D 层：原 Main.qml:60 的 RhiScene 与原 :67-77 的增强 Loader。
     Scene3D {
         anchors.fill: parent
@@ -87,9 +82,5 @@ Window {
         function onClearCredentials() {
             overlay.clearCredentials();
         }
-    }
-    Shortcut {
-        sequence: "F10"
-        onActivated: profiler.toggleVisible()
     }
 }

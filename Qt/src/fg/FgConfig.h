@@ -6,10 +6,10 @@
 /**
  * FSR3 帧生成（FG）的开关与参数。
  *
- * 为什么默认关闭：FG 不是"多画一帧"那么简单，它要求应用自己持有 VkSwapchainKHR、
- * 自己 acquire/present，并把渲染完成信号量注入 Qt 的提交。没接呈现层的构建如果
- * 默认打开，只会得到一个永远不 present 的黑窗口。所以这里默认 off，由 RHINE_FG=on
- * 显式开启，让算法层可以先独立落地、再接呈现层。
+ * 为什么默认关闭插值：插值要求应用自己持有 VkSwapchainKHR、自己 acquire/present，
+ * 并把渲染完成信号量注入 Qt 的提交。现在呈现层在能力可用时**常驻接管**，所以
+ * RHINE_FG 只表示"要不要在每次呈现里插一张补偿帧"，可以随时改、不必重启；
+ * 但默认仍取 off——插值对画质与功耗都有代价，应由用户在设置里显式打开。
  *
  * 所有字段都是"能安全给默认值"的：相机参数取了 Rhine 场景的真实量级
  * （NativeSceneCamera 用 near=5 / far=300，m_fov 单位是度），而不是 SDK 样例里
@@ -71,6 +71,18 @@ inline bool parseBool(const QByteArray &raw, bool fallback)
         || value == "disable" || value == "disabled")
         return false;
     return fallback;
+}
+
+/**
+ * 设置页写完偏好后调用：把偏好值转成 RHINE_FG。
+ *
+ * 为什么需要它：呈现层每帧重读 RHINE_FG 来决定要不要插帧（这样开关才能免重启），
+ * 而设置页改的是持久化偏好。两处若不同步，表现就是"点了没反应"。
+ * 抽成函数是为了能在没有 GPU 的机器上单测这条链路。
+ */
+inline void applyInterpolationPreference(const QString &value)
+{
+    qputenv("RHINE_FG", value == QLatin1String("on") ? "on" : "off");
 }
 
 }  // namespace RhineFg

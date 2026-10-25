@@ -68,6 +68,9 @@ struct VulkanPresenter::Private
     // 这是排障用的安全通道：如果 Qt 没有消费 setQueueSubmitParams（比如离屏帧
     // 走了另一条提交路径），默认路径会在 present 上挂死，而这条通道能先把画面跑通。
     bool forceIdleSync = false;
+    // 静默降级只警告一次：硬同步会让帧生成掉到同步节奏，不能悄悄发生。
+    bool warnedIdleFallback = false;
+    bool warnedSuboptimal = false;
 
     QVector<VkImage> images;
     QVector<VkImageView> views;
@@ -807,6 +810,15 @@ bool VulkanPresenter::present(const Frame &frame, bool *needsRecreate)
     // 有信号，present 会在驱动里挂死。两种情况都退回设备空闲同步，画面正确、
     // 代价是这一帧掉到同步节奏。
     const bool waitOnRenderDone = d->paramsInstalled && !d->forceIdleSync;
+    if (!waitOnRenderDone && !d->forceIdleSync && !d->warnedIdleFallback)
+    {
+        // 走到这里说明 installSubmitParams() 没成功（图像索引不匹配等）：present 只能等
+        // 整个 VkDevice 排空，单次 50ms 级，帧生成会退化到同步节奏。以前这条路径完全
+        // 静默，排障时只能看到"上屏 55ms"却查不到原因，所以至少要留下一条日志。
+        d->warnedIdleFallback = true;
+        qWarning().noquote() << "FG present: 本帧未注入提交参数，退回 vkDeviceWaitIdle 硬同步"
+                             << d->error;
+    }
     if (!waitOnRenderDone && d->deviceWaitIdle)
         d->deviceWaitIdle(d->device);
 
@@ -842,9 +854,15 @@ bool VulkanPresenter::present(const Frame &frame, bool *needsRecreate)
     }
     if (result == VK_SUBOPTIMAL_KHR)
     {
-        d->needsRecreate = true;
-        if (needsRecreate)
-            *needsRecreate = true;
+        // Suboptimal 只表示"这张图已经呈现出去，但交换链不再最优"（常见于窗口尺寸刚变）。
+        // 为此整链重建（deviceWaitIdle + 5 张 image/view/semaphore + 全部纹理与管线）代价
+        // 太高，而且重建本身会再吃几帧——实测 gapP50 26ms 与均值 52ms 的双峰就是它造成的。
+        // 真正的重建交给 VK_ERROR_OUT_OF_DATE_KHR 与窗口的 Resize/Expose 事件。
+        if (!d->warnedSuboptimal)
+        {
+            d->warnedSuboptimal = true;
+            qWarning().noquote() << "FG present: 交换链 suboptimal（继续使用，等 OutOfDate 或窗口事件再重建）";
+        }
         return true;
     }
     if (result != VK_SUCCESS)
@@ -891,6 +909,20 @@ VkFormat VulkanPresenter::colorFormat() const
 quint32 VulkanPresenter::imageCount() const
 {
     return quint32(d->images.size());
+}
+
+VkImage VulkanPresenter::imageAt(quint32 index) const
+{
+    return index < quint32(d->images.size()) ? d->images.at(int(index)) : VK_NULL_HANDLE;
+}
+
+quint32 VulkanPresenter::indexOf(VkImage image) const
+{
+    for (int i = 0; i < d->images.size(); ++i) {
+        if (d->images.at(i) == image)
+            return quint32(i);
+    }
+    return UINT32_MAX;
 }
 
 QString VulkanPresenter::lastError() const

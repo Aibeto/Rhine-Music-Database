@@ -69,6 +69,37 @@ Item {
             event.accepted = rhine.keyEvent(event.key, event.modifiers, event.text);
         }
     }
+    // ── 键盘快捷键（原来放在 Main.qml 的 Window 里，两条路径现在共用这一份） ──
+    //
+    // 为什么 context 要跟着宿主变：
+    //   · 默认路径有真实 QQuickWindow，Qt.WindowShortcut 与拆分前语义完全一致；
+    //   · FG 路径的离屏 QQuickRenderControl 窗口没有平台窗口、永远不会被激活
+    //     （实测 window.isActive() 恒为 false，requestActivate() 也无效），Qt 的
+    //     快捷键地图(QShortcutMap)就匹配不到 WindowShortcut。此时必须显式声明
+    //     Qt.ApplicationShortcut（"任一应用窗口激活即生效"，而真实按键本来就只能
+    //     由有焦点的 FgShell 窗口收到）。
+    //
+    // 另一条重要的实测结论：QML Shortcut 只在"平台事件路径"里被处理
+    // （QGuiApplicationPrivate::processKeyEvent → shortcutMap.tryShortcut）。
+    // FgShell::eventFilter() 里那种 QCoreApplication::sendEvent(离屏窗口, key) 的
+    // 直接投递完全不经过快捷键地图，任何 context 都不会触发——所以 FG 的快捷键
+    // 绝不能靠"转发事件"实现，只能靠这里的 context 声明。
+    readonly property int shortcutContext: hostWindow === null ? Qt.ApplicationShortcut : Qt.WindowShortcut
+    Shortcut {
+        sequences: [StandardKey.Quit]
+        context: overlay.shortcutContext
+        onActivated: Qt.quit()
+    }
+    Shortcut {
+        sequences: Qt.platform.os === "osx" ? [StandardKey.FullScreen, "F11"] : ["F11"]
+        context: overlay.shortcutContext
+        onActivated: rhine.toggleFullscreen()
+    }
+    Shortcut {
+        sequence: "F10"
+        context: overlay.shortcutContext
+        onActivated: profiler.toggleVisible()
+    }
     Item {
         id: controls
         width: overlay.stageWidth

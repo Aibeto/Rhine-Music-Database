@@ -93,6 +93,11 @@ public:
     QSize extent() const;
     VkFormat colorFormat() const;
     quint32 imageCount() const;
+
+    /// 第 index 张交换链图像的裸句柄。FG 宿主需要把它们包成 QRhi 纹理才能当
+    /// 渲染目标用；句柄在 resize()/release() 之后失效。
+    VkImage imageAt(quint32 index) const;
+    quint32 indexOf(VkImage image) const;
     QString lastError() const;
 
     // 实现细节类型。公开声明只是为了让 .cpp 里的匿名命名空间辅助函数能拿到它，
