@@ -94,6 +94,8 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    /// 交换链要的物理像素尺寸（逻辑尺寸 × 设备像素比）。
+    QSize pixelSize() const;
     /// 同步补焦点：按键到达时若没有焦点项就当场重建。
     void ensureOverlayFocus(QQuickWindow *overlay);
     void step();
@@ -101,6 +103,10 @@ private:
     void reportStats();
     /// 上一次统计时的帧数，用来把 ms/frame 算成"这一窗口内"的均值。
     int m_statsBase = 0;
+    /// 设备像素比：交换链按 m_size*m_dpr 建，QML 仍按 m_size 逻辑像素排版。
+    qreal m_dpr = 1.0;
+    /// 真实窗口上次的 devicePixelRatio，用来发现屏幕/缩放变化。
+    qreal m_windowDpr = 1.0;
     bool initializeVulkan();
     bool initializeLayers();
     bool ensureSwapchainResources();

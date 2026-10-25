@@ -19,7 +19,10 @@
 #include <QMatrix4x4>
 #include <QQmlContext>
 #include <QQmlEngine>
+#include <QHoverEvent>
+#include <QMouseEvent>
 #include <QQuickItem>
+#include <QWheelEvent>
 #include <QQuickWindow>
 #include <QTimer>
 #include <QVulkanFunctions>
@@ -220,6 +223,11 @@ bool FgShell::initializeLayers()
         return false;
     }
     m_host->resize(m_size);
+    // 离屏层不会自己去拿屏幕 DPR（QQuickRenderControl 不支持），这里显式注入：
+    // 由我们自己把 contentItem 放大到物理像素、QML 根节点保持逻辑像素。
+    m_dpr = m_window->devicePixelRatio();
+    m_windowDpr = m_dpr;
+    m_host->setPixelRatio(m_dpr);
     // 键盘链路的第一环：焦点。
     //
     // 默认路径靠 Main.qml 的 Component.onCompleted → overlay.focusInputLayer() 把焦点
@@ -243,6 +251,12 @@ bool FgShell::initializeLayers()
     if (m_fgAvailable)
         m_fg = std::make_unique<FgBackend>();
     return true;
+}
+
+QSize FgShell::pixelSize() const
+{
+    return QSize(qMax(1, qRound(m_size.width() * m_dpr)),
+                 qMax(1, qRound(m_size.height() * m_dpr)));
 }
 
 bool FgShell::ensureCompositeResources()
@@ -397,7 +411,7 @@ bool FgShell::recreateSwapchain()
 {
     // 强制重建：OutOfDate 的交换链即使窗口尺寸没变也已经不可用，不能走 resize() 里
     // "尺寸没变就返回"的捷径——以前就是被这条捷径吞掉，acquire 于是永远 OutOfDate。
-    if (!m_presenter->resize(m_size, true)) {
+    if (!m_presenter->resize(pixelSize(), true)) {
         m_error = QStringLiteral("交换链重建失败：%1").arg(m_presenter->lastError());
         return false;
     }
@@ -427,6 +441,21 @@ bool FgShell::recreateSwapchain()
 
 void FgShell::syncSizes()
 {
+    // 设备像素比会在窗口被拖到另一块屏幕、或系统缩放变化时改变。
+    // 它一变，交换链和离屏纹理的目标尺寸都变了，必须重建，否则会出现
+    // "画面只占左上角一块"（纹理偏大）或"整体糊一层"（纹理偏小）。
+    if (m_host && m_window) {
+        const qreal windowDpr = m_window->devicePixelRatio();
+        if (!qFuzzyCompare(windowDpr, m_windowDpr)) {
+            m_windowDpr = windowDpr;
+            m_dpr = windowDpr;
+            m_host->setPixelRatio(m_dpr);
+            m_needRecreate = true;
+            m_forcePresent = true;
+            qInfo().noquote() << "FG: 窗口设备像素比" << windowDpr << "离屏层实际比例" << m_dpr
+                              << "物理像素" << pixelSize();
+        }
+    }
     const QSize windowSize = m_window->size();
     if (windowSize.isEmpty())
         return;
@@ -469,7 +498,11 @@ bool FgShell::armFrameGeneration()
     // 不能在 beginOffscreenFrame 之后——那样会卡死在设备等待上。
     // FgHost 的场景纹理是 RGBA8（Qt 的渲染目标格式），FG 的三张主纹理格式必须一致，
     // 所以这里显式传 RGBA8，而不是用 FgBackend 的默认 RGBA16F。
-    if (!m_fg->resize(m_rhi.get(), inputs.renderSize, inputs.displaySize, QRhiTexture::RGBA8))
+    // displaySize 必须是**物理像素**：插帧的输出要直接铺满交换链。若沿用逻辑尺寸，
+    // 高 DPI 下 FG 输出小于合成目标，画面会被拉伸而发糊。renderSize 保持原值——
+    // 那是运动矢量/深度的分辨率，跟着 3D 渲染尺寸走，与设备像素比无关。
+    const QSize fgDisplaySize = pixelSize().isEmpty() ? inputs.displaySize : pixelSize();
+    if (!m_fg->resize(m_rhi.get(), inputs.renderSize, fgDisplaySize, QRhiTexture::RGBA8))
         return false;
     m_fg->setCamera(inputs.nearPlane, inputs.farPlane, inputs.fovYRadians, inputs.frameTimeMs);
     m_fg->setJitter(float(inputs.jitter.x()), float(inputs.jitter.y()));
@@ -1001,17 +1034,57 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
             QCoreApplication::sendEvent(overlay, event);
             break;
         case QEvent::KeyRelease:
+            QCoreApplication::sendEvent(overlay, event);
+            break;
         case QEvent::MouseButtonPress:
         case QEvent::MouseButtonRelease:
         case QEvent::MouseButtonDblClick:
-        case QEvent::MouseMove:
-        case QEvent::Wheel:
+        case QEvent::MouseMove: {
+            // 离屏窗口按物理像素、QML 根节点按逻辑像素缩放：Qt 投递的窗口坐标是
+            // 物理空间的，不乘比例的话 QML 收到的点只有真实位置的 1/dpr，点击会错位。
+            auto *me = static_cast<QMouseEvent *>(event);
+            if (qFuzzyCompare(m_dpr, 1.0)) {
+                QCoreApplication::sendEvent(overlay, event);
+            } else {
+                QMouseEvent scaled(me->type(), me->position() * m_dpr,
+                                   me->scenePosition() * m_dpr, me->globalPosition(),
+                                   me->button(), me->buttons(), me->modifiers(),
+                                   me->pointingDevice());
+                QCoreApplication::sendEvent(overlay, &scaled);
+            }
+            break;
+        }
+        case QEvent::Wheel: {
+            auto *we = static_cast<QWheelEvent *>(event);
+            if (qFuzzyCompare(m_dpr, 1.0)) {
+                QCoreApplication::sendEvent(overlay, event);
+            } else {
+                QWheelEvent scaled(we->position() * m_dpr, we->globalPosition(),
+                                   we->pixelDelta(), we->angleDelta(), we->buttons(),
+                                   we->modifiers(), we->phase(), we->inverted(), we->source(),
+                                   we->pointingDevice());
+                QCoreApplication::sendEvent(overlay, &scaled);
+            }
+            break;
+        }
         case QEvent::HoverEnter:
         case QEvent::HoverLeave:
-        case QEvent::HoverMove:
+        case QEvent::HoverMove: {
+            auto *he = static_cast<QHoverEvent *>(event);
+            if (qFuzzyCompare(m_dpr, 1.0)) {
+                QCoreApplication::sendEvent(overlay, event);
+            } else {
+                QHoverEvent scaled(he->type(), he->position() * m_dpr, he->globalPosition(),
+                                   he->oldPos() * m_dpr, he->modifiers(), he->pointingDevice());
+                QCoreApplication::sendEvent(overlay, &scaled);
+            }
+            break;
+        }
         case QEvent::TouchBegin:
         case QEvent::TouchUpdate:
         case QEvent::TouchEnd:
+            QCoreApplication::sendEvent(overlay, event);
+            break;
         case QEvent::FocusOut:
         case QEvent::FocusIn:
             // 故意不转发 FocusIn/FocusOut。

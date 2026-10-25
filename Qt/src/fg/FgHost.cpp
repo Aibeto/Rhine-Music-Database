@@ -180,15 +180,15 @@ bool FgHost::createLayerTargets(Layer &layer, const char *name)
         return fail(QStringLiteral("%1 层离屏目标尺寸为空").arg(QLatin1String(name)));
 
     // RenderTarget 让纹理能作为颜色附件，UsedAsTransferSource 让 FG 能采样/拷贝它。
-    layer.texture = m_rhi->newTexture(QRhiTexture::RGBA8, m_size, 1,
+    layer.texture = m_rhi->newTexture(QRhiTexture::RGBA8, pixelSize(), 1,
                                       QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource);
     layer.texture->setName(QByteArray("fg-") + name + "-color");
     if (!layer.texture->create()) {
         releaseLayerTargets(layer);
         return fail(QStringLiteral("%1 层颜色纹理创建失败（%2x%3）")
                         .arg(QLatin1String(name))
-                        .arg(m_size.width())
-                        .arg(m_size.height()));
+                        .arg(pixelSize().width())
+                        .arg(pixelSize().height()));
     }
 
     const QRhiTextureRenderTargetDescription description{QRhiColorAttachment(layer.texture)};
@@ -246,19 +246,52 @@ bool FgHost::loadLayer(Layer &layer, QQmlEngine &engine, const QUrl &url, const 
 
     item->setParentItem(layer.window->contentItem());
     item->setSize(QSizeF(m_size));
+    item->setTransformOrigin(QQuickItem::TopLeft);
+    item->setScale(m_ratio);
     layer.rootItem = item;
     return true;
+}
+
+QSize FgHost::pixelSize() const
+{
+    return QSize(qMax(1, qRound(m_size.width() * m_ratio)),
+                 qMax(1, qRound(m_size.height() * m_ratio)));
+}
+
+void FgHost::setPixelRatio(qreal ratio)
+{
+    if (!m_valid)
+        return;
+    ratio = qBound(1.0, ratio, 4.0);
+    if (qFuzzyCompare(ratio, m_ratio))
+        return;
+    m_ratio = ratio;
+    // 比例变了等于渲染目标尺寸变了，必须重建，否则 QML 只会画进纹理一角。
+    releaseLayerTargets(m_scene);
+    releaseLayerTargets(m_overlay);
+    applyLayerGeometry(m_scene);
+    applyLayerGeometry(m_overlay);
+    createLayerTargets(m_scene, "3D");
+    createLayerTargets(m_overlay, "UI");
+    qInfo().noquote() << "FgHost: 离屏层放大" << m_ratio << "倍，物理像素" << pixelSize();
 }
 
 void FgHost::applyLayerGeometry(Layer &layer)
 {
     if (!layer.window)
         return;
-    layer.window->resize(m_size);
+    // 离屏窗口与 contentItem 用**物理像素**（决定光栅化面积），
+    // QML 根节点仍用**逻辑像素**并放大 m_ratio 倍（决定排版）。
+    // 这样 QML 里的 width/height/stageScale 全部保持原语义，只是画得更密。
+    const QSize px = pixelSize();
+    layer.window->resize(px);
     if (QQuickItem *content = layer.window->contentItem())
-        content->setSize(QSizeF(m_size));
-    if (layer.rootItem)
+        content->setSize(QSizeF(px));
+    if (layer.rootItem) {
         layer.rootItem->setSize(QSizeF(m_size));
+        layer.rootItem->setTransformOrigin(QQuickItem::TopLeft);
+        layer.rootItem->setScale(m_ratio);
+    }
 }
 
 bool FgHost::renderLayer(Layer &layer, const char *name)

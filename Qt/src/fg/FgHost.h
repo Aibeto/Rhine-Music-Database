@@ -6,6 +6,7 @@
 #include <memory>
 
 QT_BEGIN_NAMESPACE
+class QScreen;
 class QQmlEngine;
 class QRhi;
 class QRhiRenderPassDescriptor;
@@ -86,6 +87,13 @@ public:
 
     bool isValid() const { return m_valid; }
     QSize size() const { return m_size; }
+    /// 离屏目标的**物理像素**尺寸 = 逻辑尺寸 × 设备像素比。
+    /// QML 仍按逻辑像素排版，只有光栅化面积变大；两者搞混就会出现"高 DPI 下发糊"。
+    QSize pixelSize() const;
+    /// 设置离屏层的放大比例。QQuickRenderControl 窗口不认 setScreen()，
+    /// 拿不到屏幕 DPR，所以由调用方显式注入，我们自己做内容缩放。
+    void setPixelRatio(qreal ratio);
+    qreal pixelRatio() const { return m_ratio; }
     QString lastError() const { return m_lastError; }
 
     /**
@@ -123,6 +131,7 @@ private:
     Layer m_overlay;
     QRhi *m_rhi = nullptr;
     QSize m_size;
+    qreal m_ratio = 1.0;
     /// 首帧必须渲染，所以初值为真；renderFrame() 成功后清零。
     bool m_contentDirty = true;
     bool m_valid = false;
