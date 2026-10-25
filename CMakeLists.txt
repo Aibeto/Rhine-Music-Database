@@ -369,6 +369,9 @@ elseif(WIN32)
 elseif(UNIX)
     # Linux 复用同一份原生场景实现；凭据、协议交付和媒体集成由本平台文件补齐。
     target_sources(RhineCore PRIVATE Qt/src/PlatformLinux.cpp)
+    # 显卡选择：Windows 那条直路是 DXGI + QT_D3D_ADAPTER_INDEX，Linux 只能把序号翻译成
+    # 驱动认识的环境变量，且必须在 QGuiApplication 之前完成，所以单独成文件、只挂主程序。
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/LinuxGraphics.cpp)
     # 安装后的程序按 AppImage 前缀查找同级 Qt 运行时；构建树仍用 CMake 生成的 kit 路径， 否则 CI 中装在独立目录的 Qt 会在运行测试时找不到。
     set_target_properties(RhineMusicDatabase PROPERTIES INSTALL_RPATH "\$ORIGIN/../lib")
     install(TARGETS RhineMusicDatabase RUNTIME DESTINATION bin)
@@ -482,6 +485,18 @@ if(MSVC)
     target_compile_options(RhineFgCapabilityRegression PRIVATE /utf-8)
 endif()
 add_test(NAME qt_fg_capability_regression COMMAND RhineFgCapabilityRegression)
+
+# Linux 显卡选择里能离线验证的部分：PCI 地址解析、序号 → 环境变量的映射、序号失效时的回退。
+# 写错的后果是"选错卡"或"配置失效后仍注入变量"，只能靠用例拦。三平台都编，
+# sysfs 相关用例在源码里按平台裁剪。
+qt_add_executable(RhineGpuChoiceRegression Qt/tests/LinuxGpuChecks.cpp Qt/src/LinuxGraphics.cpp
+                  Qt/src/AppStorage.cpp)
+target_include_directories(RhineGpuChoiceRegression PRIVATE Qt/src)
+target_link_libraries(RhineGpuChoiceRegression PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(RhineGpuChoiceRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_gpu_choice_regression COMMAND RhineGpuChoiceRegression)
 
 qt_add_executable(RhineAudioStreamRegression Qt/tests/AudioStreamChecks.cpp Qt/src/AudioPlayer.cpp
                   Qt/src/HttpAudioStream.cpp)

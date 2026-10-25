@@ -8,6 +8,7 @@
 #include "FrameProfiler.h"
 #include "GraphicsBackend.h"
 #include "Hud.h"
+#include "LinuxGraphics.h"
 #include "RhiScene.h"
 #include "OpticalScene.h"
 #include <QDir>
@@ -276,15 +277,22 @@ int main(int argc, char **argv) {
         qputenv("QT_PLUGIN_PATH", bundledPlugins.absolutePath().toUtf8());
     }
 #endif
+    // 组织名与程序名决定 QSettings 的落点。Linux 选显卡要在创建应用实例之前读
+    // panel/gpu-index，因此这三个静态设置必须提前落位（它们不依赖 QCoreApplication 实例）。
+    QCoreApplication::setOrganizationName(AppIdentity::Organization);
+    QCoreApplication::setOrganizationDomain(AppIdentity::Id);
+    QCoreApplication::setApplicationName(AppIdentity::Id);
 #ifdef Q_OS_WIN
     initializeWindowsGraphics();
+#endif
+#ifdef Q_OS_LINUX
+    // Linux 没有 QT_D3D_ADAPTER_INDEX 那样的单一入口，选择只能落成厂商环境变量，
+    // 所以同样要早于任何 QQuickWindow——RHI 在创建窗口时就定下了用哪块卡。
+    initializeLinuxGraphics();
 #endif
     QGuiApplication application(argc, argv);
     application.setWindowIcon(QIcon(":/icons/icon-256.png"));
     QCoreApplication::setApplicationVersion(AppUpdater::currentVersion());
-    QCoreApplication::setOrganizationName(AppIdentity::Organization);
-    QCoreApplication::setOrganizationDomain(AppIdentity::Id);
-    QCoreApplication::setApplicationName(AppIdentity::Id);
     QGuiApplication::setApplicationDisplayName(AppIdentity::DisplayName);
     // 必须在创建任何 QQuickWindow 之前确定后端；组织名先落位，配置路径才能落到应用数据目录。
     selectGraphicsBackend();

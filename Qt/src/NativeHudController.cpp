@@ -1,4 +1,5 @@
 #include "fg/FgConfig.h"
+#include "GraphicsBackend.h"
 #include "NativeHud.h"
 #include "MusicData.h"
 #include "MusicDiscover.h"
@@ -612,6 +613,22 @@ void NativeHud::action(QString value) {
 #endif
         }
         m_host->setPreference("graphics-backend", next);
+    } else if (value.startsWith("gpu-index:")) {
+#if defined(Q_OS_LINUX)
+        // Linux 显卡选择：只写配置，下次启动由 initializeLinuxGraphics 校验序号并注入
+        // 驱动变量。"default" 表示清回默认——清空后启动不再注入任何厂商变量。
+        // 序号越界就丢弃：界面上本来不会出现这种项，防的是配置被外部改坏后传到启动侧。
+        const auto chosen = value.mid(10).trimmed();
+        bool numeric = false;
+        const int index = chosen.toInt(&numeric);
+        const int gpuCount = RhineGraphics::gpuDeviceCount();
+        if (chosen == QLatin1String("default")) {
+            m_host->setPreference("gpu-index", QString());
+        } else if (numeric && index >= 0 && index < gpuCount) {
+            m_host->setPreference("gpu-index", QString::number(index));
+        }
+        expandedPreference.clear();
+#endif
     } else if (value.startsWith("expand:")) {
         // 设置页下拉块：点标题行展开/收起对应选项列表（抗锯齿与 FSR 档位共用）。
         // 列表高度参与内容总高度，所以展开后立即重新夹紧滚动位置，避免停在超出末尾的位置。

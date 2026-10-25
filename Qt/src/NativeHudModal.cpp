@@ -449,6 +449,38 @@ void NativeHud::settings(double x, double y, double width) {
         }
     }
     rows.append({"GRAPHICS BACKEND / 图形后端 · 重启生效", backendLabel, "graphics-backend"});
+    // 显卡选择的选项表：非 Linux 恒为空，这一行也就不出现（Windows 由 DXGI 直接取适配器，
+    // macOS 固定 Metal，两边都没有可选项）。表在这里一次建好，绘制与展开高度共用同一份。
+    // 只显示序号（0 基，与 /sys/class/drm 的 cardN 顺序一致）：换过卡之后型号必定变化，
+    // 拿型号当身份会让"换卡"变成"悄悄选到另一张卡"；序号不存在时启动逻辑会回退默认，
+    // 这里把回退写进当前值，用户才知道自己保存的序号已经不适用了。
+    QVector<QPair<QString, QString>> gpuOptions;
+    int gpuOptionIndex = 0;
+#if defined(Q_OS_LINUX)
+    int gpuCount = 0;
+    QString gpuLabel = QStringLiteral("默认");
+    gpuCount = RhineGraphics::gpuDeviceCount();
+    if (gpuCount > 1) {
+        // 第一项是"默认"：清空配置后启动不再注入任何厂商变量，行为与没有这个功能时一致。
+        gpuOptions.append({"default", QStringLiteral("默认")});
+        for (int gpu = 0; gpu < gpuCount; ++gpu) {
+            gpuOptions.append({QString::number(gpu), QStringLiteral("显卡 ") + QString::number(gpu)});
+        }
+        const auto gpuPreference = m_host->preference("gpu-index").trimmed();
+        bool numeric = false;
+        const int stored = gpuPreference.toInt(&numeric);
+        if (numeric && stored >= 0 && stored < gpuCount) {
+            gpuOptionIndex = stored + 1;
+            gpuLabel = QStringLiteral("显卡 ") + QString::number(stored);
+        } else if (!gpuPreference.isEmpty()) {
+            gpuLabel = QStringLiteral("默认（序号 %1 不存在）").arg(gpuPreference);
+        } else if (RhineGraphics::gpuAppliedIndex() >= 0) {
+            // RHINE_GPU_INDEX 只影响本次启动，标出来免得和保存值混淆。
+            gpuLabel = QStringLiteral("显卡 %1（RHINE_GPU_INDEX）").arg(RhineGraphics::gpuAppliedIndex());
+        }
+        rows.append({"GPU / 显卡 · 重启生效", gpuLabel, "gpu-index"});
+    }
+#endif
     // 垂直同步关闭后允许帧率超过屏幕刷新率，由交换链的呈现模式决定，重启生效。
     rows.append({"V-SYNC / 垂直同步 · 重启生效", vsync ? "开启" : "关闭", "vsync"});
     // 渲染分辨率：内部目标按百分比创建，最终合成通道再缩放回窗口，重启后生效。
@@ -506,7 +538,9 @@ void NativeHud::settings(double x, double y, double width) {
         expandedPreference == QLatin1String("aa-mode") ? aaOptions.size() * aaOptionStep : 0;
     const double fsrExtra =
         expandedPreference == QLatin1String("fsr-quality") ? fsrOptions.size() * aaOptionStep : 0;
-    const double dropdownExtra = aaExtra + fsrExtra;
+    const double gpuExtra =
+        expandedPreference == QLatin1String("gpu-index") ? gpuOptions.size() * aaOptionStep : 0;
+    const double dropdownExtra = aaExtra + fsrExtra + gpuExtra;
     // 抗锯齿的子设置紧跟主行，按当前模式决定显示哪些：SSAA 只有倍率，MSAA 只有采样数，
     // FSR1/FSR3 有档位与锐化，off/fxaa/taa 没有子设置。不适用的行直接不出现，
     // 避免调了没有任何效果。
@@ -600,7 +634,11 @@ void NativeHud::settings(double x, double y, double width) {
             rowInk[3] = 0.35;
         }
         text(row.at(0), left + 16, rowY + 18, 18, "demibold", 0, rowInk);
-        if (row.at(2) == "aa-mode") {
+        if (row.at(2) == "gpu-index") {
+            // 显卡下拉块：选中即收起（收起与写配置都在 NativeHud::action 的 gpu-index: 分支）。
+            rowShift += dropdown(gpuOptions, gpuOptionIndex, QStringLiteral("gpu-index"),
+                                 QStringLiteral("gpu-index:"), rowY, left, usable, rowInk, tint);
+        } else if (row.at(2) == "aa-mode") {
             // 抗锯齿下拉块：选中即收起（收起逻辑在 NativeHud::action 的 aa-mode: 分支里）。
             rowShift += dropdown(aaOptions, aaIndex, QStringLiteral("aa-mode"), QStringLiteral("aa-mode:"),
                                  rowY, left, usable, rowInk, tint);
