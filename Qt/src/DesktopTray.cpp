@@ -1,0 +1,95 @@
+#include "DesktopTray.h"
+#include <QAction>
+#include <QApplication>
+#include <QCloseEvent>
+#include <QCursor>
+#include <QPainter>
+#include <QQuickWindow>
+
+namespace {
+QIcon trayIcon() {
+#ifdef Q_OS_MACOS
+    // 菜单栏图标
+    QPixmap image(44, 44);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(Qt::black);
+    painter.drawRoundedRect(QRectF(23, 7, 4, 26), 1, 1);
+    painter.drawEllipse(QRectF(11, 26, 16, 11));
+    painter.drawRoundedRect(QRectF(23, 7, 12, 6), 1, 1);
+    painter.end();
+    image.setDevicePixelRatio(2);
+    QIcon icon(image);
+    icon.setIsMask(true);
+    return icon;
+#else
+    return QGuiApplication::windowIcon();
+#endif
+}
+}
+
+/**
+ * 建立驻留图标与退出菜单
+ */
+DesktopTray::DesktopTray(QQuickWindow *window, QObject *parent) : QObject(parent), m_window(window) {
+    m_icon.setObjectName("desktopTrayIcon");
+    m_icon.setParent(this);
+    m_icon.setIcon(trayIcon());
+    m_icon.setToolTip(QGuiApplication::applicationDisplayName());
+    auto quit = m_menu.addAction(QStringLiteral("退出"));
+    connect(quit, &QAction::triggered, this, &DesktopTray::quitApplication);
+#ifdef Q_OS_WIN
+    m_icon.setContextMenu(&m_menu);
+#endif
+    connect(&m_icon, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
+        if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) {
+            restoreWindow();
+        }
+#ifdef Q_OS_MACOS
+        if (reason == QSystemTrayIcon::Context) {
+            m_menu.popup(QCursor::pos());
+        }
+#endif
+    });
+    m_icon.show();
+    if (QSystemTrayIcon::isSystemTrayAvailable()) {
+        QGuiApplication::setQuitOnLastWindowClosed(false);
+    }
+    m_window->installEventFilter(this);
+    qApp->installEventFilter(this);
+}
+
+/** 拦截普通窗口关闭 */
+bool DesktopTray::eventFilter(QObject *watched, QEvent *event) {
+    if (watched == qApp && event->type() == QEvent::Quit) {
+        m_quitting = true;
+    }
+    if (watched == m_window && event->type() == QEvent::Close && !m_quitting && !qApp->isSavingSession()) {
+        if (QSystemTrayIcon::isSystemTrayAvailable()) {
+            QGuiApplication::setQuitOnLastWindowClosed(false);
+            static_cast<QCloseEvent *>(event)->ignore();
+            m_window->hide();
+            return true;
+        }
+        QGuiApplication::setQuitOnLastWindowClosed(true);
+    }
+    return QObject::eventFilter(watched, event);
+}
+
+void DesktopTray::restoreWindow() {
+    const auto restoredStates = m_window->windowStates() & ~Qt::WindowMinimized;
+    m_window->setWindowStates(restoredStates);
+    // show() 会按平台默认模式重置窗口状态；只恢复可见性以保留最大化与全屏。
+    m_window->setVisible(true);
+    // macOS 显示窗口时可能同步回报普通状态，显示后重新应用此前保留的标记。
+    m_window->setWindowStates(restoredStates);
+    m_window->raise();
+    m_window->requestActivate();
+}
+
+void DesktopTray::quitApplication() {
+    m_quitting = true;
+    QCoreApplication::quit();
+}

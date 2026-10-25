@@ -12,6 +12,10 @@
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QGuiApplication>
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+#include "DesktopTray.h"
+#include <QApplication>
+#endif
 #include <QIcon>
 #include <QLoggingCategory>
 #include <QQmlApplicationEngine>
@@ -67,7 +71,11 @@ int main(int argc, char **argv) {
 #ifdef Q_OS_WIN
     initializeWindowsGraphics();
 #endif
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    QApplication application(argc, argv);
+#else
     QGuiApplication application(argc, argv);
+#endif
     application.setWindowIcon(QIcon(":/icons/icon-256.png"));
     QCoreApplication::setApplicationVersion(AppUpdater::currentVersion());
     QCoreApplication::setOrganizationName(AppIdentity::Organization);
@@ -162,6 +170,9 @@ int main(int argc, char **argv) {
     window->show();
 #endif
     backend.setWindow(window);
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    DesktopTray tray(window, &application);
+#endif
 #ifdef Q_OS_IOS
     configureIOSWindow(window, &backend);
 #endif

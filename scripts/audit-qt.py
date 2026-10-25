@@ -65,6 +65,10 @@ if mac:
     assert identity["CFBundleExecutable"] == "RhineMusicDatabase"
     libraries = subprocess.check_output(["otool", "-L", str(executable)], text=True)
     assert "QtQuick" in libraries and "QtQml" in libraries
+    assert "QtWidgets" in libraries, "Missing desktop tray runtime dependency"
+    assert (
+        app / "Contents/Frameworks/QtWidgets.framework/QtWidgets"
+    ).is_file(), "Missing bundled desktop tray runtime"
     assert "libswift" not in libraries.lower(), "Swift runtime dependency found"
     assert not any(p.suffix == ".swift" for p in app.rglob("*") if p.is_file())
     assert not any(p.name in {"node_modules", ".git", ".DS_Store"} for p in app.iterdir())
@@ -164,6 +168,7 @@ elif linux:
 else:
     debug = (app / "Qt6Cored.dll").is_file()
     suffix = "d.dll" if debug else ".dll"
+    assert (app / ("Qt6Widgets" + suffix)).is_file(), "Missing desktop tray runtime"
     for name in ("msvcp140", "vcruntime140", "vcruntime140_1"):
         assert (app / (name + suffix)).is_file(), "Missing local MSVC runtime: " + name
     assert not list(app.glob("vc_redist*.exe")), "Portable package must not require a runtime installer"

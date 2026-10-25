@@ -48,6 +48,9 @@ find_package(
                Concurrent
                ShaderTools
                Multimedia)
+if(WIN32 OR (APPLE AND NOT IOS))
+    find_package(Qt6 6.12 REQUIRED COMPONENTS Widgets)
+endif()
 if(NOT TARGET Qt6::GuiPrivate)
     find_package(Qt6GuiPrivate REQUIRED)
 endif()
@@ -285,6 +288,10 @@ target_link_libraries(
             Qt6::Concurrent
             Qt6::Multimedia)
 # 平台分支只处理原生能力、部署身份及链接依赖。
+if(WIN32 OR (APPLE AND NOT IOS))
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/DesktopTray.cpp Qt/src/DesktopTray.h)
+    target_link_libraries(RhineMusicDatabase PRIVATE Qt6::Widgets)
+endif()
 if(IOS)
     target_sources(RhineCore PRIVATE Qt/src/PlatformIOS.mm Qt/src/BridgeProcessIOS.cpp Qt/src/BridgeProcess.h)
     target_link_libraries(RhineCore PRIVATE "-framework Security" "-framework UIKit" "-framework AVFAudio"
