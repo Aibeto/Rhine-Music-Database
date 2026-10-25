@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QList>
 #include <QObject>
+#include <QPointer>
 #include <QSize>
 #include <QString>
 #include <array>
@@ -17,6 +18,8 @@ QT_BEGIN_NAMESPACE
 class QQmlEngine;
 class QEvent;
 class QRhi;
+class QQuickItem;
+class QQuickWindow;
 class QRhiBuffer;
 class QRhiCommandBuffer;
 class QRhiGraphicsPipeline;
@@ -91,6 +94,8 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    /// 同步补焦点：按键到达时若没有焦点项就当场重建。
+    void ensureOverlayFocus(QQuickWindow *overlay);
     void step();
     void scheduleNext(int delayMs = 0);
     void reportStats();

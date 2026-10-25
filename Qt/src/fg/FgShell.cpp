@@ -993,6 +993,13 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
     if (QQuickWindow *overlay = m_host ? m_host->overlayWindow() : nullptr) {
         switch (event->type()) {
         case QEvent::KeyPress:
+            // 兜底且是真正的保障：按键到达时离屏窗口若没有焦点项，KeyPress 会被
+            // QQuickWindow 直接丢弃（F 键不受影响是因为 Shortcut 走 QShortcutMap，
+            // 与焦点项无关）。事件循环的顺序不可控，所以这里同步补一次，绝不依赖
+            // FocusIn 的排队恢复。
+            ensureOverlayFocus(overlay);
+            QCoreApplication::sendEvent(overlay, event);
+            break;
         case QEvent::KeyRelease:
         case QEvent::MouseButtonPress:
         case QEvent::MouseButtonRelease:
@@ -1005,8 +1012,18 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
         case QEvent::TouchBegin:
         case QEvent::TouchUpdate:
         case QEvent::TouchEnd:
-        case QEvent::FocusIn:
         case QEvent::FocusOut:
+        case QEvent::FocusIn:
+            // 故意不转发 FocusIn/FocusOut。
+            //
+            // 为什么：离屏窗口没有平台窗口，isActive() 恒为 false，靠 Qt 自己的
+            // 激活流程永远拿不回焦点。而 QQuickWindow::focusOutEvent 会立刻把
+            // activeFocusItem 清空——转发出去就等于亲手把 QML 焦点打掉，且再也
+            // 恢复不了（实测切走再切回后 activeFocusItem 恒为 null，于是 KeyPress
+            // 到了窗口却被 QQuickWindow 丢弃：ESC/方向键全部失效，而 F 键因为是
+            // Shortcut、不经过焦点项，所以照常好用）。
+            // 焦点由"可见窗口"这唯一真实来源决定：启动时建立一次，按键到达时兜底。
+            break;
         case QEvent::ShortcutOverride:
         case QEvent::InputMethod:
             QCoreApplication::sendEvent(overlay, event);
@@ -1017,6 +1034,16 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
     }
     return QObject::eventFilter(watched, event);
 }
+
+// 同步版：立刻把 QML 焦点补回来（排队恢复会被后续事件搅掉，实测重新聚焦后仍为 null）。
+void FgShell::ensureOverlayFocus(QQuickWindow *overlay)
+{
+    if (!overlay || !m_host || overlay->activeFocusItem())
+        return;
+    if (QQuickItem *root = m_host->overlayRootItem())
+        QMetaObject::invokeMethod(root, "focusInputLayer", Qt::DirectConnection);
+}
+
 
 bool FgShell::start()
 {

@@ -465,6 +465,14 @@ void Engine::toggleFullscreen() {
     }
 }
 bool Engine::keyEvent(int keyCode, int modifiers, QString text) {
+    const bool accepted = keyEventImpl(keyCode, modifiers, text);
+    // 探针：确认按键真的走进了 QML 输入层，以及有没有被消费掉（RHINE_KEY_PROBE=1）。
+    if (qEnvironmentVariableIntValue("RHINE_KEY_PROBE") == 1)
+        qInfo().noquote() << "按键到达输入层: 键" << keyCode << "接受" << accepted;
+    return accepted;
+}
+
+bool Engine::keyEventImpl(int keyCode, int modifiers, QString text) {
     switch (keyCode) {
     case Qt::Key_MediaTogglePlayPause:
     case Qt::Key_MediaPlay:

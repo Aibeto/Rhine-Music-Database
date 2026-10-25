@@ -48,6 +48,8 @@ class Engine : public QObject {
     Q_INVOKABLE void action(QString action);
     Q_INVOKABLE void submitForm(QString account, QString password);
     Q_INVOKABLE bool keyEvent(int key, int modifiers, QString text);
+    /// 真正的按键处理；keyEvent 负责探针记录后转发。
+    bool keyEventImpl(int key, int modifiers, QString text);
     Q_INVOKABLE void searchAccepted(QString text, int modifiers);
     Q_INVOKABLE void wheelInput(double x, double y, double pixelDelta, double angleDelta);
     Q_INVOKABLE void adjustPlayer(QString control, double x, double width);
