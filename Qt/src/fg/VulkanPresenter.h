@@ -70,7 +70,11 @@ public:
     void release();
 
     /// 重建交换链。尺寸没变时是空操作；调用前本类会自己等 GPU 空闲。
-    bool resize(QSize extent);
+    ///
+    /// force 是为 OutOfDate 准备的：交换链失效**不一定**伴随窗口尺寸变化
+    /// （合成器重建 surface、跨 GPU 导入失败都会触发），此时必须无视尺寸照建，
+    /// 否则"尺寸没变就返回"会把重建吞掉，acquire 从此永远 OutOfDate。
+    bool resize(QSize extent, bool force = false);
 
     /// 取下一张可渲染的图像。返回 OutOfDate 时调用方应 resize() 后重试。
     AcquireResult acquire(Frame *out);
@@ -93,6 +97,9 @@ public:
     QSize extent() const;
     VkFormat colorFormat() const;
     quint32 imageCount() const;
+    /// 当前真正生效的呈现模式（FIFO / MAILBOX / IMMEDIATE）。
+    /// 帧率上限几乎完全由它决定，所以性能面板要把它写出来。
+    QString presentModeName() const;
 
     /// 第 index 张交换链图像的裸句柄。FG 宿主需要把它们包成 QRhi 纹理才能当
     /// 渲染目标用；句柄在 resize()/release() 之后失效。

@@ -92,5 +92,8 @@ inline FgConfig FgConfig::fromEnvironment()
     FgConfig config;
     config.enabled = RhineFg::parseBool(qgetenv("RHINE_FG"), false);
     config.debugChecking = RhineFg::parseBool(qgetenv("RHINE_FG_DEBUG"), false);
+    // 垂直同步必须跟着设置页走，否则呈现层永远用 FIFO：实测这台机器上 FIFO 只给到
+    // 约半个刷新率（vkcube 47.4fps vs MAILBOX 125.4fps），关掉 vsync 才能拿到 MAILBOX。
+    config.vsync = RhineFg::parseBool(qgetenv("RHINE_FG_VSYNC"), true);
     return config;
 }

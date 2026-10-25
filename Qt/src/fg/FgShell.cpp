@@ -395,8 +395,19 @@ void FgShell::releaseSwapchainResources()
 
 bool FgShell::recreateSwapchain()
 {
-    if (!m_presenter->resize(m_size)) {
+    // 强制重建：OutOfDate 的交换链即使窗口尺寸没变也已经不可用，不能走 resize() 里
+    // "尺寸没变就返回"的捷径——以前就是被这条捷径吞掉，acquire 于是永远 OutOfDate。
+    if (!m_presenter->resize(m_size, true)) {
         m_error = QStringLiteral("交换链重建失败：%1").arg(m_presenter->lastError());
+        return false;
+    }
+    // 重建能救活的情况：重建后马上有新帧上屏（presentOne 成功会清零这个计数）。
+    // 救不活的情况：连续重建却一帧都上不去——那就是设备根本不能向这个 surface
+    // 呈现（典型是没有直连显示输出的独显），继续重建只会白等 GPU 空闲，直接判死。
+    if (++m_recreateStreak > 5) {
+        m_failed = true;
+        m_error = QStringLiteral("呈现层连续 %1 次重建都没有新帧上屏，判定这台设备无法呈现")
+                      .arg(m_recreateStreak);
         return false;
     }
     m_needRecreate = false;
@@ -716,6 +727,9 @@ bool FgShell::presentOne(const VulkanPresenter::Frame &frame, bool allowInterpol
         if (m_presentClock.isValid())
             recordGap(double(m_presentClock.nsecsElapsed()) / 1e6);
         m_presentClock.restart();
+        // 真的上屏了，说明重建是有效的：清掉"连续重建次数"，别让偶发的
+        // 一两次 OutOfDate 累积成误判。
+        m_recreateStreak = 0;
     }
     return presented;
 }
@@ -989,6 +1003,35 @@ bool FgShell::start()
     m_timer->setTimerType(Qt::PreciseTimer);
     connect(m_timer, &QTimer::timeout, this, &FgShell::step);
 
+    // 预检：有些设备能建出交换链，却撑不住持续上屏（典型是"没有直连显示输出"的独显
+    // ——surface 由跑在集显上的合成器管理）。实测独显上会先成功呈现 4 帧，随后
+    // OutOfDate 一路涨到几万次、再也没出过一帧（白窗 + 空转）。
+    // 判据要贴着"真坏了"写，不能贴"慢了"：首帧编译着色器本来就是慢的。
+    //   · OutOfDate 超过 200 次 → 交换链撑不住，判死；
+    //   · 3 秒过去一帧都没上屏 → 判死；
+    //   · 其余情况放行（能出 20 帧就提前结束预检，不拖慢启动）。
+    // 判死后由 main.cpp 干净回退到默认 QQuickWindow 路径。这比
+    // vkGetPhysicalDeviceSurfaceSupportKHR 靠谱：后者对这类设备仍返回支持。
+    {
+        QElapsedTimer probeClock;
+        probeClock.start();
+        while (probeClock.elapsed() < 3000 && m_presentedFrames < 20 && !m_failed
+               && m_outOfDateCount <= 200) {
+            step();
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        }
+        if (m_failed || m_outOfDateCount > 200 || m_presentedFrames == 0) {
+            m_error = QStringLiteral("呈现层自检失败：接管窗口后只上屏 %1 帧"
+                                     "（acquire 超时 %2 次、OutOfDate %3 次、重建 %4 次），"
+                                     "这台设备撑不住持续呈现，回退默认呈现路径。")
+                          .arg(m_presentedFrames)
+                          .arg(m_acquireTimeoutCount)
+                          .arg(m_outOfDateCount)
+                          .arg(m_recreateStreak);
+            return false;
+        }
+    }
+
     // 排障：RHINE_FG_DIAG=1 时每秒打一行真实计数。presented 只在每 300 帧打印，
     // 现场判断"到底是在跑还是在空转"时等不起，这个小计时器直接给答案。
     if (qEnvironmentVariableIsSet("RHINE_FG_DIAG")) {
@@ -1011,11 +1054,13 @@ bool FgShell::start()
     // 交换链与设备信息整个生命周期不变，这里写一次就够，之后 publishStats 带出去。
     m_stats.swapchainImages = int(m_presenter->imageCount());
     m_stats.swapchainFormat = swapchainFormatName(int(m_presenter->colorFormat()));
+    m_stats.presentMode = m_presenter->presentModeName();
     m_stats.adapterName = QString::fromUtf8(m_rhi->driverInfo().deviceName);
     m_stats.backendName = QStringLiteral("Vulkan");
     RhineFg::publishActive(m_fgAvailable);
     qWarning().noquote() << "FG: 呈现层已启动；插值" << (m_fgAvailable ? "可用" : "不可用") << "，"
-                         << m_presenter->imageCount() << "张交换链图像" << m_presenter->extent();
+                         << m_presenter->imageCount() << "张交换链图像" << m_presenter->extent()
+                         << "，呈现模式" << m_presenter->presentModeName();
     return true;
 }
 

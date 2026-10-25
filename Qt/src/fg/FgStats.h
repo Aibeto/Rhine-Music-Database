@@ -59,6 +59,9 @@ struct Stats {
     /// 交换链与设备信息（启动时填一次）。
     int swapchainImages = 0;
     QString swapchainFormat;
+    /// 真正生效的呈现模式（FIFO / MAILBOX / IMMEDIATE）。帧率上限几乎全由它决定，
+    /// 性能面板要显示出来，否则用户没法判断"这次跑得快是因为换对了呈现模式"。
+    QString presentMode;
     QString adapterName;
     QString backendName;
 

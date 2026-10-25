@@ -226,6 +226,13 @@ static void applyFrameGenerationSetting() {
     if (qEnvironmentVariableIsEmpty("RHINE_FG")) {
         qputenv("RHINE_FG", graphicsSettings().value("panel/fg", "off").toString().toUtf8());
     }
+    // 呈现层的垂直同步也来自设置页：只有关掉 vsync，呈现层才会去选 MAILBOX。
+    // 实测这台机器上 FIFO 只给到约半个刷新率（47.4fps），MAILBOX 能到 125fps。
+    if (qEnvironmentVariableIsEmpty("RHINE_FG_VSYNC")) {
+        const auto vsync = graphicsSettings().value("panel/vsync", "on").toString();
+        qputenv("RHINE_FG_VSYNC",
+                vsync.compare("off", Qt::CaseInsensitive) == 0 ? "off" : "on");
+    }
 }
 /**
  * 渲染分辨率百分比：panel/render-scale=75 表示按窗口的 75% 渲染，再由最终合成通道放大。
@@ -391,6 +398,12 @@ int main(int argc, char **argv) {
                              && !args.contains("--capture") && !fgLayerDisabled
                              && RhineGraphics::activeBackend() == QLatin1String("vulkan")
                              && FgShell::compiledIn();
+    // 排障：接管与否只看这一行。之前出现过"设了 RHINE_FG_LAYER=on 才接管"的怪现象，
+    // 把每个输入的实测值打出来，比逐条读代码猜快得多。
+    qWarning().noquote() << "FG gate: candidate" << fgCandidate
+                         << "layerDisabled" << fgLayerDisabled << "test" << test << "visual"
+                         << visual << "backend" << RhineGraphics::activeBackend() << "compiledIn"
+                         << FgShell::compiledIn();
     if (fgCandidate) {
         // FG 路径从不调用 QQmlApplicationEngine::load()（Main.qml 不加载，两个离屏层
         // 都是手工用 QQuickRenderControl 建的），而"QML 里的 Qt.quit() 真能退出进程"

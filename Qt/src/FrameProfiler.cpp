@@ -339,6 +339,11 @@ void FrameProfiler::sample() {
     m_metrics.insert("fgPresentMs", fg.presentMs);
     m_metrics.insert("fgSwapchainImages", fg.swapchainImages);
     m_metrics.insert("fgSwapchainFormat", fg.swapchainFormat);
+    // 呈现模式决定帧率上限：FG 层自己建的交换链知道确切值；走默认路径时交换链归 Qt，
+    // 拿不到真实值，这里如实写"自管"而不是猜一个（实测默认路径是 FIFO ≈ 半刷新率）。
+    m_metrics.insert("fgPresentMode", fg.layerActive && !fg.presentMode.isEmpty()
+                                          ? fg.presentMode
+                                          : QStringLiteral("Qt 自管"));
     m_metrics.insert("fgAdapter", fg.adapterName);
     m_metrics.insert("fgBackend", fg.backendName);
     m_metrics.insert("fgDepthReady", fg.depthReady);
@@ -414,7 +419,9 @@ void FrameProfiler::formatMetrics() {
     } else {
         stateLabel = QStringLiteral("帧生成 · 插值中");
     }
-    m_headline = QStringLiteral("%1 FPS · %2").arg(number("qtFps"), stateLabel);
+    m_headline = QStringLiteral("%1 FPS · %2 · %3")
+                     .arg(number("qtFps"), stateLabel,
+                          m_metrics.value("fgPresentMode").toString());
     const auto memory = residentBytes < 0 ? QStringLiteral("不可用")
                                           : QString::number(residentBytes / 1048576., 'f', 1) + " MiB";
     // 帧生成块排在最前：接管呈现后，屏幕上真正发生的是什么只有这几行说得清。
@@ -452,9 +459,10 @@ void FrameProfiler::formatMetrics() {
                        millis("fgDispatchMs"))
             + QStringLiteral("              合成 / 上屏  %1 / %2 ms\n")
                   .arg(millis("fgCompositeMs"), millis("fgPresentMs"))
-            + QStringLiteral("交换链        %1 张 · %2 · %3 → %4\n深度 / 运动矢量  %5 / %6\n\n")
+            + QStringLiteral("交换链        %1 张 · %2 · %3 → %4 · 呈现 %5\n深度 / 运动矢量  %6 / %7\n\n")
                   .arg(number("fgSwapchainImages", 0), m_metrics.value("fgSwapchainFormat").toString(),
-                       sizeText("fgRenderSize"), sizeText("fgDisplaySize"), ready("fgDepthReady"),
+                       sizeText("fgRenderSize"), sizeText("fgDisplaySize"),
+                       m_metrics.value("fgPresentMode").toString(), ready("fgDepthReady"),
                        ready("fgMotionVectorsReady"));
     }
     m_details = fgDetails + QStringLiteral("场景提交      %1 FPS\nQt 帧间隔 P50 / P95  %2 / %3 ms\n"

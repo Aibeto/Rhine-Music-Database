@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QPainter>
+#include <QQuickWindow>
 #include <QThread>
 #include <algorithm>
 #include <cmath>
@@ -56,6 +57,34 @@ Engine::Engine(QString path, bool offline, QObject *parent)
     connect(&timer, &QTimer::timeout, this, &Engine::tick);
     mediaTimer.setInterval(1000);
     connect(&mediaTimer, &QTimer::timeout, this, &Engine::pollMedia);
+    // 节拍诊断（RHINE_PACE_DIAG=1）：每秒打印一次「引擎 tick 数 vs 实际渲染数」，
+    // 用来判定帧率是被引擎定时器限住、还是被呈现侧限住。
+    if (qEnvironmentVariableIsSet("RHINE_PACE_DIAG")) {
+        auto *diag = new QTimer(this);
+        diag->setInterval(1000);
+        connect(diag, &QTimer::timeout, this, [this] {
+            static quint64 lastSteps = 0, lastScene = 0, lastHud = 0, lastRender = 0;
+            const quint64 render = m_renderFrames.load(std::memory_order_relaxed);
+            const double avgGap = m_paceTicks > 1 ? double(m_paceGapSum) / (m_paceTicks - 1) / 1e6 : 0;
+            const double avgStep = m_paceTicks > 0 ? double(m_paceStepSum) / m_paceTicks / 1e6 : 0;
+            qInfo("节拍诊断: tick/s=%llu sceneUpd/s=%llu hudUpd/s=%llu render/s=%llu "
+                  "interval=%dms timerActive=%d sleeping=%d sceneSleeping=%d rotating=%d "
+                  "hudAnimating=%d | 间隔均=%.2fms 最大=%.2fms step均=%.2fms 最大=%.2fms",
+                  qulonglong(m_steps) - lastSteps, qulonglong(m_sceneUpdates) - lastScene,
+                  qulonglong(m_hudUpdates) - lastHud, qulonglong(render) - lastRender,
+                  timer.interval(), int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping),
+                  int(m_discRotating), int(app->hud.animating(m_animationTime)), avgGap,
+                  double(m_paceGapMax) / 1e6, avgStep, double(m_paceStepMax) / 1e6);
+            lastSteps = qulonglong(m_steps);
+            lastScene = qulonglong(m_sceneUpdates);
+            lastHud = qulonglong(m_hudUpdates);
+            lastRender = render;
+            m_paceGapSum = m_paceGapMax = 0;
+            m_paceStepSum = m_paceStepMax = 0;
+            m_paceTicks = 0;
+        });
+        diag->start();
+    }
     if (!offline) {
         start();
     }
@@ -219,7 +248,8 @@ void Engine::wake(bool input) {
     if (m_started && m_visible && !timer.isActive()) {
         // 恢复时接续视觉时钟，不能把整段待机时间推进到弹簧和拖动惯性中。
         m_lastTick = now;
-        timer.start(frameIntervalMs());
+        const int resumeMs = frameIntervalMs();
+        timer.start(resumeMs > 0 ? resumeMs : 0);
     }
 }
 void Engine::resetTemporalState() {
@@ -314,6 +344,13 @@ void Engine::flushPointer() {
  * 状态收束后允许待机，输入和后台数据失效会重新唤醒。
  */
 void Engine::tick() {
+    const qint64 enterNs = clock.nsecsElapsed();
+    if (m_paceEnterNs != 0) {
+        const qint64 gap = enterNs - m_paceEnterNs;
+        m_paceGapSum += gap;
+        m_paceGapMax = qMax(m_paceGapMax, gap);
+    }
+    m_paceEnterNs = enterNs;
     const auto now = clock.elapsed();
     m_animationTime += qMin<qint64>(now - m_lastTick, 50) / 1000.;
     m_lastTick = now;
@@ -338,12 +375,21 @@ void Engine::tick() {
     if (now - m_lastInput >= 750 && !m_pressed) {
         scene.energyIdle(true);
     }
+    const qint64 stepStartNs = clock.nsecsElapsed();
     step(m_animationTime);
-    // 只有盘面在运动时以 30Hz 刷新；交互和原有动画仍使用原频率。
-    timer.setInterval(m_discRotating && m_sceneSleeping && !app->hud.animating(m_animationTime) &&
-                              now - m_lastInput >= 750 && !m_pressed
-                          ? 33
-                          : frameIntervalMs());
+    const qint64 stepNs = clock.nsecsElapsed() - stepStartNs;
+    m_paceStepSum += stepNs;
+    m_paceStepMax = qMax(m_paceStepMax, stepNs);
+    ++m_paceTicks;
+    // 动态帧间隔：不设固定周期常数，帧率上限完全交给呈现侧（垂直同步/缓冲回收）。
+    // 用本帧实测的「呈现阻塞时长」决定要不要让出时间：
+    //   · 阻塞 > 2ms：呈现自己就在限速，连轴转（0ms），不额外加延迟；
+    //   · 阻塞 ≤ 2ms：说明呈现不阻塞，继续连轴转只会空转烧 CPU，让出 1ms。
+    // RHINE_TICK_MS 仍可作为排障时人为压帧的覆盖值（>0 时生效）。
+    const qint64 frameNs = clock.nsecsElapsed() - enterNs;
+    const qint64 blockedNs = frameNs - stepNs;
+    const int fixedMs = frameIntervalMs();
+    timer.setInterval(fixedMs > 0 ? fixedMs : (blockedNs > 2000000 ? 0 : 1));
     if (now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
         !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot") {
         timer.stop();
@@ -392,14 +438,15 @@ void Engine::setWindow(QWindow *window) {
 }
 int Engine::frameIntervalMs() const
 {
-    // 刻意**不**从屏幕刷新率推导：渲染侧允许跑得比显示器快（超采、性能测试、
-    // 以及帧生成要拿到的真实帧都靠这条），把自己锁在刷新率上等于先给自己设上限。
-    // 默认沿用原来的 16ms 节奏；RHINE_TICK_MS 只是排障用的旋钮。
+    // 返回 >0 表示「人为覆盖帧间隔」；返回 -1 表示交给 tick() 里的动态自适应。
+    // 刻意不设固定周期：任何常数都会把帧周期变成「工作量 + 常数」，机器再快也上不去。
+    // 也不从屏幕刷新率推导：上限应该由呈现侧决定，而不是先给自己设一道墙。
+    // RHINE_TICK_MS 仅保留为排障旋钮：想人为压低帧率时设 4..100。
     static const int overrideMs = qEnvironmentVariableIntValue("RHINE_TICK_MS");
     if (overrideMs >= 4 && overrideMs <= 100) {
         return overrideMs;
     }
-    return 16;
+    return -1;
 }
 void Engine::toggleFullscreen() {
     if (!m_window) {

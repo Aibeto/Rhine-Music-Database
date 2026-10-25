@@ -167,6 +167,10 @@ class Engine : public QObject {
     // 鼠标滚轮一格的距离，按帧衰减送入，触控板不经过这里。
     double m_wheelRemainingDistance = 0;
     qint64 m_lastTick = 0, m_lastInput = 0;
+    // 节拍诊断（RHINE_PACE_DIAG=1）：tick 间隔与 step 耗时的累计量。
+    qint64 m_paceEnterNs = 0, m_paceGapSum = 0, m_paceGapMax = 0;
+    qint64 m_paceStepSum = 0, m_paceStepMax = 0;
+    int m_paceTicks = 0;
     double m_animationTime = 0;
     double m_discAngle = 0;
     double m_discTime = 0;

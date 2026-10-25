@@ -200,4 +200,9 @@ private:
     /// 排障计数：acquire 超时 / OutOfDate 的次数（空转时靠它们判断卡在哪条提前返回）。
     quint64 m_acquireTimeoutCount = 0;
     quint64 m_outOfDateCount = 0;
+    /// 连续强制重建的次数（有一帧成功上屏就清零）。用来区分"重建能救活"和
+    /// "这台设备就是不能呈现"：后者重建多少次都没用，要尽快判定失败让上层回退。
+    int m_recreateStreak = 0;
+    /// 判定呈现层无法工作。自检循环据此提前结束，不再白等超时。
+    bool m_failed = false;
 };

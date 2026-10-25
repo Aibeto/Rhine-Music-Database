@@ -256,6 +256,20 @@ bool createSwapchain(VulkanPresenter::Private *d)
     if (capabilities.maxImageCount > 0 && imageCount > capabilities.maxImageCount)
         imageCount = capabilities.maxImageCount;
 
+    // 排障：OutOfDate 的成因几乎都在这些字段里（extent 与 surface 实际尺寸不符、
+    // transform 不匹配、compositeAlpha/usage 选到了不支持的值）。只在显式开诊断时打，
+    // 因为重建不频繁但也不希望正常运行时刷屏。
+    if (qEnvironmentVariableIsSet("RHINE_FG_DIAG")) {
+        qWarning().noquote()
+            << "FG present: 交换链" << extent.width << "x" << extent.height
+            << "· surface currentExtent" << capabilities.currentExtent.width << "x"
+            << capabilities.currentExtent.height << "· min/max 图像"
+            << capabilities.minImageCount << capabilities.maxImageCount << "选用" << imageCount
+            << "· transform" << int(capabilities.currentTransform) << "· compositeAlpha"
+            << QString::number(capabilities.supportedCompositeAlpha, 16)
+            << "· usage" << QString::number(capabilities.supportedUsageFlags, 16);
+    }
+
     VkSwapchainCreateInfoKHR info{};
     info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
     info.surface = d->surface;
@@ -586,7 +600,7 @@ void VulkanPresenter::release()
     d->rhi = nullptr;
 }
 
-bool VulkanPresenter::resize(QSize extent)
+bool VulkanPresenter::resize(QSize extent, bool force)
 {
     d->error.clear();
     if (!d->ready)
@@ -599,7 +613,8 @@ bool VulkanPresenter::resize(QSize extent)
         d->error = QStringLiteral("FG present: 无效的新尺寸");
         return false;
     }
-    if (extent == d->extent && d->swapchain != VK_NULL_HANDLE && d->usable)
+    // force 时无条件重建：OutOfDate 的交换链即使尺寸没变也已经不可用。
+    if (!force && extent == d->extent && d->swapchain != VK_NULL_HANDLE && d->usable)
         return true;
 
     flushDeferredPresent();
@@ -909,6 +924,25 @@ VkFormat VulkanPresenter::colorFormat() const
 quint32 VulkanPresenter::imageCount() const
 {
     return quint32(d->images.size());
+}
+
+QString VulkanPresenter::presentModeName() const
+{
+    // 这个字符串会直接显示在性能面板上，所以用 Vulkan 的正式名字，方便和
+    // 外部工具（vulkaninfo / vkcube --present_mode）的输出对齐。
+    switch (d->presentMode)
+    {
+    case VK_PRESENT_MODE_MAILBOX_KHR:
+        return QStringLiteral("MAILBOX");
+    case VK_PRESENT_MODE_IMMEDIATE_KHR:
+        return QStringLiteral("IMMEDIATE");
+    case VK_PRESENT_MODE_FIFO_RELAXED_KHR:
+        return QStringLiteral("FIFO_RELAXED");
+    case VK_PRESENT_MODE_FIFO_KHR:
+        return QStringLiteral("FIFO");
+    default:
+        return QStringLiteral("UNKNOWN");
+    }
 }
 
 VkImage VulkanPresenter::imageAt(quint32 index) const
