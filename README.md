@@ -144,16 +144,16 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 
 | Platform | Vulkan | Direct3D 12 | OpenGL | Metal |
 | -------- | ------ | ----------- | ------ | ----- |
-| Windows  | - [x]  | - [x]       | - [ ]  | - [ ] |
-| macOS    | - [ ]  | - [ ]       | - [ ]  | - [x] |
-| Linux    | - [x]  | - [ ]       | - [x]  | - [ ] |
+| Windows  | ✅     | ✅          | -      | -     |
+| macOS    | -      | -           | -      | ✅    |
+| Linux    | ✅     | -           | ✅     | -     |
 
-| API         | FXAA  | SSAA   | MSAA   | TAA   | FSR Upscaling              | FSR Frame Generation |
-| ----------- | ----- | ------ | ------ | ----- | -------------------------- | -------------------- |
-| Vulkan      | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [x]                |
-| Direct3D 12 | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS / TU (default) | - [ ]                |
-| OpenGL      | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [ ]                |
-| Metal       | - [x] | 2x MAX | 8x MAX | - [x] | EASU + RCAS                | - [ ]                |
+| API         | FXAA | SSAA   | MSAA   | TAA | FSR Upscaling              | FSR Frame Generation |
+| ----------- | ---- | ------ | ------ | --- | -------------------------- | -------------------- |
+| Vulkan      | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS                | ✅                   |
+| Direct3D 12 | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS / TU (default) | -                    |
+| OpenGL      | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS                | -                    |
+| Metal       | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS                | -                    |
 
 插帧（FSR Frame Generation）在 Vulkan 上是**常驻能力、即时开关**：只要设备支持，启动时应用就自建
 交换链接管窗口（呈现层常驻），设置页里的帧生成开关**点一下就生效、不需要重启**——它只决定每次呈现
