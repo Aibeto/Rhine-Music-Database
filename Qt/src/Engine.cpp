@@ -390,8 +390,12 @@ void Engine::tick() {
     const qint64 blockedNs = frameNs - stepNs;
     const int fixedMs = frameIntervalMs();
     timer.setInterval(fixedMs > 0 ? fixedMs : (blockedNs > 2000000 ? 0 : 1));
-    if (now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
-        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot") {
+    // 排障专用：RHINE_DIAG_ANIMATE=1 时永不休眠。静止场景下引擎会主动休眠、
+    // presented 不再增长，那时测出来的"帧率"是没有负载的数字，A/B 对比没有意义。
+    static const bool forceAnimate = qEnvironmentVariableIsSet("RHINE_DIAG_ANIMATE");
+    if (!forceAnimate && now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping
+        && !scene.changed() && !app->hud.animating(m_animationTime) && !m_discRotating
+        && m_frame["mode"] != "boot") {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();

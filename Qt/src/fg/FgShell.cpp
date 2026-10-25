@@ -411,6 +411,16 @@ bool FgShell::recreateSwapchain()
         return false;
     }
     m_needRecreate = false;
+    // 重建后必须把"跨尺寸的旧状态"全部作废，否则第一帧就是垃圾：
+    //   · m_pendingRealFrame：排队的那帧是按**旧尺寸**插出来的，贴到新交换链上
+    //     就是满屏错色（实测每次 resize 后第一帧亮度从 71 跳到 131/136 再回落，
+    //     用户看到的就是"改窗口大小闪一下"）；
+    //   · 插值历史：上一对帧属于旧尺寸，跨尺寸插值没有意义，先复位成纯真实帧。
+    m_pendingRealFrame = false;
+    m_forcePresent = true;
+    m_framesSinceRecreate = 0;
+    if (m_fg)
+        m_fg->requestReset();
     releaseSwapchainResources();
     return ensureSwapchainResources();
 }
@@ -608,6 +618,18 @@ bool FgShell::composite(QRhiCommandBuffer *cb, QRhiTexture *base, QRhiTexture *o
     // UNDEFINED → COLOR_ATTACHMENT 的转换，不必跟踪 present 之后的真实布局。
     target->setNativeLayout(int(VK_IMAGE_LAYOUT_UNDEFINED));
 
+    // 排障：合成源与交换链尺寸不一致时，画面会被拉伸或错位——改窗口大小"闪一下"
+    // 如果还有残留，这一行会直接指出来。只在尺寸变化时打，避免刷屏。
+    if (qEnvironmentVariableIsSet("RHINE_FG_DIAG")) {
+        static QSize reported;
+        const QSize source = base ? base->pixelSize() : QSize();
+        if (source != target->pixelSize() && source != reported) {
+            reported = source;
+            qWarning().noquote() << "FG 合成: 尺寸不一致 源" << source << "目标"
+                                 << target->pixelSize();
+        }
+    }
+
     QRhiShaderResourceBindings *srb = bindingsFor(base, overlay);
     if (!srb)
         return false;
@@ -730,6 +752,8 @@ bool FgShell::presentOne(const VulkanPresenter::Frame &frame, bool allowInterpol
         // 真的上屏了，说明重建是有效的：清掉"连续重建次数"，别让偶发的
         // 一两次 OutOfDate 累积成误判。
         m_recreateStreak = 0;
+        if (m_framesSinceRecreate < 1000)
+            ++m_framesSinceRecreate;
     }
     return presented;
 }
@@ -859,7 +883,10 @@ void FgShell::step()
     m_renderedFrames++;  // 场景真的重渲了一帧（FG 的输入新鲜度就看它）
 
     bool interpolated = false;
-    if (!presentOne(frame, !idle && interpolationWanted, &interpolated)) {
+    // 重建后的前两帧只呈现真实帧：那时 QML 可能还在按旧尺寸排版、交换链也是全新的，
+    // 跨尺寸插出来的帧就是满屏错色（改窗口大小时"闪一下"的来源）。
+    const bool interpolationAllowed = !idle && interpolationWanted && m_framesSinceRecreate >= 2;
+    if (!presentOne(frame, interpolationAllowed, &interpolated)) {
         qWarning().noquote() << "FG: present 失败" << m_presenter->lastError();
         m_needRecreate = true;
         scheduleNext();
@@ -894,6 +921,10 @@ void FgShell::reportStats()
                          // 它就是"为什么每帧都掉到 20ms 档"的直接证据，必须一起打出来）
                          << "取图" << QString::number(m_stats.acquireMs, 'f', 2)
                          << "场景" << QString::number(m_stats.sceneMs, 'f', 2)
+                         // 光流+深度重建（prepare）与插值本身（dispatch）必须分开看：
+                         // 两者的优化手段完全不同，混在一起就不知道该调哪个。
+                         << "光流" << QString::number(m_stats.prepareMs, 'f', 2)
+                         << "插值" << QString::number(m_stats.dispatchMs, 'f', 2)
                          << "合成" << QString::number(m_stats.compositeMs, 'f', 2)
                          << "上屏" << QString::number(m_stats.presentMs, 'f', 2)
                          << "起始" << QString::number(m_stats.beginMs, 'f', 2)

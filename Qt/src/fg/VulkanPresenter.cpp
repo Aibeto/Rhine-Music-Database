@@ -253,6 +253,17 @@ bool createSwapchain(VulkanPresenter::Private *d)
     }
 
     quint32 imageCount = capabilities.minImageCount + 1;
+    // 非 FIFO（MAILBOX/IMMEDIATE）时多要几张图，让渲染能跑到合成器前面。
+    // 实测（1262x1370、插帧关、强制动画）：3 张 318fps vs 6 张 335fps，只差约 5%—— 所以
+    // 交换链图像数从来不是"帧率上不去"的主因，主因是 FIFO 呈现模式本身（vkcube 实测
+    // FIFO 47fps vs MAILBOX 125fps）以及场景静止时引擎主动休眠。多要几张只是顺带。
+    // RHINE_FG_SWAP_IMAGES 可以覆盖（A/B 用：设 3 就退回旧行为）。
+    if (d->presentMode != VK_PRESENT_MODE_FIFO_KHR) {
+        static const int overrideImages = qEnvironmentVariableIntValue("RHINE_FG_SWAP_IMAGES");
+        const quint32 wanted = overrideImages > 0 ? quint32(overrideImages) : 6u;
+        if (imageCount < wanted)
+            imageCount = wanted;
+    }
     if (capabilities.maxImageCount > 0 && imageCount > capabilities.maxImageCount)
         imageCount = capabilities.maxImageCount;
 
