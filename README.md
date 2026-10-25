@@ -69,7 +69,7 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 
 - [x] 歌曲、专辑、歌单、歌手搜索与分页
 - [x] 歌手热门歌曲与发行专辑
-- [x] 扫码、手机密码、邮箱密码登录
+- [x] 扫码、手机短信验证码登录
 - [x] 喜欢歌曲与收藏歌单、专辑、歌手
 - [x] 创建、重命名、删除自己的歌单
 - [x] 歌曲加入或移出歌单
@@ -253,6 +253,12 @@ RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineM
 `npm test` 使用本地响应验证场景、拾取、音乐状态、账号隔离、锁定上游、打包通信和部署资源。设置 `RHINE_GPU_TEST=1` 可额外执行真实 GPU 离线渲染检查；Windows 设置 `RHINE_SOFTWARE_GPU=1` 可使用软件 GPU。离线测试不替代真实账号、在线音源、显示缩放与系统集成的实机检查。
 
 Qt RHI 使用私有头文件，升级 Qt 后需重新编译并验证。
+
+## iOS / iPadOS 构建
+
+需要 macOS、完整 Xcode、Qt 6.12.0 的 `ios_device` kit，以及已安装的桌面构建依赖。
+执行 `npm run build:ios`，生成 `output/RhineMusicDatabase-ios-unsigned.ipa`；该文件需自行签名后安装。
+`RHINE_IOS_QT` 可以指定其他同版本 kit 路径。构建自动校验 NodeMobile 下载哈希，并检查包内架构、资源和动态依赖。
 
 ## 本机数据与隐私
 

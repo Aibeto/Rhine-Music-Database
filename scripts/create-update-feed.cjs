@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { buildVersion } = require('./release-version.cjs');
+const { buildVersion, distributionPlatforms } = require('./release-version.cjs');
 
 /** 从实际分发文件生成静态更新清单，客户端无需占用匿名 GitHub REST API 额度。 */
 function createUpdateFeed(directory, version, repository = 'MikeQu223/Rhine-Music-Database') {
@@ -10,8 +10,7 @@ function createUpdateFeed(directory, version, repository = 'MikeQu223/Rhine-Musi
         throw new Error('Invalid release repository');
     }
     const base = `https://github.com/${repository}/releases`;
-    const platforms = ['macOS-arm64.zip', 'Windows-x64-Setup.exe', 'Linux-x86_64.AppImage'];
-    const assets = platforms.map((platform) => {
+    const assets = distributionPlatforms.map((platform) => {
         const name = `RhineMusicDatabase-${tag}-${platform}`;
         const file = fs.readFileSync(path.join(directory, name));
         if (!file.length || file.length > 2 * 1024 * 1024 * 1024) {

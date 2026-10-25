@@ -97,6 +97,9 @@ function prepareResources() {
     }
     for (const file of [
         'worker.cjs',
+        'ios-runtime.cjs',
+        'ios-web-apis.cjs',
+        'ios-system-trust.cjs',
         'qq.cjs',
         'kugou.cjs',
         'lyrics-format.cjs',
@@ -871,7 +874,9 @@ function deployApp(qt, config, existingBundle = '') {
     return app;
 }
 prepareResources();
-if (process.argv[2] === '--cmake-package') {
+if (process.argv[2] === '--resources-only') {
+    console.log('Resources prepared');
+} else if (process.argv[2] === '--cmake-package') {
     // Qt Creator 的链接产物原地打包，不再次启动 CMake 或覆盖其他构建目录。
     const [, , , bundle, qt, config] = process.argv;
     if (!mac || !bundle || !qt || !config) {

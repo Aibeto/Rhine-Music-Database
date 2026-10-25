@@ -115,11 +115,10 @@ void NativeHud::setQuery(QString value) {
 }
 
 void NativeHud::form(QJsonObject fields) {
-    if (modal == "login" && QStringList{"phone", "email"}.contains(m_music->loginMethod) &&
-        fields["account"].isString() && fields["password"].isString() &&
-        fields["account"].toString().size() <= 100 && fields["password"].toString().size() <= 256) {
-        m_music->passwordLogin(m_music->loginMethod, fields["account"].toString(),
-                               fields["password"].toString());
+    if (modal == "login" && m_music->loginMethod == "phone" && fields["account"].isString() &&
+        fields["captcha"].isString() && fields["account"].toString().size() <= 100 &&
+        fields["captcha"].toString().size() <= 8) {
+        m_music->captchaLogin(fields["account"].toString(), fields["captcha"].toString());
     }
     if (modal == "playlist-form" && fields["name"].isString()) {
         const QPointer<NativeHud> owner(this);
@@ -274,8 +273,18 @@ void NativeHud::playerAction(const QStringList &parts) {
         lyricsMode = false;
     } else if (name == "lyrics-follow") {
         m_lyricsBrowse.reset();
+    } else if (name == "lyrics-offset") {
+        if (modal == "lyrics-offset" && !closing) {
+            closeModal();
+        } else {
+            openModal("lyrics-offset");
+        }
     } else if (name == "lyrics-earlier" || name == "lyrics-later") {
         player.lyrics.adjustOffset(name == "lyrics-earlier" ? 200 : -200);
+    } else if (name == "lyrics-reset") {
+        player.lyrics.resetOffset();
+    } else if (name == "lyrics-apply-global") {
+        player.lyrics.applyGlobalOffset();
     } else if (name == "lyrics-sources" && music.isLocal() && player.current.value("provider") == "local") {
         if (modal == "lyrics-source" && !closing) {
             closeModal();
@@ -330,6 +339,12 @@ void NativeHud::playerAction(const QStringList &parts) {
 
 /** 动作字符串保持原有输入协议，控制器直接更新原生音乐状态和场景。 */
 void NativeHud::action(QString value) {
+    if ((!PlatformFeatures::LocalMusic && (value.startsWith("local:") || value == "provider:local")) ||
+        (!PlatformFeatures::OfficialPlayback &&
+         (value == "music:official" || value == "player:official" || value == "music:activate")) ||
+        (!PlatformFeatures::ApplicationVolume && value.startsWith("player:volume"))) {
+        return;
+    }
     if (modal == "settings" && !closing &&
         (value == "settings:scroll-up" || value == "settings:scroll-down")) {
         const auto movement = value == "settings:scroll-down" ? 120. : -120.;
@@ -353,6 +368,13 @@ void NativeHud::action(QString value) {
     }
     auto &music = *m_music;
     const auto parts = value.split(':');
+    if (value == "detail:copy") {
+        if (music.current.value("kind") == "song" && (tab == "overview" || tab == "notes")) {
+            // 复制详情
+            m_host->copy(body());
+        }
+        return;
+    }
     if (value == "archive:tab-mode") {
         if (modal.isEmpty() && supportsTrackList()) {
             trackListMode = !trackListMode;

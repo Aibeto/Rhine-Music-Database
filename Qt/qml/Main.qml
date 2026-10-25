@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Window
-import QtQuick.Dialogs
 import Rhine.Native 1.0
 
 // 组合根：Window 只负责窗口本身与"必须挂在窗口上"的对象，画面内容拆成两层——
@@ -9,39 +8,21 @@ import Rhine.Native 1.0
 // FG 路径下由 FgHost 用两个 QQuickRenderControl 分别载入这两个文件（见 Qt/src/fg/FgHost.h）。
 Window {
     id: root
+    readonly property bool ios: Qt.platform.os === "ios"
     width: 1280
     height: 720
-    minimumWidth: 960
-    minimumHeight: 540
+    minimumWidth: ios ? 0 : 960
+    minimumHeight: ios ? 0 : 540
     visible: true
     property bool windowsFrameless: Qt.platform.os === "windows"
     flags: (windowsFrameless ? Qt.FramelessWindowHint : 0) | Qt.Window | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowMinMaxButtonsHint | Qt.WindowCloseButtonHint | Qt.WindowFullscreenButtonHint
     title: "RHINE MUSIC DATABASE"
     color: "#e7e7e1"
-    // 原生平台对话框不参与场景渲染，必须留在 Window 侧：QQuickRenderControl 没有
-    // 原生窗口，放进 Overlay 会在 FG 路径下变成不可见（方案文档 §3.1）。
-    FolderDialog {
-        id: localFolderDialog
-        objectName: "localMusicFolderDialog"
-        title: "导入本地音乐文件夹"
-        onAccepted: rhine.importLocal([selectedFolder])
-    }
-    FileDialog {
-        id: localFileDialog
-        objectName: "localMusicFileDialog"
-        title: "导入本地音乐文件"
-        fileMode: FileDialog.OpenFiles
-        nameFilters: ["音乐文件 (*.mp3 *.flac *.m4a *.mp4 *.aac *.ogg *.opus *.ape *.wav *.aiff *.aif *.wv *.wma *.mpc)"]
-        onAccepted: rhine.importLocal(selectedFiles)
-    }
-    Connections {
-        target: rhine
-        function onLocalImportRequested(folder: bool) {
-            if (folder) {
-                localFolderDialog.open();
-            } else {
-                localFileDialog.open();
-            }
+    // 原生对话框挂在真实窗口；iOS 使用独立的导入入口。
+    Loader {
+        active: !root.ios
+        sourceComponent: LocalMusicDialogs {
+            backend: rhine
         }
     }
     // 舞台换算留在 Window 上：Overlay 注入后与原值完全相同，但公开属性不变，
@@ -74,13 +55,5 @@ Window {
         stageWidth: root.stageWidth
         hostWindow: root
         frameless: root.windowsFrameless
-    }
-    // 凭证清理原本直接写 Overlay 内部的 accountField/passwordField；
-    // 拆层后这两个 id 在组件内，改由 Overlay.clearCredentials() 完成，行为不变。
-    Connections {
-        target: rhine
-        function onClearCredentials() {
-            overlay.clearCredentials();
-        }
     }
 }

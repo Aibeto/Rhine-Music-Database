@@ -11,11 +11,18 @@ struct Provider {
     QString label;
     QString detail;
 };
-const QVector<Provider> providers{
-    {"netease", "网易云音乐", "NETEASE", "搜索 · 个人音乐 · 推荐 · 播放 · 歌单编辑"},
-    {"qq", "QQ 音乐", "QQ MUSIC", "全类搜索 · 每日推荐 · 个人音乐 · 歌单编辑"},
-    {"kugou", "酷狗音乐", "KUGOU", "标准版 / 概念版 · 个人歌单 · 推荐与榜单 · 播放"},
-    {"local", "本地音乐", "LOCAL", "文件夹管理 · 导入与索引 · 本地检索 · 播放"}};
+const QVector<Provider> providers = [] {
+    QVector<Provider> values{
+        {"netease", "网易云音乐", "NETEASE", "搜索 · 个人音乐 · 推荐 · 播放 · 歌单编辑"},
+        {"qq", "QQ 音乐", "QQ MUSIC", "全类搜索 · 每日推荐 · 个人音乐 · 歌单编辑"},
+        {"kugou", "酷狗音乐", "KUGOU", "标准版 / 概念版 · 个人歌单 · 推荐与榜单 · 播放"},
+        {"local", "本地音乐", "LOCAL", "文件夹管理 · 导入与索引 · 本地检索 · 播放"},
+    };
+    if (!PlatformFeatures::LocalMusic) {
+        values.removeLast();
+    }
+    return values;
+}();
 
 QString modalTitle(const QString &modal, const MusicLibrary &music) {
     static const QHash<QString, QString> titles{{"provider", "MUSIC PLATFORM"},
@@ -74,6 +81,43 @@ void NativeHud::modalDraw(double width) {
     auto &music = *m_music;
     save();
     alpha(motion.opacity);
+    if (modal == "lyrics-offset") {
+        const auto bounds = modalBounds(width);
+        const auto x = bounds.x() + 16;
+        const auto y = bounds.y();
+        const auto &lyrics = music.player.lyrics;
+        translate(0, motion.offset);
+        fill(bounds.x(), y, bounds.width(), bounds.height(),
+             dark ? QJsonArray{0.15, 0.15, 0.15, 1, "calibratedWhite"} : QJsonArray{0.929, 0.922, 0.894, 1});
+        hits = {};
+        m_modalControls = true;
+        text("歌词偏移", x, y + 18, 17, "demibold");
+        button("关闭", x + 232, y + 8, 56, 36, "close-modal", 13);
+        QString offsetLabel = "未校准";
+        if (lyrics.offsetMs != 0) {
+            const auto direction = lyrics.offsetMs > 0 ? "已提前 " : "已延后 ";
+            offsetLabel =
+                QString(direction) + QString::number(std::abs(lyrics.offsetMs) / 1000, 'f', 1) + "s";
+        }
+        text(offsetLabel, x, y + 58, 15);
+        button("歌词提前 0.2s", x, y + 92, 138, 40, "player:lyrics-earlier", 13);
+        button("歌词延后 0.2s", x + 150, y + 92, 138, 40, "player:lyrics-later", 13);
+        auto muted = ink();
+        muted[3] = 0.45;
+        if (lyrics.offsetMs != 0) {
+            button("重置", x, y + 152, 138, 40, "player:lyrics-reset", 13);
+        } else {
+            text("重置", x, y + 161, 13, "regular", 0, muted);
+        }
+        if (lyrics.offsetMs != lyrics.globalOffsetMs()) {
+            button("全局应用", x + 150, y + 152, 138, 40, "player:lyrics-apply-global", 13);
+        } else {
+            text("全局应用", x + 150, y + 161, 13, "regular", 0, muted);
+        }
+        m_modalControls = false;
+        restore();
+        return;
+    }
     if (modal == "lyrics-source") {
         const auto bounds = modalBounds(width);
         translate(0, motion.offset);
@@ -417,9 +461,12 @@ void NativeHud::settings(double x, double y, double width) {
     }
     if (music.isLocal()) {
         rows.removeLast();
-    } else {
+    } else if (PlatformFeatures::OfficialPlayback) {
         rows.append({"OFFICIAL PLAYER / 官方窗口", m_host->activates() ? "播放时显示" : "尽量保持后台",
                      "music:activate"});
+    }
+    if (!PlatformFeatures::DesktopWindowControls) {
+        rows.removeFirst();
     }
     rows.append({"ENTER AUTOPLAY / 进入详情自动播放",
                  m_host->preference("detail-autoplay") == "on" ? "开启" : "关闭", "detail-autoplay"});

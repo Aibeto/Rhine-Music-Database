@@ -241,7 +241,7 @@ void NativeHud::loginPanel(double x, double y, double width) {
     if (music.provider == "qq") {
         methods = {"qr", "wechat"};
     } else if (music.provider == "netease") {
-        methods = {"qr", "phone", "email"};
+        methods = {"qr", "phone"};
     }
     if (music.provider == "kugou") {
         const QStringList editions{"standard", "lite"};
@@ -256,8 +256,7 @@ void NativeHud::loginPanel(double x, double y, double width) {
     const QHash<QString, QString> labels{
         {"qr", music.provider == "qq" ? "手机 QQ 扫码" : music.providerName() + "扫码"},
         {"wechat", "微信扫码"},
-        {"phone", "手机登录"},
-        {"email", "邮箱登录"}};
+        {"phone", "短信验证码"}};
     for (int index = 0; index < methods.size(); ++index) {
         const auto method = methods.at(index);
         button(labels.value(method), x + 53 + index * 145, y + 207, 140, 35, "music:login-method:" + method,
@@ -282,8 +281,8 @@ void NativeHud::loginPanel(double x, double y, double width) {
             text(label, x + 53, y + 636, 15);
         }
     } else {
-        text(music.loginMethod == "phone" ? "手机号码（中国大陆）" : "邮箱地址", x + 53, y + 278, 14);
-        text("密码", x + 53, y + 391, 14);
+        text("手机号码（中国大陆）", x + 53, y + 278, 14);
+        text("短信验证码", x + 53, y + 391, 14);
         text("按 ENTER 登录", x + 53, y + 532, 12);
     }
     limited(music.loginStatus, x + 53, y + 600, 15, width - 106);

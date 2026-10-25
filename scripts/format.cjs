@@ -42,7 +42,7 @@ const files = [...new Set(paths)].filter((file) => {
     return (
         configuration.has(file) ||
         (sourceRoots.some((folder) => file.startsWith(folder)) &&
-            (/\.(?:js|cjs|mjs|ts|cpp|h|mm|qml|py|sh|glsl|vert|frag|yml|yaml|iss)$/.test(file) ||
+            (/\.(?:js|cjs|mjs|ts|cpp|h|mm|qml|py|sh|glsl|vert|frag|yml|yaml|iss|cmake)$/.test(file) ||
                 path.basename(file) === 'CMakeLists.txt'))
     );
 });
@@ -110,7 +110,7 @@ async function main() {
             formatted = run(python, ['-m', 'black', '--quiet', '--config', 'pyproject.toml', '-'], {
                 input: source,
             });
-        } else if (path.basename(file) === 'CMakeLists.txt') {
+        } else if (path.basename(file) === 'CMakeLists.txt' || file.endsWith('.cmake')) {
             formatted = run(
                 python,
                 ['-m', 'cmakelang.format', '--config-files', '.cmake-format.json', '--', '-'],

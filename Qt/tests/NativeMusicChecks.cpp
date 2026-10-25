@@ -85,9 +85,12 @@ bool runNativeMusicChecks(const QString &root) {
         return false;
     }
     host.mediaControl("volume", 0);
+    int smsRequests = 0;
+    int captchaLogins = 0;
+    bool loginParametersValid = true;
     // 只保留核心业务所需的最小离线响应，不模拟未覆盖的边缘路由。
     host.fixture = [&](QString route, QJsonObject parameters) {
-        const auto args = parameters["args"].toArray();
+        const auto args = parameters.value("args").toArray();
         QJsonValue value;
         if (route.endsWith("/search")) {
             value = QJsonObject{{"items", QJsonArray{song("1", args.at(0).toString())}},
@@ -105,8 +108,8 @@ bool runNativeMusicChecks(const QString &root) {
             }
             value = songs;
         } else if (route.endsWith("/playback") || route.endsWith("/preview")) {
-            value = QJsonObject{
-                {"url", audioURL}, {"level", "exhigh"}, {"preview", route.endsWith("/preview")}};
+            value =
+                QJsonObject{{"url", audioURL}, {"level", "exhigh"}, {"preview", route.endsWith("/preview")}};
         } else if (route.endsWith("/account")) {
             value = QJsonArray{"42", "本地账号"};
         } else if (route.endsWith("/likedIDs")) {
@@ -115,7 +118,15 @@ bool runNativeMusicChecks(const QString &root) {
             auto owned = MusicData::item("playlist", "8", "本人歌单");
             owned["creatorID"] = "42";
             value = QJsonObject{{"items", QJsonArray{owned}}, {"rawCount", 1}, {"more", false}};
+        } else if (route == "/captcha/sent") {
+            ++smsRequests;
+            loginParametersValid &= parameters == QJsonObject{{"phone", "13800000000"}, {"ctcode", "86"}};
+            return QJsonObject{{"body", QJsonObject{{"code", 200}, {"data", true}}}};
         } else if (route == "/login/cellphone") {
+            ++captchaLogins;
+            loginParametersValid &=
+                parameters ==
+                QJsonObject{{"phone", "13800000000"}, {"captcha", "123456"}, {"countrycode", "86"}};
             return QJsonObject{{"body", QJsonObject{{"code", 200}}},
                                {"cookies", QJsonArray{"MUSIC_U=fixture-native"}}};
         } else if (route == "/personalized") {
@@ -140,8 +151,7 @@ bool runNativeMusicChecks(const QString &root) {
 
     // === 测试 1: 基础选择 ===
     library.choose({});
-    check(library.current.isEmpty() && !library.detailLoading,
-          "empty selection does not load metadata");
+    check(library.current.isEmpty() && !library.detailLoading, "empty selection does not load metadata");
 
     auto testSong = song("1");
     library.choose(testSong);
@@ -194,8 +204,24 @@ bool runNativeMusicChecks(const QString &root) {
     library.player.stop();
 
     // === 测试 6: 账号登录/登出 ===
-    library.passwordLogin("phone", "13800000000", "test-password");
+    library.sendLoginCode("invalid-phone");
+    check(smsRequests == 0, "invalid phone does not send SMS");
+    library.sendLoginCode("13800000000");
+    check(waitFor([&] { return !library.accountLoading; }), "SMS send completes");
+    check(smsRequests == 1 && library.smsRetrySeconds() > 0, "SMS send starts resend cooldown");
+    library.sendLoginCode("13800000000");
+    check(smsRequests == 1, "SMS cooldown prevents duplicate sends");
+    library.captchaLogin("13800000000", "invalid-code");
+    check(captchaLogins == 0, "invalid captcha does not attempt login");
+    library.captchaLogin("13800000000", "123456");
+    library.cancelLogin();
+    library.loginStatus = "cancelled-login";
+    check(waitFor([&] { return captchaLogins == 1; }), "cancelled captcha request returns");
+    check(library.uid.isEmpty() && library.loginStatus == "cancelled-login" && !host.authenticated(),
+          "cancelled captcha response cannot log in or accept cookies");
+    library.captchaLogin("13800000000", "123456");
     check(waitFor([&] { return !library.accountLoading; }), "login completes");
+    check(captchaLogins == 2 && loginParametersValid, "SMS login uses upstream parameters without password");
     check(library.uid == "42", "login sets uid");
 
     // === 测试 7: 喜欢功能 ===
@@ -207,8 +233,7 @@ bool runNativeMusicChecks(const QString &root) {
 
     library.logout();
     check(library.uid.isEmpty(), "logout clears uid");
-    check(library.lists[1].isEmpty() && library.lists[2].isEmpty(),
-          "logout clears private collections");
+    check(library.lists[1].isEmpty() && library.lists[2].isEmpty(), "logout clears private collections");
 
     // === 测试 8: 平台切换 ===
     const QString initialProvider = library.provider;
@@ -250,8 +275,7 @@ bool runNativeMusicChecks(const QString &root) {
 
     // === 测试 12: 音乐数据规范化 ===
     auto normalizedSong = MusicData::item("song", "test-id", "测试标题", "测试歌手");
-    check(normalizedSong.contains("id") && normalizedSong.contains("title"),
-          "music data structure");
+    check(normalizedSong.contains("id") && normalizedSong.contains("title"), "music data structure");
 
     library.player.stop();
     ok &= runNativeSessionChecks(root, audioURL);

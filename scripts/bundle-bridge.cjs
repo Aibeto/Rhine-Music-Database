@@ -6,7 +6,7 @@ const esbuild = require('esbuild');
 const root = path.resolve(__dirname, '..');
 process.chdir(root);
 const source = path.resolve(process.argv[2] || 'output/resources/MusicBridge');
-const output = path.resolve('output/bridge-build');
+const output = path.resolve(process.argv[3] || 'output/bridge-build');
 const bridgeOutput = path.join(output, 'MusicBridge');
 const neteasePackage = path.join(source, 'node_modules/@neteasecloudmusicapienhanced/api');
 const kugouPackage = path.join(source, 'node_modules/kugoumusicapi');
@@ -179,11 +179,14 @@ async function main() {
         bundle: true,
         platform: 'node',
         format: 'cjs',
-        target: 'node22',
+        target: process.env.RHINE_IOS_BUILD === '1' ? 'node18' : 'node22',
         logLevel: 'warning',
         // jsdom 的同步 XHR worker 由下面的第二个产物提供，路径在发布包内仍然有效。
         logOverride: { 'require-resolve-not-external': 'silent' },
-        plugins: [requestResetPlugin],
+        plugins: [
+            requestResetPlugin,
+            ...(process.env.RHINE_IOS_BUILD === '1' ? [require('./ios-bridge-plugin.cjs')] : []),
+        ],
     });
     failOnDynamicRequires(result);
     // jsdom 的同步 XHR 会 require.resolve 一个独立 worker 文件；
@@ -195,7 +198,7 @@ async function main() {
         bundle: true,
         platform: 'node',
         format: 'cjs',
-        target: 'node22',
+        target: process.env.RHINE_IOS_BUILD === '1' ? 'node18' : 'node22',
         logLevel: 'warning',
         logOverride: { 'require-resolve-not-external': 'silent' },
     });

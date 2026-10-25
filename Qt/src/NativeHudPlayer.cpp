@@ -80,13 +80,17 @@ void NativeHud::playerBar(double, double y, double width) {
     hit(lyricsX - 27, cy - 23, 54, 46, "player:lyrics", "当前歌曲歌词");
     centeredText(clock(player.state["position"].toDouble()) + " / " + clock(duration), center, y + 84, 13,
                  "regular", true);
-    const auto vx = width - 239;
-    playerVolumeRect = QRectF(vx, cy - 24, 86, 48);
-    centeredText("音量", vx - 54, cy, 15);
-    for (int index = 0; index < 10; ++index) {
-        const double height = 6 + index;
-        fill(vx + index * 9, cy - height / 2, 4, height,
-             index / 10.0 < player.state["volume"].toDouble() ? ink() : shade);
+    if (PlatformFeatures::ApplicationVolume) {
+        const auto vx = width - 239;
+        playerVolumeRect = QRectF(vx, cy - 24, 86, 48);
+        centeredText("音量", vx - 54, cy, 15);
+        for (int index = 0; index < 10; ++index) {
+            const double height = 6 + index;
+            fill(vx + index * 9, cy - height / 2, 4, height,
+                 index / 10.0 < player.state["volume"].toDouble() ? ink() : shade);
+        }
+    } else {
+        playerVolumeRect = {};
     }
     hit(width - 103, cy - 24, 70, 48, "player:open", "播放队列");
     centeredText("队列", width - 68, cy, 18, "regular", true);
@@ -127,7 +131,7 @@ void NativeHud::playerPanel(double x, double y, double width) {
     static const QHash<QString, QString> modes{
         {"off", "顺序播放"}, {"all", "列表循环"}, {"one", "单曲循环"}, {"shuffle", "随机播放"}};
     button(modes.value(player.mode), left, y + 761, 140, 44, "player:mode", 16);
-    if (!m_music->isLocal()) {
+    if (PlatformFeatures::OfficialPlayback && !m_music->isLocal()) {
         button(m_music->provider != "netease" ? m_music->providerName() + " ↗" : "官方客户端 ↗", left + 165,
                y + 761, 175, 44, "player:official", 16);
     }

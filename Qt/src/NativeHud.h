@@ -76,6 +76,10 @@ class NativeHud : public QObject {
     QString themeMode;
     int listOffset = 0;
     int musicCollection = 1;
+    // 六行同专辑
+    static constexpr int AlbumTrackRowCount = 6;
+    static constexpr double AlbumTrackTop = 630;
+    static constexpr double AlbumTrackRowHeight = 48;
     int trackOffset = 0;
     int bodyOffset = 0;
     int queueOffset = 0;
@@ -148,6 +152,8 @@ class NativeHud : public QObject {
     QVector<LyricRow> m_lyricsLayout;
     double m_lyricsScroll = 0;
     std::optional<double> m_lyricsBrowse;
+    int m_lyricsLastIndex = -1;
+    int m_lyricsLineUpdates = 0;
     std::optional<double> m_lyricsTarget;
     std::optional<UiMotion::ReelCurve> m_lyricsCurve;
     int m_lyricsPlainOffset = 0;

@@ -17,7 +17,7 @@
 // 只看 Qt 特性会在无 Vulkan SDK 的机器上编译出引用未声明类型的代码（Windows runner 即如此，
 // 报 QVulkanInstance 不完整类型、QRhiVulkanInitParams 与 VK_SUCCESS 未定义）。
 #include <rhi/qrhi.h>
-#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_MACOS)
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_DARWIN)
 #include <QVulkanFunctions>
 #include <QVulkanInstance>
 #define RHINE_HAVE_VULKAN_TYPES 1
@@ -165,9 +165,8 @@ class Renderer {
     QHash<QString, Mesh> meshes;
     QRhiTexture *environment = nullptr, *dfg = nullptr, *white = nullptr, *noise = nullptr,
                 *capture = nullptr, *depth = nullptr, *normalDepth = nullptr, *shadow = nullptr;
-    QRhiBuffer *globalBuffer = nullptr, *kernel = nullptr, *fsr1Constants = nullptr,
-               *floor = nullptr, *coverPlane = nullptr,
-               *musicLabelPlane = nullptr, *discBody = nullptr, *discHub = nullptr,
+    QRhiBuffer *globalBuffer = nullptr, *kernel = nullptr, *fsr1Constants = nullptr, *floor = nullptr,
+               *coverPlane = nullptr, *musicLabelPlane = nullptr, *discBody = nullptr, *discHub = nullptr,
                *caseDecoration = nullptr, *caseLetteringFront = nullptr, *caseLetteringSpine = nullptr;
     int discPrintCount = 0;
     int discBodyCount = 0;
@@ -313,8 +312,7 @@ class Renderer {
         QVector<QRhiTextureUploadEntry> entries;
         auto level = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
         for (int index = 0;; ++index) {
-            entries.append(
-                QRhiTextureUploadEntry(0, index, QRhiTextureSubresourceUploadDescription(level)));
+            entries.append(QRhiTextureUploadEntry(0, index, QRhiTextureSubresourceUploadDescription(level)));
             if (level.width() == 1 && level.height() == 1) {
                 break;
             }
@@ -395,8 +393,7 @@ class Renderer {
         const auto paintDecoration = [&](QPainter &painter) {
             painter.setRenderHint(QPainter::Antialiasing);
             painter.setPen(QPen(ink, 1.4));
-            for (auto point :
-                 {QPointF(75, 60), QPointF(930, 60), QPointF(75, 685), QPointF(930, 685)}) {
+            for (auto point : {QPointF(75, 60), QPointF(930, 60), QPointF(75, 685), QPointF(930, 685)}) {
                 painter.drawLine(point + QPointF(-10, 0), point + QPointF(10, 0));
                 painter.drawLine(point + QPointF(0, -10), point + QPointF(0, 10));
             }
@@ -412,8 +409,7 @@ class Renderer {
             painter.scale(2, 2);
             paintDecoration(painter);
         }
-        decorationTextureHigh =
-            texture(decorationHigh.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        decorationTextureHigh = texture(decorationHigh.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
         uploadMipped(decorationTextureHigh, decorationHigh);
         QImage decorationLow(1000, 740, QImage::Format_RGBA8888_Premultiplied);
         decorationLow.fill(Qt::transparent);
@@ -421,8 +417,7 @@ class Renderer {
             QPainter painter(&decorationLow);
             paintDecoration(painter);
         }
-        decorationTextureLow =
-            texture(decorationLow.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        decorationTextureLow = texture(decorationLow.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
         uploadMipped(decorationTextureLow, decorationLow);
         // 文字单独以 16 倍密度绘制：缩放后笔画仍有足够采样，屏幕上的字才立得住。
         // 区域按原 1000×740 画布的像素坐标框定，绘制时用同一套坐标，只是整体放大八倍。
@@ -440,17 +435,15 @@ class Renderer {
             return result;
         };
         // 横向标题：原基线 (130, 688)、字号 15。
-        letteringTextureFront =
-            lettering(QRect(120, 664, 220, 46), [&](QPainter &text) {
-                glyphs->text(text, "MUSIC ARCHIVE / 001", 130, 688, 15, "regular", .5, ink);
-            });
+        letteringTextureFront = lettering(QRect(120, 664, 220, 46), [&](QPainter &text) {
+            glyphs->text(text, "MUSIC ARCHIVE / 001", 130, 688, 15, "regular", .5, ink);
+        });
         // 纵向脊标：原起点 (75, 465)、字号 21、逆时针 90 度。
-        letteringTextureSpine =
-            lettering(QRect(62, 348, 46, 128), [&](QPainter &text) {
-                text.translate(75, 465);
-                text.rotate(-90);
-                glyphs->text(text, "RHINE LAB", 0, 0, 21, "demibold", 2, ink);
-            });
+        letteringTextureSpine = lettering(QRect(62, 348, 46, 128), [&](QPainter &text) {
+            text.translate(75, 465);
+            text.rotate(-90);
+            glyphs->text(text, "RHINE LAB", 0, 0, 21, "demibold", 2, ink);
+        });
         // 几何按原画布像素换算：200 px = 1 单位，x 从 -2.5 起、y 从 3.7 向下。
         caseLetteringFront = plane(-1.9, 0.15, -0.8, 0.38, .2225, -1.9, 0.15, 1.1, 0.23);
         caseLetteringSpine = plane(-2.19, 1.32, -1.96, 1.96, .2225, -2.19, 1.32, 0.23, 0.64);
@@ -475,14 +468,7 @@ class Renderer {
         std::vector<float> vertices;
         for (auto v : {QVector2D{x0, y0}, QVector2D{x1, y0}, QVector2D{x1, y1}, QVector2D{x0, y0},
                        QVector2D{x1, y1}, QVector2D{x0, y1}}) {
-            float data[] = {v.x(),
-                            v.y(),
-                            z,
-                            0,
-                            0,
-                            1,
-                            uw ? (v.x() - ux) / uw : 0,
-                            uh ? (v.y() - uy) / uh : 0};
+            float data[] = {v.x(), v.y(), z, 0, 0, 1, uw ? (v.x() - ux) / uw : 0, uh ? (v.y() - uy) / uh : 0};
             vertices.insert(vertices.end(), std::begin(data), std::end(data));
         }
         return buffer(QByteArray(reinterpret_cast<const char *>(vertices.data()), vertices.size() * 4),
@@ -576,17 +562,16 @@ class Renderer {
                              qMax(1, qRound(value.height() * sample * renderScale * aaScale / fsrDivisor)));
         // 同时比较窗口尺寸和算出来的内部尺寸：设置里改分辨率时无需重启，
         // 下一帧就会按新尺寸重建全部渲染目标。
-        if (viewSize == value && size == nextSize && sizedAaMode == aaMode &&
-            sampleCount == nextSamples) {
+        if (viewSize == value && size == nextSize && sizedAaMode == aaMode && sampleCount == nextSamples) {
             return;
         }
         // 诊断：RHINE_DEBUG_FSR=1 时把渲染器实际采用的档位/尺寸打出来，
         // 便于判断"设置改了但画面没变"是渲染器没吃到还是别的原因。
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_FSR")) {
             qWarning() << "FSR state: mode" << aaMode << "quality"
-                       << qEnvironmentVariable("RHINE_FSR_QUALITY") << "divisor" << fsrDivisor
-                       << "size" << nextSize << "view" << value << "sharpness"
-                       << fsrSharpnessPercent() << "effectiveSharpness"
+                       << qEnvironmentVariable("RHINE_FSR_QUALITY") << "divisor" << fsrDivisor << "size"
+                       << nextSize << "view" << value << "sharpness" << fsrSharpnessPercent()
+                       << "effectiveSharpness"
                        << RhineFsr::effectiveSharpnessPercent(fsrSharpnessPercent(), nextSize, value);
         }
         sizedAaMode = aaMode;
@@ -638,9 +623,9 @@ class Renderer {
             QRhiTextureRenderTargetDescription desc;
             desc.setColorAttachments({attachment});
             desc.setDepthTexture(depth);
-            velocity.rt = own(rhi->newTextureRenderTarget(
-                                  desc, QRhiTextureRenderTarget::PreserveDepthStencilContents),
-                              true);
+            velocity.rt =
+                own(rhi->newTextureRenderTarget(desc, QRhiTextureRenderTarget::PreserveDepthStencilContents),
+                    true);
             velocity.rp = own(velocity.rt->newCompatibleRenderPassDescriptor(), true);
             velocity.rt->setRenderPassDescriptor(velocity.rp);
             create(velocity.rt);
@@ -769,14 +754,14 @@ class Renderer {
     Surface surface(QJsonObject d) {
         auto name = d["name"].toString();
         bool optical = name.startsWith("Optical_Glass") || name == "Optical_Bridge_Glass";
-        float type = d["mesh"].toInt() == -2                            ? 6
+        float type = d["mesh"].toInt() == -2                              ? 6
                      : d["mesh"].toInt() == -6 || d["mesh"].toInt() == -7 ? 7
-                     : d["label"].toBool()                              ? 1
-                     : name == "Frosted_Polymer"                        ? 3
-                     : name == "Ivory_Edges"                            ? 4
-                     : name == "Optical_Diffuser"                       ? 5
-                     : !d["instanced"].toBool() && !d["floor"].toBool() ? 2
-                                                                        : 0;
+                     : d["label"].toBool()                                ? 1
+                     : name == "Frosted_Polymer"                          ? 3
+                     : name == "Ivory_Edges"                              ? 4
+                     : name == "Optical_Diffuser"                         ? 5
+                     : !d["instanced"].toBool() && !d["floor"].toBool()   ? 2
+                                                                          : 0;
         return {v4(vector(d["color"]), n(d, "opacity")),
                 {n(d, "roughness"), n(d, "metalness"), n(d, "transmission"), n(d, "thickness")},
                 {n(d, "ior"), n(d, "attenuationDistance"), name == "Index_Inlay" ? 1.f : 0.f,
@@ -941,8 +926,8 @@ class Renderer {
             }
             const auto slot = labelSlots.value(key);
             auto &bound = atlasPages[slot.page];
-            const auto label = glyphs->label(value).scaled(256, 112, Qt::IgnoreAspectRatio,
-                                                           Qt::SmoothTransformation);
+            const auto label =
+                glyphs->label(value).scaled(256, 112, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
             {
                 QPainter painter(&bound.staging);
                 painter.drawImage((slot.cell % 8) * 256, (slot.cell / 8) * 112, label);
@@ -954,8 +939,7 @@ class Renderer {
                     .convertToFormat(QImage::Format_RGBA8888_Premultiplied));
             region.setDestinationTopLeft(QPoint((slot.cell % 8) * 256, (slot.cell / 8) * 112));
             updates->uploadTexture(bound.texture,
-                                   QRhiTextureUploadDescription(
-                                       {QRhiTextureUploadEntry(0, 0, region)}));
+                                   QRhiTextureUploadDescription({QRhiTextureUploadEntry(0, 0, region)}));
             bound.dirty = true;
             labels[key] = bound.texture;
             labelRevisions[key] = labelRevision;
@@ -1037,14 +1021,11 @@ class Renderer {
                                    bool depthWrite = true, bool blend = false) {
         // 管线只由 kind、渲染通道和四个开关决定。列表页每帧 300+ draw，原先每个 draw 都要
         // 拼一次 QString 键（约十次分配 + 字符串哈希），换成纯数值键后这部分开销基本消失。
-        static const QHash<QString, quint64> kinds = {{"surface", 0},       {"shadow", 1},
-                                                      {"normal", 2},        {"aoFragment", 3},
-                                                      {"combineAO", 4},     {"bokehFragment", 5},
-                                                      {"copyColor", 6},     {"finalFragment", 7},
-                                                      {"surfaceHashed", 9}, {"aaFragment", 10},
-                                                      {"downsample", 11},   {"velocity", 12},
-                                                      {"taa", 13},          {"fsr1_easu", 14},
-                                                      {"fsr1_rcas", 15}};
+        static const QHash<QString, quint64> kinds = {
+            {"surface", 0},       {"shadow", 1},        {"normal", 2},      {"aoFragment", 3},
+            {"combineAO", 4},     {"bokehFragment", 5}, {"copyColor", 6},   {"finalFragment", 7},
+            {"surfaceHashed", 9}, {"aaFragment", 10},   {"downsample", 11}, {"velocity", 12},
+            {"taa", 13},          {"fsr1_easu", 14},    {"fsr1_rcas", 15}};
         quint64 key = quint64(quintptr(rp)) * 0x9E3779B97F4A7C15ull;
         // 采样数也进键：重建目标时 rp 指针会变，本来就不会命中旧管线，这里再加一道保险。
         key ^= kinds.value(kind, 8) | (quint64(back) << 4) | (quint64(doubleSided) << 5) |
@@ -1053,14 +1034,12 @@ class Renderer {
             return *it;
         }
         auto p = own(rhi->newGraphicsPipeline(), true);
-        const bool geo =
-            kind == "surface" || kind == "surfaceHashed" || kind == "normal" || kind == "shadow";
+        const bool geo = kind == "surface" || kind == "surfaceHashed" || kind == "normal" || kind == "shadow";
         const bool velocityKind = kind == "velocity";
         p->setShaderStages(
-            {{QRhiShaderStage::Vertex,
-              shader(velocityKind ? "velocity.vert"
-                                  : geo ? (kind == "shadow" ? "shadow.vert" : "geometry.vert")
-                                        : "quad.vert")},
+            {{QRhiShaderStage::Vertex, shader(velocityKind ? "velocity.vert"
+                                              : geo ? (kind == "shadow" ? "shadow.vert" : "geometry.vert")
+                                                    : "quad.vert")},
              {QRhiShaderStage::Fragment, shader(kind + ".frag")}});
         if (geo) {
             QRhiVertexInputLayout layout;
@@ -1125,31 +1104,28 @@ class Renderer {
             auto layout = own(rhi->newShaderResourceBindings(), true);
             auto stage = QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage;
             std::vector<QRhiShaderResourceBinding> values = {QRhiShaderResourceBinding::uniformBuffer(
-                0,
-                kind == "shadow" || kind == "velocity" ? QRhiShaderResourceBinding::VertexStage : stage,
+                0, kind == "shadow" || kind == "velocity" ? QRhiShaderResourceBinding::VertexStage : stage,
                 globalBuffer)};
             if (kind != "shadow" && kind != "normal" && kind != "velocity") {
                 // FSR1 的 EASU/RCAS 在 binding 1 要的是 4 个 vec4 的常量块（输入/输出尺寸
                 // 与锐化强度），与 AO 的 kernel 完全无关；共用会直接读到 AO 核数据。
                 const bool fsr1Kind = kind == "fsr1_easu" || kind == "fsr1_rcas";
                 values.push_back(QRhiShaderResourceBinding::uniformBuffer(
-                    1, QRhiShaderResourceBinding::FragmentStage,
-                    fsr1Kind ? fsr1Constants : kernel));
+                    1, QRhiShaderResourceBinding::FragmentStage, fsr1Kind ? fsr1Constants : kernel));
             }
             // 抖动淡入变体与主表面共用同一套绑定布局。
             const bool surfaceKind = kind == "surface" || kind == "surfaceHashed";
-            int count = surfaceKind                                     ? 9
+            int count = surfaceKind                                                  ? 9
                         : kind == "shadow" || kind == "normal" || kind == "velocity" ? 0
-                        : kind == "aoFragment"                           ? 3
-                        : kind == "combineAO"                            ? 2
-                        : kind == "bokehFragment"                        ? 3
-                        : kind == "finalFragment"                        ? 4
-                        : kind == "taa"                                  ? 3
-                                                                         : 1;
+                        : kind == "aoFragment"                                       ? 3
+                        : kind == "combineAO"                                        ? 2
+                        : kind == "bokehFragment"                                    ? 3
+                        : kind == "finalFragment"                                    ? 4
+                        : kind == "taa"                                              ? 3
+                                                                                     : 1;
             for (int i = 0; i < count; ++i) {
                 values.push_back(QRhiShaderResourceBinding::sampledTexture(
-                    2 + i, QRhiShaderResourceBinding::FragmentStage,
-                    surfaceKind && i == 2 ? shadow : white,
+                    2 + i, QRhiShaderResourceBinding::FragmentStage, surfaceKind && i == 2 ? shadow : white,
                     surfaceKind && i == 2 ? shadowSampler : linear));
             }
             layout->setBindings(values.begin(), values.end());
@@ -1238,8 +1214,8 @@ class Renderer {
     // 新 shader 由 qt_add_shaders 注册后才会出现在 qrc 里；未注册时跳过速度 pass，
     // 主渲染器仍可启动（因此本文件不依赖 CMakeLists.txt 的改动）。
     static bool velocityShadersAvailable() {
-        static const bool available = QFile::exists(":/shaders/velocity.vert.qsb") &&
-                                      QFile::exists(":/shaders/velocity.frag.qsb");
+        static const bool available =
+            QFile::exists(":/shaders/velocity.vert.qsb") && QFile::exists(":/shaders/velocity.frag.qsb");
         return available;
     }
     bool velocityEligible(const QJsonObject &d) {
@@ -1362,8 +1338,8 @@ class Renderer {
             if (d["label"].toBool()) {
                 const auto slot = labelSlots.value(key, {-1, -1});
                 if (slot.page >= 0) {
-                    material.atlas = {float(slot.cell % 8) / 8.f, float(slot.cell / 8) / 18.f,
-                                      1.f / 8.f, 1.f / 18.f};
+                    material.atlas = {float(slot.cell % 8) / 8.f, float(slot.cell / 8) / 18.f, 1.f / 8.f,
+                                      1.f / 18.f};
                 }
             }
             const auto mb = dynamicBuffer(
@@ -1514,8 +1490,7 @@ class Renderer {
             const bool write = kind != "surface" || hashed || !blend || d["depthWrite"].toBool();
             // 抖动淡入的 draw 走带 discard 的变体；主不透明管线必须保持无 discard，
             // 硬件才会启用 early-Z——不透明实例的前到后排序才有意义。
-            const auto pipelineKind =
-                (kind == "surface" && hashed) ? QStringLiteral("surfaceHashed") : kind;
+            const auto pipelineKind = (kind == "surface" && hashed) ? QStringLiteral("surfaceHashed") : kind;
             cb->setGraphicsPipeline(pipeline(pipelineKind, draw.bindings, rp, back,
                                              kind != "normal" && d["side"].toInt() == 2, write, blend));
             // 绑定与管线必须一一对应：RHI 会按首次使用时建立的映射校验后续绑定的
@@ -1586,10 +1561,10 @@ class Renderer {
             QRhiShaderResourceBinding::uniformBuffer(1, QRhiShaderResourceBinding::FragmentStage,
                                                      fsr1Kind ? fsr1Constants : kernel)};
         for (int i = 0; i < textures.size(); ++i) {
-            auto s = (kind == "aoFragment"                    ? (i == 2 ? repeat : nearest)
-                      : kind == "bokehFragment" && i == 2     ? nearest
-                      : kind == "finalFragment" && i == 3     ? nearest
-                                                              : linear);
+            auto s = (kind == "aoFragment"                ? (i == 2 ? repeat : nearest)
+                      : kind == "bokehFragment" && i == 2 ? nearest
+                      : kind == "finalFragment" && i == 3 ? nearest
+                                                          : linear);
             list.push_back(QRhiShaderResourceBinding::sampledTexture(
                 2 + i, QRhiShaderResourceBinding::FragmentStage, textures[i], s));
         }
@@ -1617,9 +1592,8 @@ class Renderer {
     }
     // FSR1 的常量逐帧变化（输入/输出尺寸、锐化强度），必须在 beginPass 之前用独立的上传
     // 批次写入；quad() 的 SRB 缓存只区分 kind 与纹理指针，不含常量内容，不能靠它刷新。
-    void quadFsr1(QRhiCommandBuffer *cb, QString kind, QRhiRenderTarget *rt,
-                  QRhiRenderPassDescriptor *rp, QRhiTexture *source, QSize viewportSize,
-                  const Fsr1Con &constants) {
+    void quadFsr1(QRhiCommandBuffer *cb, QString kind, QRhiRenderTarget *rt, QRhiRenderPassDescriptor *rp,
+                  QRhiTexture *source, QSize viewportSize, const Fsr1Con &constants) {
         auto batch = rhi->nextResourceUpdateBatch();
         batch->updateDynamicBuffer(fsr1Constants, 0, sizeof(Fsr1Con), &constants);
         cb->resourceUpdate(batch);
@@ -1670,9 +1644,8 @@ class Renderer {
                 }
             }
             const auto jitter = frame["jitter"].toArray();
-            jitterPixels = jitter.size() == 2
-                               ? QPointF(jitter.at(0).toDouble(), jitter.at(1).toDouble())
-                               : QPointF();
+            jitterPixels =
+                jitter.size() == 2 ? QPointF(jitter.at(0).toDouble(), jitter.at(1).toDouble()) : QPointF();
         }
         // FSR3 的上下文与目标尺寸绑定，必须在任何渲染通道之外重建。相机 near/far 直接从
         // 投影矩阵反解（Rhine 用标准 OpenGL 式透视：m[10]=c, m[14]=d，near=d/(c-1)、
@@ -1703,9 +1676,8 @@ class Renderer {
                 }
                 fsr3->setCamera(nearPlane, farPlane, frameTimeMs);
                 const auto jitter = frame["jitter"].toArray();
-                jitterPixels = jitter.size() == 2
-                                   ? QPointF(jitter.at(0).toDouble(), jitter.at(1).toDouble())
-                                   : QPointF();
+                jitterPixels = jitter.size() == 2 ? QPointF(jitter.at(0).toDouble(), jitter.at(1).toDouble())
+                                                  : QPointF();
                 // 符号：applyJitter 把投影的平移项改成 (0,2) -= 2x/w、(1,2) += 2y/h，换算到
                 // 屏幕像素（y 向下）是 (-x, -y)；而 FSR3 的 Jitter() 定义为采样位置被 +Jitter
                 // 偏移过（ffx_fsr3upscaler_upsample.h 里用 (pos + 0.5) - Jitter() 反解），
@@ -1832,8 +1804,7 @@ class Renderer {
         if (!glass.isEmpty()) {
             quad(cb, "copyColor", captureTarget.rt, captureTarget.rp, {color.texture});
             // 逐级盒式降采样，玻璃透射按粗糙度在其中取层级。
-            quad(cb, "downsample", captureHalf.rt, captureHalf.rp, {capture},
-                 captureHalf.rt->pixelSize());
+            quad(cb, "downsample", captureHalf.rt, captureHalf.rp, {capture}, captureHalf.rt->pixelSize());
             quad(cb, "downsample", captureQuarter.rt, captureQuarter.rp, {captureHalf.texture},
                  captureQuarter.rt->pixelSize());
             quad(cb, "downsample", captureEighth.rt, captureEighth.rp, {captureQuarter.texture},
@@ -1888,8 +1859,8 @@ class Renderer {
             // FSR3 在外部命令里派发：此时没有活动渲染通道，QRhi 不介入这段的布局，
             // SDK 的 Vulkan 后端会为每个资源排自己的屏障。
             cb->beginExternal();
-            const bool upscaled = fsr3->dispatch(rhi, cb, fsrInput.texture, depth, velocity.texture,
-                                                 fsrOutput.texture);
+            const bool upscaled =
+                fsr3->dispatch(rhi, cb, fsrInput.texture, depth, velocity.texture, fsrOutput.texture);
             cb->endExternal();
             // 升采样成功就拷贝结果，失败则退回渲染分辨率的中间结果（画面仍正确，只是没超分）。
             quad(cb, "copyColor", destination, destination->renderPassDescriptor(),
@@ -1900,13 +1871,15 @@ class Renderer {
             // 锐化强度用 AMD 的 stops 语义（0 = 最锐，数值越大越弱），0.2 是肉眼可辨
             // 但不至于出白边的档位；RCAS 与分辨率无关，所以常量只需输出尺寸。
             quad(cb, "finalFragment", fsrInput.rt, fsrInput.rp, compositeList, QSize());
-            quadFsr1(cb, "fsr1_easu", fsrOutput.rt, fsrOutput.rp, fsrInput.texture,
-                     fsrOutput.rt->pixelSize(), Fsr1Constants::easu(size, viewSize));
-            quadFsr1(cb, "fsr1_rcas", destination, destination->renderPassDescriptor(),
-                     fsrOutput.texture, destination->pixelSize(),
+            quadFsr1(cb, "fsr1_easu", fsrOutput.rt, fsrOutput.rp, fsrInput.texture, fsrOutput.rt->pixelSize(),
+                     Fsr1Constants::easu(size, viewSize));
+            quadFsr1(cb, "fsr1_rcas", destination, destination->renderPassDescriptor(), fsrOutput.texture,
+                     destination->pixelSize(),
                      // 界面上的锐化百分比与 RCAS 的"档"方向相反：0% 最柔（2 档），100% 最锐（0 档）。
                      Fsr1Constants::rcas(destination->pixelSize(),
-                                         float(100 - RhineFsr::effectiveSharpnessPercent(fsrSharpnessPercent(), size, viewSize)) / 100.f * 2.f));
+                                         float(100 - RhineFsr::effectiveSharpnessPercent(
+                                                         fsrSharpnessPercent(), size, viewSize)) /
+                                             100.f * 2.f));
         } else if (taa) {
             // TAA 要同时读“当前帧”和“历史帧”，所以当前帧先落到 ldr（与 FXAA 共用的中间目标）。
             quad(cb, "finalFragment", ldr.rt, ldr.rp, compositeList, QSize());
@@ -1932,12 +1905,11 @@ class Renderer {
         } else {
             const bool aa = fxaa;
             auto finalTargetRt = aa ? ldr.rt : destination;
-            quad(cb, "finalFragment", finalTargetRt,
-                 aa ? ldr.rp : destination->renderPassDescriptor(), compositeList,
-                 aa ? QSize() : destination->pixelSize());
+            quad(cb, "finalFragment", finalTargetRt, aa ? ldr.rp : destination->renderPassDescriptor(),
+                 compositeList, aa ? QSize() : destination->pixelSize());
             if (aa) {
-                quad(cb, "aaFragment", destination, destination->renderPassDescriptor(),
-                     {ldr.texture}, destination->pixelSize());
+                quad(cb, "aaFragment", destination, destination->renderPassDescriptor(), {ldr.texture},
+                     destination->pixelSize());
             }
         }
         // 速度历史必须在本帧速度 pass 之后滚动，否则 velocityPass 会把当前矩阵当成上一帧，
@@ -2016,7 +1988,11 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         }
     }
     void render(QRhiCommandBuffer *cb) override {
-        if (frame.isEmpty() || (frame["mode"] == "boot" && frame["time"].toDouble() < 21.9)) {
+        // 系统可能先请求绘制再生成首帧，相机未就绪时只清空目标，禁止读取空矩阵。
+        const bool cameraReady = frame.value("projection").toArray().size() == 16 &&
+                                 frame.value("aoProjection").toArray().size() == 16 &&
+                                 frame.value("view").toArray().size() == 16;
+        if (!cameraReady || (frame.value("mode") == "boot" && frame.value("time").toDouble() < 21.9)) {
             cb->beginPass(renderTarget(), Qt::transparent, {1, 0});
             cb->endPass();
             return;
@@ -2104,7 +2080,7 @@ QImage renderReference(const QString &root, const QJsonObject &frame, const QJso
                                    : QRhi::Flags{}));
     }
 #endif
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     if (!rhi) {
         QRhiMetalInitParams params;
         rhi.reset(QRhi::create(QRhi::Metal, &params));

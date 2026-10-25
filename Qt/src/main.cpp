@@ -11,10 +11,17 @@
 #include "LinuxGraphics.h"
 #include "RhiScene.h"
 #include "OpticalScene.h"
+#ifdef Q_OS_IOS
+#include "IOSWindow.h"
+#endif
 #include <QDir>
 #include <QFileInfo>
 #include <QFontDatabase>
 #include <QGuiApplication>
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+#include "DesktopTray.h"
+#include <QApplication>
+#endif
 #include <QIcon>
 #include <QLoggingCategory>
 #include <QQmlApplicationEngine>
@@ -35,7 +42,7 @@
  * 只判 QT_CONFIG(vulkan) 会在装了 Qt 但没装 Vulkan SDK 的机器上
  * （如 Windows runner：Qt 自带 Vulkan 特性、系统无 vulkan.h）编译出使用未声明类型的代码，
  * 表现为 QVulkanInstance 不完整类型与 VK_SUCCESS 未定义。守卫必须同时覆盖两半。 */
-#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_MACOS)
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_DARWIN)
 #include <QVulkanFunctions>
 #include <QVulkanInstance>
 #define RHINE_HAVE_VULKAN_TYPES 1
@@ -45,9 +52,10 @@
 int makeIcon(const QString &directory);
 int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, FrameProfiler &profiler);
 #ifdef Q_OS_WIN
+#include "WindowsTaskbar.h"
 void initializeWindowsGraphics();
 #endif
-#if !defined(Q_OS_MACOS)
+#if !defined(Q_OS_DARWIN)
 /**
  * 探测是否存在可用的 Vulkan 物理设备。
  * Qt 的 QSG_RHI_BACKEND 没有后端回退列表，强制指定失败会直接终止，因此必须先探测。
@@ -82,7 +90,7 @@ static QSettings graphicsSettings() {
 /** 应用命名后端；Vulkan 先探测物理设备，不可用时返回 false 由调用方回退。
  *  仅在非 macOS 下编译：macOS 只提供 Metal，本函数的两个调用点都在 #else 分支里，
  *  而 vulkanDeviceAvailable() 同样只在非 macOS 下定义。 */
-#if !defined(Q_OS_MACOS)
+#if !defined(Q_OS_DARWIN)
 static bool applyNamedBackend(const QString &requested) {
 #if defined(Q_OS_WIN)
     if (requested == "d3d12") {
@@ -114,7 +122,7 @@ static void selectGraphicsBackend() {
         qInfo() << "QSG_RHI_BACKEND is set; keeping" << qEnvironmentVariable("QSG_RHI_BACKEND");
         return;
     }
-#if defined(Q_OS_MACOS)
+#if defined(Q_OS_DARWIN)
     // Qt 在 macOS 只提供 Metal，Vulkan 需经 MoltenVK 转换层，性能低于原生 Metal。
     const auto requested = qEnvironmentVariable("RHINE_GRAPHICS").toLower();
     if (!requested.isEmpty() && requested != "auto" && requested != "metal") {
@@ -230,8 +238,7 @@ static void applyFrameGenerationSetting() {
     // 实测这台机器上 FIFO 只给到约半个刷新率（47.4fps），MAILBOX 能到 125fps。
     if (qEnvironmentVariableIsEmpty("RHINE_FG_VSYNC")) {
         const auto vsync = graphicsSettings().value("panel/vsync", "on").toString();
-        qputenv("RHINE_FG_VSYNC",
-                vsync.compare("off", Qt::CaseInsensitive) == 0 ? "off" : "on");
+        qputenv("RHINE_FG_VSYNC", vsync.compare("off", Qt::CaseInsensitive) == 0 ? "off" : "on");
     }
 }
 /**
@@ -297,7 +304,11 @@ int main(int argc, char **argv) {
     // 所以同样要早于任何 QQuickWindow——RHI 在创建窗口时就定下了用哪块卡。
     initializeLinuxGraphics();
 #endif
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    QApplication application(argc, argv);
+#else
     QGuiApplication application(argc, argv);
+#endif
     application.setWindowIcon(QIcon(":/icons/icon-256.png"));
     QCoreApplication::setApplicationVersion(AppUpdater::currentVersion());
     QGuiApplication::setApplicationDisplayName(AppIdentity::DisplayName);
@@ -321,10 +332,12 @@ int main(int argc, char **argv) {
     }
     QString root = qEnvironmentVariable("RHINE_RESOURCES");
     if (root.isEmpty()) {
-        // macOS 使用 Resources ；其他平台使用 resources
+        // iOS 使用专用资源目录
         const auto base = QCoreApplication::applicationDirPath();
 #ifdef Q_OS_MACOS
         const QStringList candidates{base + "/../Resources"};
+#elif defined(Q_OS_IOS)
+        const QStringList candidates{base + "/RhineAssets"};
 #else
         const QStringList candidates{base + "/resources", base + "/../resources"};
 #endif
@@ -380,6 +393,14 @@ int main(int argc, char **argv) {
                                              families.isEmpty() ? QString("sans-serif") : families.first());
     engine.rootContext()->setContextProperty("rhine", &backend);
     engine.rootContext()->setContextProperty("profiler", &profiler);
+    if (!offline && RHINE_RELEASE_BUILD) {
+        QTimer::singleShot(8000, &backend.host, [&backend] {
+            if (backend.host.preference("auto-update") != "off") {
+                backend.host.updater.check();
+            }
+        });
+    }
+
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
         [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
@@ -393,17 +414,17 @@ int main(int argc, char **argv) {
     // RHINE_FG_LAYER=off 留作现场排障时的退路，可以强制走默认路径。
     // 任何一步失败都回退到下面的默认路径——FG 是可选增强，不能阻断启动。
     // 自检/抓屏/视觉基准都依赖 QQuickWindow 的读回路径，所以这些模式下不接管。
-    const bool fgLayerDisabled = qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0;
-    const bool fgCandidate = !test && !visual && !args.contains("--ui-self-test")
-                             && !args.contains("--capture") && !fgLayerDisabled
-                             && RhineGraphics::activeBackend() == QLatin1String("vulkan")
-                             && FgShell::compiledIn();
+    const bool fgLayerDisabled =
+        qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0;
+    const bool fgCandidate = !test && !visual && !args.contains("--ui-self-test") &&
+                             !args.contains("--capture") && !fgLayerDisabled &&
+                             RhineGraphics::activeBackend() == QLatin1String("vulkan") &&
+                             FgShell::compiledIn();
     // 排障：接管与否只看这一行。之前出现过"设了 RHINE_FG_LAYER=on 才接管"的怪现象，
     // 把每个输入的实测值打出来，比逐条读代码猜快得多。
-    qWarning().noquote() << "FG gate: candidate" << fgCandidate
-                         << "layerDisabled" << fgLayerDisabled << "test" << test << "visual"
-                         << visual << "backend" << RhineGraphics::activeBackend() << "compiledIn"
-                         << FgShell::compiledIn();
+    qWarning().noquote() << "FG gate: candidate" << fgCandidate << "layerDisabled" << fgLayerDisabled
+                         << "test" << test << "visual" << visual << "backend"
+                         << RhineGraphics::activeBackend() << "compiledIn" << FgShell::compiledIn();
     if (fgCandidate) {
         // FG 路径从不调用 QQmlApplicationEngine::load()（Main.qml 不加载，两个离屏层
         // 都是手工用 QQuickRenderControl 建的），而"QML 里的 Qt.quit() 真能退出进程"
@@ -415,13 +436,20 @@ int main(int argc, char **argv) {
         // 反过来的话窗口先被关闭，驱动 WSI 会对已销毁的 wl_surface 做 roundtrip，
         // 退出时 SIGABRT/SIGSEGV（实测两条都复现过）。Win32 的 HWND、X11 的 Window
         // 是同一类问题，所以这条顺序修在公共路径，不进平台分支。
-        QObject::connect(&engine, &QQmlEngine::quit, &application,
-                         [&application, raw = shell.get()]() {
-                             if (raw)
-                                 raw->shutdown();
-                             QCoreApplication::quit();
-                         });
+        QObject::connect(&engine, &QQmlEngine::quit, shell.get(), [raw = shell.get()]() {
+            raw->shutdown();
+            QCoreApplication::quit();
+        });
         if (shell->start() && shell->run() == 0) {
+            // FG 使用独立的 QWindow，也必须保留任务栏控制和关闭后驻留托盘的行为。
+#ifdef Q_OS_WIN
+            WindowsTaskbar taskbar(&backend, shell->window());
+#endif
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+            DesktopTray tray(shell->window(), &application);
+#endif
+            QObject::connect(&application, &QCoreApplication::aboutToQuit, shell.get(),
+                             [raw = shell.get()] { raw->shutdown(); });
             return application.exec();
         }
         qWarning().noquote() << "FG: 呈现层启动失败，回退默认路径：" << shell->lastError();
@@ -442,16 +470,16 @@ int main(int argc, char **argv) {
     }
     graphics.setPipelineCacheSaveFile(pipelineCache);
     window->setGraphicsConfiguration(graphics);
+    WindowsTaskbar taskbar(&backend, window);
     window->show();
 #endif
     backend.setWindow(window);
-    if (!offline && RHINE_RELEASE_BUILD) {
-        QTimer::singleShot(8000, &backend.host, [&backend] {
-            if (backend.host.preference("auto-update") != "off") {
-                backend.host.updater.check();
-            }
-        });
-    }
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    DesktopTray tray(window, &application);
+#endif
+#ifdef Q_OS_IOS
+    configureIOSWindow(window, &backend);
+#endif
     window->installEventFilter(&backend);
     profiler.attach(window);
     // 短暂切换窗口继续复用 GPU；隐藏或最小化超过两秒才释放图形设备和可重建缓存。

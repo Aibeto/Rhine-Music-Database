@@ -46,7 +46,8 @@ class Engine : public QObject {
     Q_INVOKABLE void importLocal(QList<QUrl> urls);
     Q_INVOKABLE void resize(double width, double height);
     Q_INVOKABLE void action(QString action);
-    Q_INVOKABLE void submitForm(QString account, QString password);
+    Q_INVOKABLE void submitForm(QString account, QString captcha);
+    Q_INVOKABLE void sendLoginCode(QString phone);
     Q_INVOKABLE bool keyEvent(int key, int modifiers, QString text);
     /// 真正的按键处理；keyEvent 负责探针记录后转发。
     bool keyEventImpl(int key, int modifiers, QString text);
@@ -54,9 +55,10 @@ class Engine : public QObject {
     Q_INVOKABLE void wheelInput(double x, double y, double pixelDelta, double angleDelta);
     Q_INVOKABLE void adjustPlayer(QString control, double x, double width);
     Q_INVOKABLE void toggleFullscreen();
+    Q_INVOKABLE void minimizeWindow();
     // FG 路径呈现层是裸 QWindow（无 QQuickWindow），所以这里只要求 QWindow。
     void setWindow(QWindow *window);
-    /// 每帧调度间隔：跟着屏幕刷新率走，必须和 vblank 成整数关系（见实现里的注释）。
+    // 返回诊断帧间隔覆盖值，未指定时由呈现侧自适应限速。
     int frameIntervalMs() const;
     Q_INVOKABLE void query(QString query);
     Q_INVOKABLE void key(QString key, bool command);

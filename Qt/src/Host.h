@@ -1,5 +1,6 @@
 #pragma once
 #include "AudioPlayer.h"
+#include "PlatformFeatures.h"
 #include "PlaybackDiagnostics.h"
 #include "AppUpdater.h"
 #include <QCache>
@@ -7,7 +8,7 @@
 #include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QObject>
-#include <QProcess>
+#include "BridgeProcess.h"
 #include <QQueue>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -46,7 +47,7 @@ class Host : public QObject {
     Q_INVOKABLE void copy(QString text);
     Q_INVOKABLE void open(QString url);
     Q_INVOKABLE QString modifierKey() const {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         return QStringLiteral("⌘");
 #else
         return QStringLiteral("Ctrl");
@@ -111,7 +112,7 @@ class Host : public QObject {
     QHash<QString, Work> flights;
     QHash<QString, QString> pending;
     QQueue<QString> queue;
-    QProcess child;
+    BridgeProcess child;
     std::unique_ptr<AudioPlayer> audio;
     std::unique_ptr<QTemporaryDir> temporary;
     QByteArray buffer;

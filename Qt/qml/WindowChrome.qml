@@ -9,6 +9,7 @@ Item {
     readonly property color ink: dark ? "#ebebeb" : "#141613"
     readonly property bool maximized: window.visibility === Window.Maximized
     anchors.fill: parent
+    signal minimizeRequested
 
     function toggleMaximized() {
         if (maximized) {
@@ -76,7 +77,7 @@ Item {
 
                     function activate() {
                         if (modelData === "minimize") {
-                            chrome.window.showMinimized();
+                            chrome.minimizeRequested();
                         } else if (modelData === "maximize") {
                             chrome.toggleMaximized();
                         } else {

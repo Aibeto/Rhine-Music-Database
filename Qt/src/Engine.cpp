@@ -71,10 +71,10 @@ Engine::Engine(QString path, bool offline, QObject *parent)
                   "interval=%dms timerActive=%d sleeping=%d sceneSleeping=%d rotating=%d "
                   "hudAnimating=%d | 间隔均=%.2fms 最大=%.2fms step均=%.2fms 最大=%.2fms",
                   qulonglong(m_steps) - lastSteps, qulonglong(m_sceneUpdates) - lastScene,
-                  qulonglong(m_hudUpdates) - lastHud, qulonglong(render) - lastRender,
-                  timer.interval(), int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping),
-                  int(m_discRotating), int(app->hud.animating(m_animationTime)), avgGap,
-                  double(m_paceGapMax) / 1e6, avgStep, double(m_paceStepMax) / 1e6);
+                  qulonglong(m_hudUpdates) - lastHud, qulonglong(render) - lastRender, timer.interval(),
+                  int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping), int(m_discRotating),
+                  int(app->hud.animating(m_animationTime)), avgGap, double(m_paceGapMax) / 1e6, avgStep,
+                  double(m_paceStepMax) / 1e6);
             lastSteps = qulonglong(m_steps);
             lastScene = qulonglong(m_sceneUpdates);
             lastHud = qulonglong(m_hudUpdates);
@@ -213,8 +213,8 @@ void Engine::notifySceneRenderers(bool visualChanged) {
     if (enhanced) {
         m_originalSceneDirty |= visualChanged;
         // 进入资料库时预热一次原版管线，避免抽取末尾才同步编译和分配整套资源。
-        const bool prewarm = !m_originalSceneWarm && m_frame["mode"] != "boot";
-        if ((prewarm || m_frame["originalActorBlend"].toDouble() > 0) && m_originalSceneDirty) {
+        const bool prewarm = !m_originalSceneWarm && m_frame.value("mode") != "boot";
+        if ((prewarm || m_frame.value("originalActorBlend").toDouble() > 0) && m_originalSceneDirty) {
             m_originalSceneDirty = false;
             m_originalSceneWarm = true;
             emit sceneUpdated();
@@ -389,13 +389,18 @@ void Engine::tick() {
     const qint64 frameNs = clock.nsecsElapsed() - enterNs;
     const qint64 blockedNs = frameNs - stepNs;
     const int fixedMs = frameIntervalMs();
-    timer.setInterval(fixedMs > 0 ? fixedMs : (blockedNs > 2000000 ? 0 : 1));
+    const bool rotationOnly = m_discRotating && m_sceneSleeping && !app->hud.animating(m_animationTime) &&
+                              now - m_lastInput >= 750 && !m_pressed;
+    int intervalMs = blockedNs > 2000000 ? 0 : 1;
+    if (rotationOnly) {
+        intervalMs = 33;
+    }
+    timer.setInterval(fixedMs > 0 ? fixedMs : intervalMs);
     // 排障专用：RHINE_DIAG_ANIMATE=1 时永不休眠。静止场景下引擎会主动休眠、
     // presented 不再增长，那时测出来的"帧率"是没有负载的数字，A/B 对比没有意义。
     static const bool forceAnimate = qEnvironmentVariableIsSet("RHINE_DIAG_ANIMATE");
-    if (!forceAnimate && now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping
-        && !scene.changed() && !app->hud.animating(m_animationTime) && !m_discRotating
-        && m_frame["mode"] != "boot") {
+    if (!forceAnimate && now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
+        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot") {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();
@@ -425,12 +430,12 @@ void Engine::action(QString value) {
     wake();
 }
 /**
- * 将输入控件的原始数据转换为原生业务操作；密码不写入公开状态。
+ * 将输入控件的原始数据转换为原生业务操作
  */
-void Engine::submitForm(QString account, QString password) {
+void Engine::submitForm(QString account, QString captcha) {
     QJsonObject values;
     if (app->hud.modal == "login") {
-        values = {{"account", account}, {"password", password}};
+        values = {{"account", account}, {"captcha", captcha}};
     } else {
         values = {{"name", account}};
     }
@@ -440,8 +445,7 @@ void Engine::submitForm(QString account, QString password) {
 void Engine::setWindow(QWindow *window) {
     m_window = window;
 }
-int Engine::frameIntervalMs() const
-{
+int Engine::frameIntervalMs() const {
     // 返回 >0 表示「人为覆盖帧间隔」；返回 -1 表示交给 tick() 里的动态自适应。
     // 刻意不设固定周期：任何常数都会把帧周期变成「工作量 + 常数」，机器再快也上不去。
     // 也不从屏幕刷新率推导：上限应该由呈现侧决定，而不是先给自己设一道墙。
@@ -451,6 +455,23 @@ int Engine::frameIntervalMs() const
         return overrideMs;
     }
     return -1;
+}
+
+void Engine::sendLoginCode(QString phone) {
+    if (app->hud.modal == "login" && app->music.loginMethod == "phone") {
+        app->music.sendLoginCode(phone);
+        wake();
+    }
+}
+/**
+ * 最小化时保留最大化或全屏标记
+ */
+void Engine::minimizeWindow() {
+    if (!m_window) {
+        return;
+    }
+    m_window->setWindowStates(m_window->windowStates() | Qt::WindowMinimized);
+    m_window->setVisible(true);
 }
 void Engine::toggleFullscreen() {
     if (!m_window) {
@@ -467,8 +488,9 @@ void Engine::toggleFullscreen() {
 bool Engine::keyEvent(int keyCode, int modifiers, QString text) {
     const bool accepted = keyEventImpl(keyCode, modifiers, text);
     // 探针：确认按键真的走进了 QML 输入层，以及有没有被消费掉（RHINE_KEY_PROBE=1）。
-    if (qEnvironmentVariableIntValue("RHINE_KEY_PROBE") == 1)
+    if (qEnvironmentVariableIntValue("RHINE_KEY_PROBE") == 1) {
         qInfo().noquote() << "按键到达输入层: 键" << keyCode << "接受" << accepted;
+    }
     return accepted;
 }
 
@@ -604,7 +626,7 @@ void Engine::step(double time) {
     if (object.isEmpty()) {
         return;
     }
-    const auto previousDiscAngle = m_frame["discAngle"].toDouble();
+    const auto previousDiscAngle = m_frame.value("discAngle").toDouble();
     m_frame = scene.frame;
     m_frame["originalActorBlend"] = scene.originalActorBlend();
     auto signature = m_frame;
@@ -644,8 +666,8 @@ void Engine::step(double time) {
     }
     m_sceneSignature = signature;
     m_previousBuffers = scene.drawBuffers;
-    if (m_stableFrames >= 4 && !scene.changed() && m_frame["mode"] != "boot" &&
-        !m_frame["pendingAnimations"].toBool()) {
+    if (m_stableFrames >= 4 && !scene.changed() && m_frame.value("mode") != "boot" &&
+        !m_frame.value("pendingAnimations").toBool()) {
         m_sceneSleeping = true;
     }
     const auto current = object["current"].toObject();
@@ -659,7 +681,7 @@ void Engine::step(double time) {
     }
     const bool wasRotating = m_discRotating;
     m_discRotating = m_visible && app->hud.discRotation && !app->hud.reduced && app->hud.modal.isEmpty() &&
-                     m_frame["mode"] == "detail" && !m_frame["viewer"].toBool() &&
+                     m_frame.value("mode") == "detail" && !m_frame.value("viewer").toBool() &&
                      current["kind"] == "song" && MusicPlayer::identity(current) == identity &&
                      !player.loading && !player.failed && player.state["playing"].toBool();
     if (wasRotating && m_discRotating) {
@@ -671,7 +693,7 @@ void Engine::step(double time) {
     m_discTime = time;
     const bool showDiscAngle = current["kind"] == "song" && MusicPlayer::identity(current) == identity;
     m_frame["discAngle"] = showDiscAngle ? m_discAngle : 0;
-    const bool discChanged = m_discRotating || previousDiscAngle != m_frame["discAngle"].toDouble();
+    const bool discChanged = m_discRotating || previousDiscAngle != m_frame.value("discAngle").toDouble();
     const bool visualChanged = discChanged || !stable || current != m_current || cover != m_cover ||
                                coverRevision != m_coverRevision;
     m_coverRevision = coverRevision;
@@ -683,10 +705,10 @@ void Engine::step(double time) {
     const auto musicKey = current["key"].toString("empty");
     m_musicTextures[musicKey] = {current, m_coverImage};
     QSet<QString> retainedKeys{musicKey};
-    for (const auto &key : m_frame["returningMusicKeys"].toArray()) {
+    for (const auto &key : m_frame.value("returningMusicKeys").toArray()) {
         retainedKeys.insert(key.toString());
     }
-    for (const auto &value : m_frame["draws"].toArray()) {
+    for (const auto &value : m_frame.value("draws").toArray()) {
         const auto key = value.toObject()["musicKey"].toString();
         if (!key.isEmpty()) {
             retainedKeys.insert(key);
@@ -710,7 +732,7 @@ void Engine::step(double time) {
     }
     notifySceneRenderers(visualChanged);
     auto state = object["state"].toObject().toVariantMap();
-    state["originalActorVisible"] = m_frame["originalActorBlend"].toDouble() > 0;
+    state["originalActorVisible"] = m_frame.value("originalActorBlend").toDouble() > 0;
     if (state != m_state) {
         m_state = state;
         const auto loginMethod = m_state.value("loginMethod").toString();
@@ -757,9 +779,20 @@ void Engine::snapshot(QString path) {
 int Engine::selfTest() {
     bool ok =
         ready() && DiscGeometry::validate() && runNativeHostChecks(root()) && runNativeMusicChecks(root());
+    // 首帧尚未生成时，渲染通知不能通过非 const JSON 读取插入空字段。
+    const auto savedFrame = m_frame;
+    const auto savedEnhancement = app->hud.sceneEnhancement;
+    m_frame = {};
+    app->hud.sceneEnhancement = true;
+    notifySceneRenderers(true);
+    ok &= m_frame.isEmpty();
+    app->hud.sceneEnhancement = savedEnhancement;
+    m_frame = savedFrame;
+    notifySceneRenderers(true);
     scene.review("archive");
     step(2.101);
-    ok &= !m_frame["draws"].toArray().isEmpty() && m_frame["stats"].toObject()["archiveCount"].toInt() > 0;
+    ok &= !m_frame.value("draws").toArray().isEmpty() &&
+          m_frame.value("stats").toObject()["archiveCount"].toInt() > 0;
     QFile fixture(root() + "/scene-fixture.json");
     if (!fixture.open(QIODevice::ReadOnly)) {
         qCritical() << "Missing offline scene fixture";
@@ -767,8 +800,8 @@ int Engine::selfTest() {
     }
     const auto expected = QJsonDocument::fromJson(fixture.readAll()).object();
     const auto legacy = expected["frame"].toObject();
-    ok &= equivalent(m_frame["view"], legacy["view"]) &&
-          equivalent(m_frame["projection"], legacy["projection"]);
+    ok &= equivalent(m_frame.value("view"), legacy["view"]) &&
+          equivalent(m_frame.value("projection"), legacy["projection"]);
     for (const auto &entry : expected["rays"].toArray()) {
         const auto ray = entry.toObject();
         const auto hit = scene.pick(ray["x"].toDouble(), ray["y"].toDouble());

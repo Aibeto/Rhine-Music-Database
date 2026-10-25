@@ -52,7 +52,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir release
-          for platform in macOS-arm64.zip Windows-x64-Setup.exe Linux-x86_64.AppImage; do
+          for platform in $(node -p "require('./scripts/release-version.cjs').distributionPlatforms.join(' ')"); do
             name="RhineMusicDatabase-${RELEASE_TAG}-${platform}"
             mapfile -t files < <(find artifacts -type f -name "$name")
             [[ "${#files[@]}" -eq 1 ]] || { echo "Missing or ambiguous package: $name"; exit 1; }

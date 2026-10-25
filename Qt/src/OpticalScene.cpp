@@ -244,8 +244,7 @@ class Renderer {
         QVector<QRhiTextureUploadEntry> entries;
         auto level = image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
         for (int index = 0;; ++index) {
-            entries.append(
-                QRhiTextureUploadEntry(0, index, QRhiTextureSubresourceUploadDescription(level)));
+            entries.append(QRhiTextureUploadEntry(0, index, QRhiTextureSubresourceUploadDescription(level)));
             if (level.width() == 1 && level.height() == 1) {
                 break;
             }
@@ -304,8 +303,7 @@ class Renderer {
         const auto paintDecoration = [&](QPainter &painter) {
             painter.setRenderHint(QPainter::Antialiasing);
             painter.setPen(QPen(ink, 1.4));
-            for (auto point :
-                 {QPointF(75, 60), QPointF(930, 60), QPointF(75, 685), QPointF(930, 685)}) {
+            for (auto point : {QPointF(75, 60), QPointF(930, 60), QPointF(75, 685), QPointF(930, 685)}) {
                 painter.drawLine(point + QPointF(-10, 0), point + QPointF(10, 0));
                 painter.drawLine(point + QPointF(0, -10), point + QPointF(0, 10));
             }
@@ -321,8 +319,7 @@ class Renderer {
             painter.scale(2, 2);
             paintDecoration(painter);
         }
-        decorationTextureHigh =
-            texture(decorationHigh.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        decorationTextureHigh = texture(decorationHigh.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
         uploadMipped(decorationTextureHigh, decorationHigh);
         QImage decorationLow(1000, 740, QImage::Format_RGBA8888_Premultiplied);
         decorationLow.fill(Qt::transparent);
@@ -330,8 +327,7 @@ class Renderer {
             QPainter painter(&decorationLow);
             paintDecoration(painter);
         }
-        decorationTextureLow =
-            texture(decorationLow.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        decorationTextureLow = texture(decorationLow.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
         uploadMipped(decorationTextureLow, decorationLow);
         // 装饰文字独立成片，按原 1000×740 画布坐标放大 16 倍绘制。
         const auto lettering = [&](QRect source, auto &&draw) {
@@ -380,14 +376,7 @@ class Renderer {
         for (auto v : {QVector2D{x0, y0}, QVector2D{x1, y0}, QVector2D{x1, y1}, QVector2D{x0, y0},
                        QVector2D{x1, y1}, QVector2D{x0, y1}}) {
             // 与主渲染路径一致的八分量顶点：位置、法线、UV。
-            float data[] = {v.x(),
-                            v.y(),
-                            z,
-                            0,
-                            0,
-                            1,
-                            uw ? (v.x() - ux) / uw : 0,
-                            uh ? (v.y() - uy) / uh : 0};
+            float data[] = {v.x(), v.y(), z, 0, 0, 1, uw ? (v.x() - ux) / uw : 0, uh ? (v.y() - uy) / uh : 0};
             vertices.insert(vertices.end(), std::begin(data), std::end(data));
         }
         return buffer(QByteArray(reinterpret_cast<const char *>(vertices.data()), vertices.size() * 4),
@@ -509,19 +498,20 @@ class Renderer {
         const bool tint = qEnvironmentVariableIsSet("RHINE_DEBUG_TINT");
         if (tint) {
             const int bits = d["debugIndex"].toInt();
-            d["color"] = QJsonArray{(bits & 1) ? 1.0 : 0.15, (bits & 2) ? 1.0 : 0.15,
-                                    (bits & 4) ? 1.0 : 0.15, 1.0};
+            d["color"] =
+                QJsonArray{(bits & 1) ? 1.0 : 0.15, (bits & 2) ? 1.0 : 0.15, (bits & 4) ? 1.0 : 0.15, 1.0};
         }
         bool optical = name.startsWith("Optical_Glass") || name == "Optical_Bridge_Glass";
-        float type = d["mesh"].toInt() == -2                            ? 6
-                     : d["mesh"].toInt() == -3 || d["mesh"].toInt() == -4 ? 8
-                     : d["mesh"].toInt() == -6 || d["mesh"].toInt() == -7 ? 7
-                     : d["label"].toBool()                              ? 1
+        float type = d["mesh"].toInt() == -2                               ? 6
+                     : d["mesh"].toInt() == -3 || d["mesh"].toInt() == -4  ? 8
+                     : d["mesh"].toInt() == -6 || d["mesh"].toInt() == -7  ? 7
+                     : d["label"].toBool()                                 ? 1
                      : name == "Frosted_Polymer" || name == "Optical_Film" ? 3
-                     : name == "Ivory_Edges"                            ? 4
-                     : name == "Optical_Diffuser"                       ? 5
+                     : name == "Ivory_Edges"                               ? 4
+                     : name == "Optical_Diffuser"                          ? 5
                      : (name.startsWith("Optical_Film") || name.startsWith("Optical_Glass") ||
-                        name == "Optical_Bridge_Glass")                  ? 9
+                        name == "Optical_Bridge_Glass")
+                         ? 9
                      : !d["instanced"].toBool() && !d["floor"].toBool() ? 2
                                                                         : 0;
         if (tint) {
@@ -544,8 +534,8 @@ class Renderer {
         // 之前因为没有折射路径被整层丢弃，画面就少了一层。
         // 只丢弃确实会穿帮的部件；Optical_Edges / Subsurface_Optics / Optical_Film_Edge
         // 是最外那层透明光学包裹，丢掉它们外壳会少一层，必须保留。
-        static const QStringList removed = {"Internal_Ceramic", "Amber_Optical_Inlay",
-                                            "Champagne_Index",  "Printed_Label"};
+        static const QStringList removed = {"Internal_Ceramic", "Amber_Optical_Inlay", "Champagne_Index",
+                                            "Printed_Label"};
         QList<QJsonObject> result;
         for (auto v : f["draws"].toArray()) {
             auto d = v.toObject();
@@ -670,8 +660,8 @@ class Renderer {
             // 覆盖同一 key 时退休的是该 key 的旧对象，而非上一首当前曲目的对象。
             retire(labels.take(key));
             // 与主渲染路径一致：绘制按 1024×440 排版，上传前减半以匹配实际屏幕尺寸。
-            const auto label = glyphs->label(value).scaled(512, 220, Qt::IgnoreAspectRatio,
-                                                           Qt::SmoothTransformation);
+            const auto label =
+                glyphs->label(value).scaled(512, 220, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
             labels[key] = texture(label.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
             uploadMipped(labels[key], label);
             labelRevisions[key] = labelRevision;
@@ -1108,9 +1098,8 @@ class Renderer {
                 QRhiTexture *originalActor = nullptr) {
         transient.clear();
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
-            qWarning("optical render mode=%s size=%dx%d actor=%d",
-                     qPrintable(frame["mode"].toString()), dimensions.width(), dimensions.height(),
-                     originalActor != nullptr ? 1 : 0);
+            qWarning("optical render mode=%s size=%dx%d actor=%d", qPrintable(frame["mode"].toString()),
+                     dimensions.width(), dimensions.height(), originalActor != nullptr ? 1 : 0);
         }
         if (!updates) {
             updates = rhi->nextResourceUpdateBatch();
@@ -1150,13 +1139,11 @@ class Renderer {
         auto data = prepare(draws, frame["mode"].toString() == "detail");
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
             for (const auto &draw : data) {
-                std::fprintf(stderr,
-                             "draw #%02d %-26s mesh=%d type=%.0f side=%.0f opacity=%.2f transparent=%d\n",
-                             draw.data["debugIndex"].toInt(),
-                             qPrintable(draw.data["name"].toString()), draw.data["mesh"].toInt(),
-                             surface(draw.data).flags.x(), draw.data["side"].toDouble(),
-                             draw.data["opacity"].toDouble(),
-                             draw.data["transparent"].toBool() ? 1 : 0);
+                std::fprintf(
+                    stderr, "draw #%02d %-26s mesh=%d type=%.0f side=%.0f opacity=%.2f transparent=%d\n",
+                    draw.data["debugIndex"].toInt(), qPrintable(draw.data["name"].toString()),
+                    draw.data["mesh"].toInt(), surface(draw.data).flags.x(), draw.data["side"].toDouble(),
+                    draw.data["opacity"].toDouble(), draw.data["transparent"].toBool() ? 1 : 0);
             }
             std::fflush(stderr);
         }
@@ -1293,12 +1280,15 @@ class ItemRenderer : public QQuickRhiItemRenderer {
     }
     void render(QRhiCommandBuffer *cb) override {
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
-            std::fprintf(stderr, "optical item render empty=%d mode=%s time=%.2f\n",
-                         frame.isEmpty() ? 1 : 0, qPrintable(frame["mode"].toString()),
-                         frame["time"].toDouble());
+            std::fprintf(stderr, "optical item render empty=%d mode=%s time=%.2f\n", frame.isEmpty() ? 1 : 0,
+                         qPrintable(frame["mode"].toString()), frame["time"].toDouble());
             std::fflush(stderr);
         }
-        if (frame.isEmpty() || (frame["mode"] == "boot" && frame["time"].toDouble() < 21.9)) {
+        // 系统可能先请求绘制再生成首帧，相机未就绪时只清空目标，禁止读取空矩阵。
+        const bool cameraReady = frame.value("projection").toArray().size() == 16 &&
+                                 frame.value("aoProjection").toArray().size() == 16 &&
+                                 frame.value("view").toArray().size() == 16;
+        if (!cameraReady || (frame.value("mode") == "boot" && frame.value("time").toDouble() < 21.9)) {
             cb->beginPass(renderTarget(), Qt::transparent, {1, 0});
             cb->endPass();
             return;

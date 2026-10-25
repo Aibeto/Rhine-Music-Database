@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createUpdateFeed } = require('../../scripts/create-update-feed.cjs');
-const { buildVersion, packageIdentity } = require('../../scripts/release-version.cjs');
+const { buildVersion, packageIdentity, distributionPlatforms } = require('../../scripts/release-version.cjs');
 assert.deepEqual(buildVersion('v1.10.2'), { version: '1.10.2', release: true });
 assert.deepEqual(buildVersion('2.0.0'), { version: '2.0.0', release: true });
 assert.equal(buildVersion('').release, false);
@@ -20,12 +20,12 @@ console.log('Release version injection checks passed');
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), 'rhine-update-feed-'));
 try {
     const contents = Buffer.from('local distribution fixture');
-    for (const platform of ['macOS-arm64.zip', 'Windows-x64-Setup.exe', 'Linux-x86_64.AppImage']) {
+    for (const platform of distributionPlatforms) {
         fs.writeFileSync(path.join(temporary, `RhineMusicDatabase-v1.2.3-${platform}`), contents);
     }
     const feed = createUpdateFeed(temporary, 'v1.2.3');
     assert.equal(feed.tag_name, 'v1.2.3');
-    assert.equal(feed.assets.length, 3);
+    assert.equal(feed.assets.length, 4);
     assert.deepEqual(JSON.parse(fs.readFileSync(path.join(temporary, 'update.json'))), feed);
     for (const asset of feed.assets) {
         assert.equal(asset.size, contents.length);

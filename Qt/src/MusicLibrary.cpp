@@ -20,6 +20,9 @@ MusicLibrary::MusicLibrary(Host *host, const QJsonObject &content, QObject *pare
     if (!QStringList{"netease", "qq", "kugou", "local"}.contains(provider)) {
         provider = "netease";
     }
+    if (provider == "local" && !PlatformFeatures::LocalMusic) {
+        provider = "netease";
+    }
     api.provider = provider;
     host->setProvider(provider);
     for (const auto &source : {"netease", "qq"}) {
@@ -27,7 +30,7 @@ MusicLibrary::MusicLibrary(Host *host, const QJsonObject &content, QObject *pare
     }
     identityNames["kugou"] = host->preference("welcome-name-kugou-" + kugouEdition);
     restoreCachedAccount();
-    local = std::make_unique<LocalMusicLibrary>(QString(), host->offline);
+    local = std::make_unique<LocalMusicLibrary>(QString(), host->offline || !PlatformFeatures::LocalMusic);
     connect(local.get(), &LocalMusicLibrary::changed, this, [this] {
         if (isLocal()) {
             refreshLocal();
@@ -947,6 +950,9 @@ void MusicLibrary::playDirectory() {
 }
 
 void MusicLibrary::playOfficial(QJsonObject value) {
+    if (!PlatformFeatures::OfficialPlayback) {
+        return;
+    }
     if (isLocal()) {
         return;
     }

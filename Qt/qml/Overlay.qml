@@ -10,7 +10,7 @@ import Rhine.Native 1.0
 // 与原 Main.qml 的差异只有两类，且都不改变行为：
 //   1. 原来读 root.stageScale / root.stageWidth / root.height / root.visibility 的地方，
 //      改成自身属性或宿主注入（见下面的 stageScale/stageWidth/hostWindow/frameless）。
-//   2. 原来被 Main.qml 用 id 直接引用的 inputLayer / accountField / passwordField，
+//   2. 原来被 Main.qml 用 id 直接引用的 inputLayer / accountField / captchaField，
 //      现在在组件内部，宿主改为调用 focusInputLayer() / clearCredentials()。
 Item {
     id: overlay
@@ -28,6 +28,7 @@ Item {
     // 不叫 window 是因为 Item 已有 window 属性（QQuickItem::window()），重名会冲突。
     property Window hostWindow: null
     property bool frameless: false
+    readonly property bool ios: Qt.platform.os === "ios"
 
     // 原 Main.qml 直接引用组件内部的 id，拆层后改为函数调用，效果等价。
     function focusInputLayer() {
@@ -35,9 +36,15 @@ Item {
     }
     function clearCredentials() {
         accountField.text = "";
-        passwordField.text = "";
+        captchaField.text = "";
     }
 
+    Connections {
+        target: rhine
+        function onClearCredentials() {
+            overlay.clearCredentials();
+        }
+    }
     Hud {
         anchors.fill: parent
         engine: rhine
@@ -124,7 +131,14 @@ Item {
                     onEntered: rhine.pointer("pointerleave", 0, 0)
                     onPressed: {
                         inputLayer.forceActiveFocus();
-                        rhine.action(modelData.action);
+                        if (!overlay.ios) {
+                            rhine.action(modelData.action);
+                        }
+                    }
+                    onClicked: {
+                        if (overlay.ios) {
+                            rhine.action(modelData.action);
+                        }
                     }
                     onWheel: function (wheel) {
                         var p = mapToItem(inputLayer, wheel.x, wheel.y);
@@ -135,10 +149,14 @@ Item {
             }
         }
     }
-    // 密码只在输入组件和单次登录请求中短暂存在，提交后立即清空。
+    IOSInput {
+        stage: overlay
+        backend: rhine
+    }
+    // 验证码只在输入组件和单次登录请求中短暂存在，提交后立即清空。
     Item {
         id: formFields
-        visible: rhine.state.modal === "playlist-form" || (rhine.state.modal === "login" && (rhine.state.loginMethod === "phone" || rhine.state.loginMethod === "email"))
+        visible: rhine.state.modal === "playlist-form" || (rhine.state.modal === "login" && rhine.state.loginMethod === "phone")
         x: (rhine.state.inputX || 0) * overlay.stageScale
         y: (rhine.state.modalOffset || 0) * overlay.stageScale
         width: (rhine.state.inputWidth || 0) * overlay.stageScale
@@ -146,19 +164,22 @@ Item {
         opacity: rhine.state.modalOpacity || 0
         onVisibleChanged: {
             accountField.text = "";
-            passwordField.text = "";
+            captchaField.text = "";
             if (visible) {
                 accountField.forceActiveFocus();
             }
         }
         function submit() {
-            rhine.submitForm(accountField.text, passwordField.text);
-            passwordField.text = "";
+            if (rhine.state.modal === "login" && rhine.state.loginBusy) {
+                return;
+            }
+            rhine.submitForm(accountField.text, captchaField.text);
+            captchaField.text = "";
         }
         Rectangle {
             x: 0
             y: 430 * overlay.stageScale
-            width: parent.width
+            width: rhine.state.modal === "login" ? parent.width - 180 * overlay.stageScale : parent.width
             height: 55 * overlay.stageScale
             color: rhine.state.dark ? "#30312b" : "#d9d8ce"
         }
@@ -167,22 +188,51 @@ Item {
             objectName: "accountField"
             x: 14 * overlay.stageScale
             y: 430 * overlay.stageScale
-            width: parent.width - 28 * overlay.stageScale
+            width: parent.width - (rhine.state.modal === "login" ? 208 : 28) * overlay.stageScale
             height: 55 * overlay.stageScale
             verticalAlignment: TextInput.AlignVCenter
             color: rhine.state.dark ? "#eeeeeb" : "#161914"
             font.pixelSize: 19 * overlay.stageScale
             cursorVisible: activeFocus && !rhine.performance.idle
-            maximumLength: 100
-            Accessible.name: rhine.state.modal === "playlist-form" ? "歌单名称" : "登录账号"
+            maximumLength: rhine.state.modal === "login" ? 11 : 100
+            enabled: rhine.state.modal !== "login" || !rhine.state.loginBusy
+            inputMethodHints: rhine.state.modal === "login" ? Qt.ImhDigitsOnly : Qt.ImhNone
+            Accessible.name: rhine.state.modal === "playlist-form" ? "歌单名称" : "手机号码"
             Keys.onReturnPressed: {
                 if (rhine.state.modal !== "login") {
                     formFields.submit();
                 } else {
-                    passwordField.forceActiveFocus();
+                    captchaField.forceActiveFocus();
                 }
             }
             Keys.onEscapePressed: rhine.action("close-modal")
+        }
+        Rectangle {
+            visible: rhine.state.modal === "login"
+            x: parent.width - width
+            y: 430 * overlay.stageScale
+            width: 170 * overlay.stageScale
+            height: 55 * overlay.stageScale
+            enabled: !rhine.state.loginBusy && rhine.state.smsRetrySeconds === 0 && accountField.text.length === 11
+            color: "#777b60"
+            opacity: enabled ? 1 : 0.5
+            Text {
+                anchors.centerIn: parent
+                text: rhine.state.smsRetrySeconds > 0 ? rhine.state.smsRetrySeconds + " 秒后重发" : "发送验证码"
+                color: "#f0eee5"
+                font.pixelSize: 14 * overlay.stageScale
+            }
+            Accessible.role: Accessible.Button
+            Accessible.name: "发送短信验证码"
+            Accessible.onPressAction: {
+                if (enabled) {
+                    rhine.sendLoginCode(accountField.text);
+                }
+            }
+            MouseArea {
+                anchors.fill: parent
+                onClicked: rhine.sendLoginCode(accountField.text)
+            }
         }
         Rectangle {
             visible: rhine.state.modal === "login"
@@ -193,8 +243,8 @@ Item {
             color: rhine.state.dark ? "#30312b" : "#d9d8ce"
         }
         TextInput {
-            id: passwordField
-            objectName: "passwordField"
+            id: captchaField
+            objectName: "captchaField"
             visible: rhine.state.modal === "login"
             x: 14 * overlay.stageScale
             y: 541 * overlay.stageScale
@@ -204,18 +254,21 @@ Item {
             color: rhine.state.dark ? "#eeeeeb" : "#161914"
             font.pixelSize: 19 * overlay.stageScale
             cursorVisible: activeFocus && !rhine.performance.idle
-            maximumLength: 256
-            echoMode: TextInput.Password
-            Accessible.name: "密码"
+            maximumLength: 8
+            enabled: !rhine.state.loginBusy
+            inputMethodHints: Qt.ImhDigitsOnly | Qt.ImhSensitiveData
+            Accessible.name: "短信验证码"
             Keys.onReturnPressed: formFields.submit()
             Keys.onEscapePressed: rhine.action("close-modal")
         }
         Rectangle {
             x: parent.width - width
             y: (rhine.state.modal === "login" ? 611 : 530) * overlay.stageScale
+            enabled: rhine.state.modal !== "login" || !rhine.state.loginBusy
             width: 170 * overlay.stageScale
             height: 36 * overlay.stageScale
             color: "#777b60"
+            opacity: enabled ? 1 : 0.5
             Text {
                 anchors.centerIn: parent
                 text: rhine.state.modal === "login" ? "登录 →" : "保存 →"
@@ -232,7 +285,7 @@ Item {
         }
     }
     Repeater {
-        model: ["seek", "volume"]
+        model: overlay.ios ? ["seek"] : ["seek", "volume"]
         delegate: MouseArea {
             required property string modelData
             property var region: rhine.state[modelData]
@@ -253,7 +306,6 @@ Item {
             }
         }
     }
-
     Rectangle {
         visible: searchInput.visible
         x: searchInput.x
@@ -307,7 +359,6 @@ Item {
             color: "#777777"
         }
     }
-
     // WindowChrome 依赖真实 Window（visibility/showMinimized/startSystemMove）。
     // 用 Loader 判空而不是直接实例化：FG 路径没有可见窗口，直接创建会让
     // window.visibility 变成空引用并每帧刷 TypeError。默认路径下 hostWindow 在
@@ -319,6 +370,7 @@ Item {
         active: overlay.hostWindow !== null
         sourceComponent: WindowChrome {
             window: overlay.hostWindow
+            onMinimizeRequested: rhine.minimizeWindow()
             enabled: overlay.frameless
             visible: enabled && overlay.hostWindow.visibility !== Window.FullScreen
             dark: rhine.state.dark === true

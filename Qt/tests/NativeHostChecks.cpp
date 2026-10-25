@@ -3,6 +3,10 @@
 #include <QElapsedTimer>
 #include <QThread>
 
+#ifdef Q_OS_IOS
+bool runIOSBridgeChecks(const QString &root);
+#endif
+
 namespace {
 bool waitFor(const std::function<bool()> &ready) {
     QElapsedTimer elapsed;
@@ -25,6 +29,9 @@ bool runNativeHostChecks(const QString &root) {
     };
     int replies = 0;
     bool ok = true;
+#ifdef Q_OS_IOS
+    ok &= runIOSBridgeChecks(root);
+#endif
     const auto receive = [&](QJsonObject response, QString error) {
         ++replies;
         ok &= error.isEmpty() && response["body"].toObject()["query"] == "native" &&
@@ -61,8 +68,15 @@ bool runNativeHostChecks(const QString &root) {
     ok &= host.image("current-cover") == largeCover && host.image("playing-cover") == largeCover;
     bool invalidId = false;
     bool official = false;
+#ifdef Q_OS_IOS
+    host.playOfficial("invalid", [&](QString error) { invalidId = error == "当前平台仅支持面板内播放"; });
+    host.playOfficial("42", [&](QString value) { official = value == "当前平台仅支持面板内播放"; });
+    host.mediaControl("volume", 0.2);
+    ok &= host.mediaState()["volume"].toDouble() == 1.0;
+#else
     host.playOfficial("invalid", [&](QString error) { invalidId = error == "请先选择一首歌曲"; });
     host.playOfficial("42", [&](QString value) { official = value == "OFFLINE_PLAY:42"; });
+#endif
     ok &= invalidId && official;
 
     bool delayed = false;

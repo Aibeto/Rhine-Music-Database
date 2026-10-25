@@ -9,6 +9,9 @@
 #include <QQuickWindow>
 #include <QDebug>
 #include <cstdlib>
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+#include <QSystemTrayIcon>
+#endif
 
 /**
  * UI 核心功能回归测试
@@ -20,6 +23,9 @@
 bool runSceneEnhancementChecks(Engine &backend, QQuickWindow *window, const QString &output);
 
 namespace {
+// 为原生全屏与最小化动画留出稳定时间
+constexpr int WINDOW_TRANSITION_WAIT_MS = 1200;
+
 void settle(int milliseconds = 150) {
     QElapsedTimer wait;
     wait.start();
@@ -219,12 +225,12 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     // === 测试 12: 全屏切换 ===
     const auto initialVisibility = window->visibility();
     backend.toggleFullscreen();
-    settle();
+    settle(WINDOW_TRANSITION_WAIT_MS);
     const auto fullscreenVisibility = window->visibility();
     check(fullscreenVisibility != initialVisibility, "fullscreen toggle");
 
     backend.toggleFullscreen();
-    settle();
+    settle(WINDOW_TRANSITION_WAIT_MS);
     check(window->visibility() == initialVisibility, "fullscreen restore");
 
     // Tab 仅切换信息展示；开关前后保持默认背景构图与实际投影完全一致。

@@ -28,8 +28,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
     if (name == "slot") {
         const auto directory = music.directory;
         if (directory && !directory->songs.isEmpty()) {
-            const auto index =
-                directory->page + wrap(music.selectedLane * 8 + last - directory->anchor, 40);
+            const auto index = directory->page + wrap(music.selectedLane * 8 + last - directory->anchor, 40);
             if (index >= directory->songs.size() && directory->cursor < directory->ids.size()) {
                 music.loadDirectoryPage(index);
             } else {
@@ -223,8 +222,14 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
             }
         });
     } else if (name == "login-method") {
+        const auto method = parts.value(2);
+        const bool supported = method == "qr" || (music.provider == "netease" && method == "phone") ||
+                               (music.provider == "qq" && method == "wechat");
+        if (!supported) {
+            return;
+        }
         music.cancelLogin();
-        music.loginMethod = parts.value(2);
+        music.loginMethod = method;
         music.loginStatus.clear();
         if (QStringList{"qr", "wechat"}.contains(music.loginMethod)) {
             music.startLogin();

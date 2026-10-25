@@ -1,6 +1,14 @@
 const { execFileSync } = require('node:child_process');
 const path = require('node:path');
 
+// 发布标识
+const distributionPlatforms = [
+    'macOS-arm64.zip',
+    'Windows-x64-Setup.exe',
+    'Linux-x86_64.AppImage',
+    'ios-unsigned.ipa',
+];
+
 /** 发布 tag 在编译前确定；普通构建明确标记为开发版，避免缓存上次的发布身份。 */
 function buildVersion(value = process.env.RHINE_VERSION) {
     if (!value) {
@@ -29,4 +37,4 @@ function packageIdentity(version = buildVersion()) {
     return version.release ? `v${version.version}` : version.commitSha;
 }
 
-module.exports = { buildVersion, packageIdentity };
+module.exports = { buildVersion, packageIdentity, distributionPlatforms };

@@ -71,7 +71,9 @@ QString AppUpdater::commitTitle() {
 }
 QString AppUpdater::platformAsset() {
     const auto arch = QSysInfo::buildCpuArchitecture();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_IOS
+    return QStringLiteral("ios-unsigned.ipa");
+#elif defined(Q_OS_MACOS)
     return arch == "arm64" ? "macOS-arm64.zip" : QString();
 #elif defined(Q_OS_WIN)
     return arch == "x86_64" ? "Windows-x64-Setup.exe" : QString();

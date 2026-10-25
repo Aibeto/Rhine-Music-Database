@@ -33,7 +33,7 @@ void platformSetActivates(bool value) {
 }
 #endif
 
-#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN)
+#if !defined(Q_OS_MACOS) && !defined(Q_OS_WIN) && !defined(Q_OS_IOS)
 void platformMediaCommands(std::function<void(QString)>) {
 }
 void platformMediaInfo(QString, QString, QString, QVariantMap) {

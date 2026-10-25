@@ -92,13 +92,13 @@ function api(method, route, body, file) {
 }
 
 try {
-    for (const platform of ['macOS-arm64.zip', 'Windows-x64-Setup.exe', 'Linux-x86_64.AppImage']) {
+    for (const platform of require('../../scripts/release-version.cjs').distributionPlatforms) {
         fs.writeFileSync(path.join(directory, `RhineMusicDatabase-${options.tag}-${platform}`), platform);
     }
     createUpdateFeed(directory, options.tag, options.repository);
     const result = publishRelease(options, api);
     assert.equal(result.draft, false);
-    assert.equal(assets.length, 4);
+    assert.equal(assets.length, 5);
     assert.equal(calls.filter((call) => call.method === 'PATCH').length, 1);
     for (const failure of ['corrupt', 'missing']) {
         mode = failure;

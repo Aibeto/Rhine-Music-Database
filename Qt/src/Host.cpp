@@ -60,15 +60,15 @@ Host::Host(QString path, bool test, QObject *parent)
     }
     connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
             [this] { emit invalidated(); });
-    connect(&child, &QProcess::started, this, [this] {
+    connect(&child, &BridgeProcess::started, this, [this] {
         const auto keys = pending.values();
         pending.clear();
         for (const auto &key : keys) {
             send(key);
         }
     });
-    connect(&child, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        if (error != QProcess::FailedToStart) {
+    connect(&child, &BridgeProcess::errorOccurred, this, [this](BridgeProcess::ProcessError error) {
+        if (error != BridgeProcess::FailedToStart) {
             return;
         }
         const auto keys = pending.values();
@@ -77,7 +77,7 @@ Host::Host(QString path, bool test, QObject *parent)
             finish(key, {}, QStringLiteral("音乐服务组件缺失，请重新构建应用"));
         }
     });
-    connect(&child, &QProcess::readyReadStandardOutput, this, [this] {
+    connect(&child, &BridgeProcess::readyReadStandardOutput, this, [this] {
         buffer += child.readAllStandardOutput();
         if (buffer.size() >= 32 * 1024 * 1024) {
             child.kill();
@@ -95,7 +95,7 @@ Host::Host(QString path, bool test, QObject *parent)
             }
         }
     });
-    connect(&child, &QProcess::finished, this, [this] {
+    connect(&child, &BridgeProcess::finished, this, [this] {
         const auto keys = pending.values();
         pending.clear();
         buffer.clear();
@@ -320,12 +320,17 @@ void Host::send(QString key) {
         });
         return;
     }
-    if (child.state() == QProcess::NotRunning) {
+    if (child.state() == BridgeProcess::NotRunning) {
         temporary = std::make_unique<QTemporaryDir>(AppStorage::temporaryDirectory() + "/rhine-music-XXXXXX");
         if (!temporary->isValid()) {
             finish(key, {}, "无法创建音乐服务临时目录");
             return;
         }
+#ifdef Q_OS_IOS
+        pending.insert(work.id, key);
+        child.start(root, temporary->path(), kugouEdition);
+        return;
+#else
         QProcessEnvironment env;
 #ifdef Q_OS_WIN
         const auto system = QProcessEnvironment::systemEnvironment();
@@ -353,7 +358,7 @@ void Host::send(QString key) {
         child.setProcessEnvironment(env);
         // 子进程的工作目录改到应用自己的系统临时目录
         child.setWorkingDirectory(temporary->path());
-        child.setStandardErrorFile(QProcess::nullDevice());
+        child.setStandardErrorFile(BridgeProcess::nullDevice());
         // 平台选择放在宏调用外，避免 MSVC 将条件编译指令当作宏参数。
 #ifdef Q_OS_WIN
         const auto nodeName = QStringLiteral("node.exe");
@@ -362,9 +367,10 @@ void Host::send(QString key) {
 #endif
         pending.insert(work.id, key);
         child.start(root + "/MusicBridge/" + nodeName, {root + "/MusicBridge/worker.cjs"});
+#endif
         return;
     }
-    if (child.state() == QProcess::Starting) {
+    if (child.state() == BridgeProcess::Starting) {
         pending.insert(work.id, key);
         return;
     }
@@ -546,7 +552,7 @@ void Host::setKugouEdition(QString edition) {
     cache.clear();
     images.clear();
     coverFlights.clear();
-    if (child.state() != QProcess::NotRunning) {
+    if (child.state() != BridgeProcess::NotRunning) {
         child.kill();
         child.waitForFinished(1000);
     }
@@ -589,7 +595,7 @@ void Host::logout() {
     ++epoch;
     privateCredentials.clear();
     // 结束进程同时关闭 QQ 的扫码长连接；另一平台的持久凭据仍保留。
-    if (child.state() != QProcess::NotRunning) {
+    if (child.state() != BridgeProcess::NotRunning) {
         child.kill();
         child.waitForFinished(1000);
     }
@@ -827,6 +833,10 @@ void Host::fixtureImage(const QString &key, const QImage &image) {
     }
 }
 void Host::playOfficial(QString id, TextReply callback) {
+    if (!PlatformFeatures::OfficialPlayback) {
+        callback(QStringLiteral("当前平台仅支持面板内播放"));
+        return;
+    }
     if (!QRegularExpression("^[0-9]{1,20}$").match(id).hasMatch()) {
         callback("请先选择一首歌曲");
         return;
@@ -853,6 +863,9 @@ bool Host::mediaLoad(QString url, bool alternative, double position, bool paused
     return audio->load(url, offline, alternative, provider, position, paused);
 }
 void Host::mediaControl(QString action, double value) {
+    if (action == "volume" && !PlatformFeatures::ApplicationVolume) {
+        value = 1.0;
+    }
     if (!audio && action == "volume") {
         audio = std::make_unique<AudioPlayer>([this] { emit mediaChanged(); });
         audio->diagnosticEvent = [this](const QString &event, const QJsonObject &values) {
@@ -907,46 +920,16 @@ namespace {
 // 为空，界面上的表现就是"设置完立刻跳回原值"。
 const QStringList &preferenceKeys() {
     static const QStringList keys{
-        "search-history",
-        "play-history",
-        "local-cover-cache",
-        "theme",
-        "motion",
-        "startup-animation",
-        "detail-autoplay",
-        "single-play-mode",
-        "disc-rotation",
-        "scene-enhancement",
-        "archive-mask-strength",
+        "search-history", "play-history", "local-cover-cache", "theme", "motion", "startup-animation",
+        "detail-autoplay", "single-play-mode", "disc-rotation", "scene-enhancement", "archive-mask-strength",
         "graphics-backend",
         // Linux 显卡选择：存的是 /sys/class/drm 里 cardN 的序号（0 基），不是型号。
         // 换卡后序号可能指向另一张卡或不存在，启动时由 initializeLinuxGraphics 校验并回退。
-        "gpu-index",
-        "vsync",
-        "supersample",
-        "render-scale",
-        "aa-mode",
-        "aa-scale",
-        "msaa",
-        "fsr-quality",
-        "fsr-sharpness",
-        "fg",
-        "auto-update",
-        "volume",
-        "quality",
-        "alternate-source",
-        "provider",
-        "lyrics-cache",
-        "welcome-name-netease",
-        "welcome-name-qq",
-        "welcome-name-kugou",
-        "account-id-netease",
-        "account-id-qq",
-        "account-id-kugou",
-        "kugou-edition",
-        "welcome-name-kugou-standard",
-        "welcome-name-kugou-lite",
-        "account-id-kugou-standard",
+        "gpu-index", "vsync", "supersample", "render-scale", "aa-mode", "aa-scale", "msaa", "fsr-quality",
+        "fsr-sharpness", "fg", "auto-update", "volume", "quality", "alternate-source", "provider",
+        "lyrics-cache", "lyrics-global-offset-ms", "welcome-name-netease", "welcome-name-qq",
+        "welcome-name-kugou", "account-id-netease", "account-id-qq", "account-id-kugou", "kugou-edition",
+        "welcome-name-kugou-standard", "welcome-name-kugou-lite", "account-id-kugou-standard",
         "account-id-kugou-lite"};
     return keys;
 }
@@ -1002,7 +985,7 @@ void Host::shutdown() {
     audio.reset();
     disconnect(&child, nullptr, this, nullptr);
     child.closeWriteChannel();
-    if (child.state() != QProcess::NotRunning) {
+    if (child.state() != BridgeProcess::NotRunning) {
         child.terminate();
         if (!child.waitForFinished(2000)) {
             child.kill();

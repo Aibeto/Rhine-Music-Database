@@ -87,7 +87,9 @@ class MusicLibrary : public QObject {
     void restoreIdentityName();
     void startLogin();
     void cancelLogin(Completion done = {});
-    void passwordLogin(QString method, QString account, QString password);
+    void sendLoginCode(QString phone);
+    void captchaLogin(QString phone, QString captcha);
+    int smsRetrySeconds() const;
     void logout();
     int loginRetrySeconds() const;
     bool canRegenerateLogin() const;
@@ -207,6 +209,7 @@ class MusicLibrary : public QObject {
     quint64 m_subscriptionGeneration = 0;
     quint64 m_loginGeneration = 0;
     quint64 m_cooldownGeneration = 0;
+    qint64 m_smsRetryAtMs = 0;
     MusicApi m_identityApi;
     MusicApi::Valid valid(quint64 token, const quint64 *counter);
     void loadCover(const QJsonObject &value);
@@ -222,7 +225,8 @@ class MusicLibrary : public QObject {
     void updateLoginCooldown(QString source, Cooldown cooldown);
     void prepareQR(quint64 token);
     void pollQR(quint64 token, int count);
-    void confirmLogin(quint64 token, bool password = false);
+    void confirmLogin(quint64 token, bool captcha = false);
+    void updateSmsCooldown();
     void failLogin(const MusicReply &result);
     void waitCancellation(QString provider, Completion done);
 };

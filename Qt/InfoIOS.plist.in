@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <key>CFBundleExecutable</key><string>RhineMusicDatabase</string>
+        <key>CFBundleIdentifier</key><string>@RHINE_APPLICATION_ID@</string>
+        <key>CFBundleName</key><string>RHINE MUSIC DATABASE</string>
+        <key>CFBundleDisplayName</key><string>RHINE MUSIC DATABASE</string>
+        <key>CFBundlePackageType</key><string>APPL</string>
+        <key>CFBundleVersion</key><string>@PROJECT_VERSION@</string>
+        <key>CFBundleShortVersionString</key><string>@PROJECT_VERSION@</string>
+        <key>CFBundleIcons</key>
+        <dict>
+            <key>CFBundlePrimaryIcon</key>
+            <dict>
+                <key>CFBundleIconFiles</key>
+                <array>
+                    <string>app-icon-120</string>
+                    <string>app-icon-180</string>
+                </array>
+            </dict>
+        </dict>
+        <key>CFBundleIcons~ipad</key>
+        <dict>
+            <key>CFBundlePrimaryIcon</key>
+            <dict>
+                <key>CFBundleIconFiles</key>
+                <array>
+                    <string>app-icon-76</string>
+                    <string>app-icon-152</string>
+                    <string>app-icon-167</string>
+                </array>
+            </dict>
+        </dict>
+        <key>LSRequiresIPhoneOS</key><true/>
+        <key>UIRequiresFullScreen</key><true/>
+        <key>MinimumOSVersion</key><string>18.0</string>
+        <key>UILaunchScreen</key><dict/>
+        <key>UIBackgroundModes</key><array><string>audio</string></array>
+        <key>UISupportedInterfaceOrientations</key>
+        <array>
+            <string>UIInterfaceOrientationLandscapeLeft</string>
+            <string>UIInterfaceOrientationLandscapeRight</string>
+        </array>
+        <key>UISupportedInterfaceOrientations~ipad</key>
+        <array>
+            <string>UIInterfaceOrientationLandscapeLeft</string>
+            <string>UIInterfaceOrientationLandscapeRight</string>
+        </array>
+    </dict>
+</plist>
