@@ -274,6 +274,7 @@ qt_add_resources(
     Assets/icons/icon-512.png
     Assets/icons/icon-1024.png)
 # 着色器按原通道顺序打包，所有后端使用同一份公式。
+# GLSL 130 兼容 Windows 随包的软件 OpenGL，其他后端仍保留原有版本。
 qt_add_shaders(
     RhineMusicDatabase
     "rhine_shaders"
@@ -282,7 +283,7 @@ qt_add_shaders(
     BASE
     "Qt/shaders"
     GLSL
-    "150,300es"
+    "130,150,300es"
     HLSL
     50
     MSL
@@ -307,7 +308,7 @@ qt_add_shaders(
     BASE
     "Qt/shaders/enhancement"
     GLSL
-    "150,300es"
+    "130,150,300es"
     HLSL
     50
     MSL
