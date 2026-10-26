@@ -33,7 +33,12 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     dark = themeMode == "system" ? host->systemDark() : themeMode == "dark";
     reduced = host->preference("motion") == "reduced";
     startupAnimation = host->preference("startup-animation") == "on";
+#ifdef Q_OS_MACOS
+    // macOS 的呈现节奏由系统合成器固定，设置页不提供该开关，状态恒为关闭。
+    vsync = false;
+#else
     vsync = host->preference("vsync") != "off";
+#endif
     discRotation = host->preference("disc-rotation") == "on";
     sceneEnhancement = host->preference("scene-enhancement") != "off";
     bool hasMaskStrength = false;
@@ -680,7 +685,11 @@ void NativeHud::action(QString value) {
         const auto mode = value.mid(8);
         // fsr 是合并后的唯一超分选项；fsr1 / fsr3 仍接受，兼容旧偏好。
         if (mode == "off" || mode == "fxaa" || mode == "ssaa" || mode == "msaa" || mode == "taa" ||
-            mode == "fsr" || mode == "fsr1" || mode == "fsr3") {
+            mode == "fsr" || mode == "fsr1" || mode == "fsr3"
+#ifdef Q_OS_MACOS
+            || mode == "metalfx"
+#endif
+        ) {
             m_host->setPreference("aa-mode", mode);
             qputenv("RHINE_AA_MODE", mode.toUtf8());
             // 选中即收起，与原生下拉菜单的行为一致。
@@ -728,8 +737,12 @@ void NativeHud::action(QString value) {
         startupAnimation = !startupAnimation;
         m_host->setPreference("startup-animation", startupAnimation ? "on" : "off");
     } else if (value == "vsync") {
+#ifdef Q_OS_MACOS
+        // macOS 固定关闭垂直同步，设置页不显示该行；外部动作也不改变任何状态。
+#else
         vsync = !vsync;
         m_host->setPreference("vsync", vsync ? "on" : "off");
+#endif
     } else if (value == "motion") {
         reduced = !reduced;
         m_scene.reduced(reduced);

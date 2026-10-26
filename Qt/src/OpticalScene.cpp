@@ -1,4 +1,9 @@
 #include "OpticalScene.h"
+#ifdef Q_OS_MACOS
+#include "render/MetalFxBackend.h"
+#include "render/MotionPass.h"
+#include "fg/FgCapability.h"
+#endif
 #include <cstdio>
 #include "DiscGeometry.h"
 #include "Engine.h"
@@ -142,6 +147,15 @@ struct Target {
 class Renderer {
   public:
     QRhi *rhi;
+#ifdef Q_OS_MACOS
+    RhineRender::Settings settings;
+    QJsonObject temporalFrame;
+    RhineFg::FrameInputs *frameInputs = nullptr;
+    std::unique_ptr<RhineRender::MotionPass> motion;
+    std::unique_ptr<RhineRender::MetalFxTemporal> metalFx;
+    QString implementation = QStringLiteral("off");
+    QRhiTexture *postColor = nullptr;
+#endif
     QString root;
     std::vector<std::unique_ptr<QRhiResource>> resources, sized, transient;
     QHash<QString, Mesh> meshes;
@@ -408,17 +422,41 @@ class Renderer {
             state.bindings = nullptr;
         }
     }
+#ifdef Q_OS_MACOS
+    void clearPostBindings() {
+        for (auto binding : std::as_const(postBindings)) {
+            retire(binding);
+        }
+        postBindings.clear();
+        postColor = nullptr;
+    }
+#endif
     /** 仅分配颜色和深度；烘焙增强不创建实时透射、阴影、AO、景深或光晕目标。 */
     void resize(QSize value, bool needsReadbackTarget) {
+#ifdef Q_OS_MACOS
+        const auto nextSize = settings.renderSize(value);
+        if (viewSize == value && size == nextSize) {
+            return;
+        }
+#else
         if (viewSize == value) {
             return;
         }
+#endif
         viewSize = value;
+#ifdef Q_OS_MACOS
+        size = nextSize;
+#else
         // 与主渲染路径一致：RHINE_SUPERSAMPLE=2 时目标按两倍分辨率创建，合成时缩回窗口。
         const auto sample = qBound(1, qEnvironmentVariableIntValue("RHINE_SUPERSAMPLE"), 2);
         size = QSize(value.width() * sample, value.height() * sample);
+#endif
         invalidateBindings();
+#ifdef Q_OS_MACOS
+        clearPostBindings();
+#else
         postBindings.clear();
+#endif
         pipelines.clear();
         pipelineLayouts.clear();
         sized.clear();
@@ -435,6 +473,12 @@ class Renderer {
     /** 从选中壳体的原生矩阵定位光源，并将场景参数复制到本分支的独立常量缓冲区。 */
     Globals globals(QJsonObject f) {
         auto projection = matrix(f["projection"].toArray());
+#ifdef Q_OS_MACOS
+        const auto jitter = f["jitter"].toArray();
+        if (settings.temporal() && jitter.size() == 2) {
+            RhineRender::applyJitter(projection, {jitter[0].toDouble(), jitter[1].toDouble()}, size);
+        }
+#endif
         auto theme = n(f["draws"].toArray().first().toObject(), "theme");
         QMatrix4x4 emitter;
         bool hasEmitter = false;
@@ -1069,14 +1113,49 @@ class Renderer {
         }
     }
     void composite(QRhiCommandBuffer *cb, QRhiRenderTarget *destination, QRhiTexture *originalActor) {
+#ifdef Q_OS_MACOS
+        QRhiTexture *sceneColor = color.texture;
+        implementation = QStringLiteral("off");
+        if (settings.temporal()) {
+            if (!metalFx) {
+                metalFx = std::make_unique<RhineRender::MetalFxTemporal>(rhi);
+            }
+            const auto offset = temporalFrame["jitter"].toArray();
+            const QPointF jitter =
+                offset.size() == 2 ? QPointF(offset[0].toDouble(), offset[1].toDouble()) : QPointF();
+            sceneColor = metalFx->resolve(cb, color.texture, motion ? motion->depth() : nullptr,
+                                          motion ? motion->vectors() : nullptr, viewSize, jitter,
+                                          temporalFrame["temporalReset"].toBool());
+            implementation = metalFx->active() ? QStringLiteral("metalfx-temporal")
+                                               : QStringLiteral("metalfx-unavailable");
+        } else if (metalFx) {
+            clearPostBindings();
+            metalFx.reset();
+        }
+        if (postColor != sceneColor) {
+            clearPostBindings();
+            postColor = sceneColor;
+        }
+#endif
         const auto source = originalActor ? originalActor : white;
+#ifdef Q_OS_MACOS
+        auto &binding = postBindings["final/" + QString::number(quintptr(source)) + "/" +
+                                     QString::number(quintptr(sceneColor))];
+#else
         auto &binding = postBindings["final/" + QString::number(quintptr(source))];
+#endif
         if (!binding) {
             const auto stages =
                 QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage;
             binding = bindings({QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer),
                                 QRhiShaderResourceBinding::sampledTexture(
-                                    2, QRhiShaderResourceBinding::FragmentStage, color.texture, linear),
+                                    2, QRhiShaderResourceBinding::FragmentStage,
+#ifdef Q_OS_MACOS
+                                    sceneColor,
+#else
+                                    color.texture,
+#endif
+                                    linear),
                                 QRhiShaderResourceBinding::sampledTexture(
                                     3, QRhiShaderResourceBinding::FragmentStage, source, linear)});
         }
@@ -1089,6 +1168,36 @@ class Renderer {
         ++drawCalls;
         cb->endPass();
     }
+#ifdef Q_OS_MACOS
+    // 原场景与 MetalFX 共存时，只向 macOS 的独立输入槽发布，避免覆盖原 Vulkan 通道。
+    void velocityPass(QRhiCommandBuffer *cb, const QList<Draw> &draws, const QJsonObject &frame) {
+        const bool required =
+            settings.temporal() || (settings.interpolation && RhineFg::capability().interpolationAvailable);
+        if (!required) {
+            motion.reset();
+            if (frameInputs) {
+                const auto serial = frameInputs->serial;
+                *frameInputs = {};
+                frameInputs->serial = serial;
+            }
+            return;
+        }
+        if (!motion) {
+            motion = std::make_unique<RhineRender::MotionPass>(rhi);
+        }
+        QList<RhineRender::MotionDraw> inputs;
+        for (const auto &draw : draws) {
+            const auto &data = draw.data;
+            if (data["shadowOnly"].toBool() ||
+                (data["transparent"].toBool() && n(data, "transmission") <= .000001)) {
+                continue;
+            }
+            inputs.append({data["id"].toInt(), draw.vertices, draw.indices, matrixBytes(data), draw.start,
+                           draw.count, data["count"].toInt(), data["side"].toInt() == 2});
+        }
+        motion->render(cb, size, frame, inputs, frameInputs, viewSize);
+    }
+#endif
     /**
      * 仅提交一遍几何和一次最终合成；表面与邻壳柔光只读取构建时烘焙的共享贴图。
      * 帧数据和原生矩阵只读；临时绑定与实例缓冲区必须活到本帧命令提交结束。
@@ -1097,6 +1206,9 @@ class Renderer {
                 QRhiRenderTarget *finalTarget = nullptr, const Engine::MusicTextures &musicTextures = {},
                 QRhiTexture *originalActor = nullptr) {
         transient.clear();
+#ifdef Q_OS_MACOS
+        temporalFrame = frame;
+#endif
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
             qWarning("optical render mode=%s size=%dx%d actor=%d", qPrintable(frame["mode"].toString()),
                      dimensions.width(), dimensions.height(), originalActor != nullptr ? 1 : 0);
@@ -1113,7 +1225,12 @@ class Renderer {
                                     cachedCoverRevision == cover.cacheKey() &&
                                     cachedLightingEnabled == frame["opticalLightEnabled"].toBool(true) &&
                                     cachedSelectedHidden == (g.opticalLight.w() >= 1.f);
-        if (g.opticalLight.w() >= 1.f && sameBackground) {
+        if (g.opticalLight.w() >= 1.f && sameBackground
+#ifdef Q_OS_MACOS
+            && !settings.temporal()
+            && !(settings.interpolation && RhineFg::capability().interpolationAvailable) && !motion
+#endif
+        ) {
             // 只旋转唱片贴图时，原版提供新唱片像素；重复壳体沿用已绘制的背景颜色。
             cb->resourceUpdate(updates);
             updates = nullptr;
@@ -1212,6 +1329,9 @@ class Renderer {
         geometry(cb, opaque);
         geometry(cb, transparent);
         cb->endPass();
+#ifdef Q_OS_MACOS
+        velocityPass(cb, data, frame);
+#endif
         cachedGeometryRevision = geometryRevision;
         cachedItem = item;
         cachedCoverRevision = cover.cacheKey();
@@ -1296,6 +1416,10 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         if (!renderer) {
             renderer = std::make_unique<Renderer>(root, rhi());
         }
+#ifdef Q_OS_MACOS
+        renderer->settings = backend->renderConfiguration.snapshot();
+        renderer->frameInputs = &backend->metalFxInputs;
+#endif
         renderer->nativeBuffers = buffers;
         const auto previousBindings = renderer->bindingCreations;
         const auto previousUploads = renderer->coverUploads;
@@ -1310,6 +1434,10 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         }
         renderer->render(cb, frame, renderTarget()->pixelSize(), item, cover, renderTarget(), musicTextures,
                          originalActor);
+#ifdef Q_OS_MACOS
+        backend->renderTelemetry.publish(renderer->size, renderer->viewSize, 1, renderer->implementation,
+                                         true);
+#endif
         if (backend) {
             backend->recordRender(
                 renderer->resources.size() + renderer->sized.size() + renderer->transient.size(),

@@ -2,9 +2,7 @@
 #include "AppStorage.h"
 #include "Engine.h"
 #include "fg/FgCapability.h"
-#if defined(RHINE_FSR3_VULKAN) && RHINE_FSR3_VULKAN
-#include "fg/FgShell.h"
-#endif
+#include "render/PresentationShell.h"
 #include "FrameProfiler.h"
 #include "GraphicsBackend.h"
 #include "Hud.h"
@@ -119,10 +117,16 @@ static bool applyNamedBackend(const QString &requested) {
 static void selectGraphicsBackend() {
     // Qt 自己的变量优先级最高，保留它才能用 QSG_RHI_BACKEND 做后端对照。
     if (!qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND")) {
+#ifdef Q_OS_MACOS
+        RhineGraphics::setActiveBackend(qEnvironmentVariable("QSG_RHI_BACKEND").trimmed().toLower());
+#endif
         qInfo() << "QSG_RHI_BACKEND is set; keeping" << qEnvironmentVariable("QSG_RHI_BACKEND");
         return;
     }
 #if defined(Q_OS_DARWIN)
+#ifdef Q_OS_MACOS
+    RhineGraphics::setActiveBackend(QStringLiteral("metal"));
+#endif
     // Qt 在 macOS 只提供 Metal，Vulkan 需经 MoltenVK 转换层，性能低于原生 Metal。
     const auto requested = qEnvironmentVariable("RHINE_GRAPHICS").toLower();
     if (!requested.isEmpty() && requested != "auto" && requested != "metal") {
@@ -174,8 +178,15 @@ static void selectGraphicsBackend() {
 /**
  * 垂直同步：关闭时把交换链的 swapInterval 设为 0，允许帧率超过屏幕刷新率。
  * 必须在创建任何 QQuickWindow 之前写入默认格式，Qt 的 RHI 交换链会据此选择呈现模式。
+ * macOS 的 Metal 呈现由系统合成器按刷新率回收 drawable，该开关没有实际效果，
+ * 因此固定按关闭写入，设置页也不再提供这一项。
  */
 static void applyVSyncSetting() {
+#ifdef Q_OS_MACOS
+    auto format = QSurfaceFormat::defaultFormat();
+    format.setSwapInterval(0);
+    QSurfaceFormat::setDefaultFormat(format);
+#else
     if (!qEnvironmentVariableIsEmpty("RHINE_VSYNC")) {
         return;
     }
@@ -185,6 +196,7 @@ static void applyVSyncSetting() {
     auto format = QSurfaceFormat::defaultFormat();
     format.setSwapInterval(0);
     QSurfaceFormat::setDefaultFormat(format);
+#endif
 }
 /** 超采样倍率持久化：配置里设 graphics/supersample=2 即渲染 2 倍分辨率再缩回窗口。 */
 static void applySupersampleSetting() {
@@ -234,12 +246,20 @@ static void applyFrameGenerationSetting() {
     if (qEnvironmentVariableIsEmpty("RHINE_FG")) {
         qputenv("RHINE_FG", graphicsSettings().value("panel/fg", "off").toString().toUtf8());
     }
+#ifdef Q_OS_MACOS
+    // macOS 的窗口合成器始终按刷新率回收 drawable，垂直同步开关没有实际效果。
+    // 固定关闭并在设置页隐藏；显式 RHINE_FG_VSYNC 仍留给排障对照。
+    if (qEnvironmentVariableIsEmpty("RHINE_FG_VSYNC")) {
+        qputenv("RHINE_FG_VSYNC", "off");
+    }
+#else
     // 呈现层的垂直同步也来自设置页：只有关掉 vsync，呈现层才会去选 MAILBOX。
     // 实测这台机器上 FIFO 只给到约半个刷新率（47.4fps），MAILBOX 能到 125fps。
     if (qEnvironmentVariableIsEmpty("RHINE_FG_VSYNC")) {
         const auto vsync = graphicsSettings().value("panel/vsync", "on").toString();
         qputenv("RHINE_FG_VSYNC", vsync.compare("off", Qt::CaseInsensitive) == 0 ? "off" : "on");
     }
+#endif
 }
 /**
  * 渲染分辨率百分比：panel/render-scale=75 表示按窗口的 75% 渲染，再由最终合成通道放大。
@@ -258,6 +278,10 @@ static void applyRenderScaleSetting() {
  * 建立应用身份、Qt 引擎和原生窗口。
  * 离线测试与正式播放沿用同一入口，资源只从独立应用读取。
  */
+#ifdef Q_OS_MACOS
+int runPresentationChecks(PresentationShell &shell, Engine &backend, const QString &directory);
+#endif
+
 int main(int argc, char **argv) {
 #ifdef Q_OS_WIN
     const auto storageError = AppStorage::initializePortable(AppStorage::executableDirectory());
@@ -404,34 +428,30 @@ int main(int argc, char **argv) {
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
         [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
-#if defined(RHINE_FSR3_VULKAN) && RHINE_FSR3_VULKAN
-    // FG 路径：能力可用时**常驻**接管窗口，用自带交换链的呈现层替代默认 QQuickWindow。
-    //
-    // 为什么不再用 RHINE_FG 当门控：用户要的是"设置里点一下立刻生效、永不重启"。
-    // 插值能不能跑取决于是否持有交换链，所以只能让呈现层一直在、把开关下移成
-    // "每帧要不要插一张补偿帧"（FgShell::step 每帧重读 RHINE_FG）。代价是关掉帧
-    // 生成时也走自建交换链而不是 QQuickWindow——已实测渲染结果一致、无校验错误。
-    // RHINE_FG_LAYER=off 留作现场排障时的退路，可以强制走默认路径。
-    // 任何一步失败都回退到下面的默认路径——FG 是可选增强，不能阻断启动。
-    // 自检/抓屏/视觉基准都依赖 QQuickWindow 的读回路径，所以这些模式下不接管。
+    // 桌面 Metal 与 Vulkan 复用受控呈现，插值能力独立于呈现路径。
+    // RHINE_FG_LAYER=off 可强制使用 Qt Quick 默认窗口；启动失败同样回退。
+    // 默认自检保留原窗口入口，--presentation-check 专门验证受控呈现。
     const bool fgLayerDisabled =
-        qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0;
+        qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0
+#ifdef Q_OS_IOS
+        || true
+#endif
+        ;
     const bool fgCandidate = !test && !visual && !args.contains("--ui-self-test") &&
                              !args.contains("--capture") && !fgLayerDisabled &&
-                             RhineGraphics::activeBackend() == QLatin1String("vulkan") &&
-                             FgShell::compiledIn();
+                             PresentationShell::supportsBackend(RhineGraphics::activeBackend());
     // 排障：接管与否只看这一行。之前出现过"设了 RHINE_FG_LAYER=on 才接管"的怪现象，
     // 把每个输入的实测值打出来，比逐条读代码猜快得多。
     qWarning().noquote() << "FG gate: candidate" << fgCandidate << "layerDisabled" << fgLayerDisabled
                          << "test" << test << "visual" << visual << "backend"
-                         << RhineGraphics::activeBackend() << "compiledIn" << FgShell::compiledIn();
+                         << RhineGraphics::activeBackend() << "compiledIn" << PresentationShell::compiledIn();
     if (fgCandidate) {
         // FG 路径从不调用 QQmlApplicationEngine::load()（Main.qml 不加载，两个离屏层
         // 都是手工用 QQuickRenderControl 建的），而"QML 里的 Qt.quit() 真能退出进程"
         // 正是 load() 内部接的那根线。少了它，Overlay.qml 的 Ctrl+Q 会打出
         // "Signal QQmlEngine::quit() emitted, but no receivers connected to handle it."
         // 然后什么都不发生——快捷键看着触发了，进程却不退。
-        auto shell = std::make_unique<FgShell>(engine, backend);
+        auto shell = std::make_unique<PresentationShell>(engine, backend, RhineGraphics::activeBackend());
         // 退出顺序有讲究：先拆呈现层（VkSwapchainKHR / VkSurfaceKHR），再让事件循环退出。
         // 反过来的话窗口先被关闭，驱动 WSI 会对已销毁的 wl_surface 做 roundtrip，
         // 退出时 SIGABRT/SIGSEGV（实测两条都复现过）。Win32 的 HWND、X11 的 Window
@@ -440,7 +460,22 @@ int main(int argc, char **argv) {
             raw->shutdown();
             QCoreApplication::quit();
         });
+#ifdef Q_OS_MACOS
+        if (args.contains("--presentation-check")) {
+            backend.scene.review("detail");
+            // review 已收束场景动画；HUD 沿用从零开始的实际业务时钟，避免制造未来动画期限。
+            backend.step(0);
+        }
+#endif
         if (shell->start() && shell->run() == 0) {
+#ifdef Q_OS_MACOS
+            if (args.contains("--presentation-check")) {
+                const auto directory = args.value(args.indexOf("--presentation-check") + 1);
+                QTimer::singleShot(2500, shell.get(), [&, raw = shell.get(), directory] {
+                    application.exit(runPresentationChecks(*raw, backend, directory));
+                });
+            }
+#endif
             // FG 使用独立的 QWindow，也必须保留任务栏控制和关闭后驻留托盘的行为。
 #ifdef Q_OS_WIN
             WindowsTaskbar taskbar(&backend, shell->window());
@@ -455,7 +490,6 @@ int main(int argc, char **argv) {
         qWarning().noquote() << "FG: 呈现层启动失败，回退默认路径：" << shell->lastError();
         RhineFg::publishInactive(shell->lastError());
     }
-#endif
     engine.loadFromModule("RhineMusic", "Main");
     if (engine.rootObjects().isEmpty()) {
         return 1;

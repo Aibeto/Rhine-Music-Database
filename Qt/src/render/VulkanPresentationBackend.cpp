@@ -1,0 +1,305 @@
+#include "PresentationBackend.h"
+#include "../fg/VulkanPresenter.h"
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QEventLoop>
+#include <QVulkanFunctions>
+#include <QVulkanInstance>
+#include <QWindow>
+#include <rhi/qrhi_platform.h>
+#include <vector>
+
+namespace RhineRender {
+namespace {
+/** Vulkan 专属句柄、图像布局与提交信号量只在本适配器中出现。 */
+class VulkanPresentationBackend final : public PresentationBackend {
+  public:
+    ~VulkanPresentationBackend() override {
+        release();
+        m_presenter.reset();
+        m_rhi.reset();
+        m_window.reset();
+        m_instance.reset();
+    }
+    bool initialize(QSize logicalSize, bool vsync) override {
+        m_instance = std::make_unique<QVulkanInstance>();
+        // 交换链与 present 只要 1.1 就够；调高只会让旧驱动在设备创建时更容易失败。
+        m_instance->setApiVersion(QVersionNumber(1, 1));
+        if (!m_instance->create()) {
+            m_error =
+                QStringLiteral("QVulkanInstance 创建失败（errorCode=%1）").arg(int(m_instance->errorCode()));
+            return false;
+        }
+
+        m_window = std::make_unique<QWindow>();
+        // 必须声明成 Vulkan surface：平台窗口默认按 raster/OpenGL 建，
+        // 那样 surfaceForWindow() 永远返回 VK_NULL_HANDLE。
+        m_window->setSurfaceType(QSurface::VulkanSurface);
+        m_window->setVulkanInstance(m_instance.get());
+        m_window->setTitle(QStringLiteral("Rhine Music Database"));
+        m_window->resize(logicalSize);
+        m_window->create();
+        if (!m_window->handle()) {
+            m_error = QStringLiteral("QWindow 没有创建出平台窗口");
+            return false;
+        }
+
+        QRhiVulkanInitParams params;
+        params.inst = m_instance.get();
+        // 自建交换链需要设备支持该扩展；QRhi 默认不请求它。
+        params.deviceExtensions = {QByteArrayLiteral("VK_KHR_swapchain")};
+        m_rhi.reset(QRhi::create(QRhi::Vulkan, &params, {}));
+        if (!m_rhi) {
+            m_error = QStringLiteral("QRhi(Vulkan) 创建失败");
+            return false;
+        }
+
+        m_device = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles())->dev;
+        if (m_device == VK_NULL_HANDLE) {
+            m_error = QStringLiteral("拿不到 QRhi 的 VkDevice");
+            return false;
+        }
+
+        m_window->show();
+        // Wayland 下 surface 要等窗口真正 expose 之后才存在，只 create() 会拿到空句柄。
+        QElapsedTimer exposeClock;
+        exposeClock.start();
+        while (!m_window->isExposed() && exposeClock.elapsed() < 2000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        }
+
+        const VkSurfaceKHR surface = QVulkanInstance::surfaceForWindow(m_window.get());
+        if (surface == VK_NULL_HANDLE) {
+            m_error = QStringLiteral("拿不到 QWindow 的 VkSurfaceKHR");
+            return false;
+        }
+
+        m_size = m_window->size();
+        m_presenter = std::make_unique<VulkanPresenter>();
+        if (!m_presenter->init(m_rhi.get(), surface, m_size, vsync)) {
+            m_error = QStringLiteral("交换链创建失败：%1").arg(m_presenter->lastError());
+            return false;
+        }
+        return ensureTargets();
+    }
+    QWindow *window() const override {
+        return m_window.get();
+    }
+    QRhi *rhi() const override {
+        return m_rhi.get();
+    }
+    QVulkanInstance *vulkanInstance() const override {
+        return m_instance.get();
+    }
+    bool resize(QSize size, bool force) override {
+        m_rhi->finish();
+        releaseTargets();
+        if (!m_presenter->resize(size, force)) {
+            m_error = m_presenter->lastError();
+            return false;
+        }
+        return ensureTargets();
+    }
+    AcquireResult acquire(Frame *frame) override {
+        const auto result = m_presenter->acquire(&m_nativeFrame);
+        frame->imageIndex = m_nativeFrame.imageIndex;
+        switch (result) {
+        case VulkanPresenter::AcquireResult::Ok:
+            return AcquireResult::Ok;
+        case VulkanPresenter::AcquireResult::Suboptimal:
+            return AcquireResult::Suboptimal;
+        case VulkanPresenter::AcquireResult::OutOfDate:
+            return AcquireResult::OutOfDate;
+        case VulkanPresenter::AcquireResult::Timeout:
+            return AcquireResult::Timeout;
+        default:
+            return AcquireResult::Error;
+        }
+    }
+    QRhi::FrameOpResult beginFrame(const Frame &, QRhiCommandBuffer **commands) override {
+        return m_rhi->beginOffscreenFrame(commands);
+    }
+    QRhiRenderTarget *target(const Frame &frame) const override {
+        if (frame.imageIndex >= m_swapTargets.size()) {
+            return nullptr;
+        }
+        m_swapTextures[frame.imageIndex]->setNativeLayout(int(VK_IMAGE_LAYOUT_UNDEFINED));
+        return m_swapTargets[frame.imageIndex].get();
+    }
+    bool finishTarget(QRhiCommandBuffer *cb, const Frame &frame) override {
+        // 呈现引擎要求图像处于 PRESENT_SRC_KHR。QRhi 不知道这张图会被 present，
+        // 所以这一步只能自己发屏障。
+        const auto *handles = static_cast<const QRhiVulkanCommandBufferNativeHandles *>(cb->nativeHandles());
+        if (!handles || handles->commandBuffer == VK_NULL_HANDLE) {
+            return false;
+        }
+
+        VkImageMemoryBarrier barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+        barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstAccessMask = 0;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = m_presenter->imageAt(frame.imageIndex);
+        barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        QVulkanDeviceFunctions *deviceFunctions = m_instance->deviceFunctions(m_device);
+        if (!deviceFunctions) {
+            return false;
+        }
+
+        cb->beginExternal();
+        deviceFunctions->vkCmdPipelineBarrier(handles->commandBuffer,
+                                              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                              VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, //
+                                              0, 0, nullptr, 0, nullptr, 1, &barrier);
+        cb->endExternal();
+        return true;
+    }
+
+    bool endFrame(const Frame &, bool rendered) override {
+        const bool installed = rendered && m_presenter->installSubmitParams(m_rhi.get(), m_nativeFrame);
+        m_rhi->endOffscreenFrame();
+        if (!installed) {
+            m_error = m_presenter->lastError();
+            return false;
+        }
+        const bool presented = m_presenter->present(m_nativeFrame, nullptr);
+        if (!presented) {
+            m_error = m_presenter->lastError();
+        }
+        return presented;
+    }
+    void release() override {
+        if (m_rhi) {
+            m_rhi->finish();
+        }
+        releaseTargets();
+        if (m_presenter) {
+            m_presenter->release();
+        }
+    }
+    bool ready() const override {
+        return m_presenter && m_presenter->ready();
+    }
+    QSize extent() const override {
+        return m_presenter ? m_presenter->extent() : QSize();
+    }
+    int startupProbeFrames() const override {
+        // 保留自持 Vulkan 交换链的连续呈现预检，识别只成功呈现最初几帧的设备。
+        return 20;
+    }
+    quint32 imageCount() const override {
+        return m_presenter ? m_presenter->imageCount() : 0;
+    }
+    QString formatName() const override {
+        switch (int(m_presenter->colorFormat())) {
+        case 37:
+            return QStringLiteral("R8G8B8A8_UNORM");
+        case 43:
+            return QStringLiteral("R8G8B8A8_SRGB");
+        case 44:
+            return QStringLiteral("B8G8R8A8_UNORM");
+        case 50:
+            return QStringLiteral("B8G8R8A8_SRGB");
+        case 58:
+            return QStringLiteral("A2B10G10R10_UNORM_PACK32");
+        case 97:
+            return QStringLiteral("R16G16B16A16_SFLOAT");
+        default:
+            return QStringLiteral("VkFormat %1").arg(int(m_presenter->colorFormat()));
+        }
+    }
+    QString presentModeName() const override {
+        return m_presenter->presentModeName();
+    }
+    QString backendName() const override {
+        return QStringLiteral("Vulkan");
+    }
+    QString lastError() const override {
+        return m_error;
+    }
+
+  private:
+    void releaseTargets() {
+        m_swapTargets.clear();
+        m_swapPasses.clear();
+        m_swapTextures.clear();
+        m_swapSize = {};
+    }
+    bool ensureTargets() {
+        if (!m_presenter || !m_presenter->ready()) {
+            return false;
+        }
+        const quint32 count = m_presenter->imageCount();
+        const QSize extent = m_presenter->extent();
+        if (count == 0 || extent.isEmpty()) {
+            return false;
+        }
+        if (!m_swapTextures.empty() && m_swapSize == extent &&
+            qint32(m_swapTextures.size()) == qint32(count)) {
+            return true;
+        }
+        releaseTargets();
+        m_swapSize = extent;
+
+        for (quint32 i = 0; i < count; ++i) {
+            const VkImage image = m_presenter->imageAt(i);
+            if (image == VK_NULL_HANDLE) {
+                m_error = QStringLiteral("交换链第 %1 张图像为空").arg(i);
+                return false;
+            }
+            // 包装格式必须与交换链图像的真实通道序一致。QRhi 里 RGBA8 与 BGRA8 是两个
+            // 不同的格式：按 RGBA8 去解释一张 B8G8R8A8 图像，着色器写进第 0 字节的 R
+            // 会被合成器当成 B 读出来——整屏 R/B 互换（暖色场景整体发蓝，AA 边缘出现
+            // 彩色光点）。presenter 只会选 B8G8R8A8_UNORM(44) 或 R8G8B8A8_UNORM(37)。
+            const int swapFormat = int(m_presenter->colorFormat());
+            const QRhiTexture::Format textureFormat =
+                (swapFormat == 44 || swapFormat == 50) ? QRhiTexture::BGRA8 : QRhiTexture::RGBA8;
+            auto texture = std::unique_ptr<QRhiTexture>(m_rhi->newTexture(textureFormat, extent));
+            texture->setFlags(QRhiTexture::RenderTarget);
+            // 布局不在这里固定：每帧合成前用 setNativeLayout(UNDEFINED) 声明"内容作废"，
+            // 因此不需要跟踪 present 之后的真实布局。
+            if (!texture->createFrom({quint64(quintptr(image)), int(VK_IMAGE_LAYOUT_UNDEFINED)})) {
+                m_error = QStringLiteral("包装交换链图像失败（第 %1 张）").arg(i);
+                return false;
+            }
+            auto target = std::unique_ptr<QRhiTextureRenderTarget>(
+                m_rhi->newTextureRenderTarget({QRhiColorAttachment(texture.get())}));
+            auto pass =
+                std::unique_ptr<QRhiRenderPassDescriptor>(target->newCompatibleRenderPassDescriptor());
+            if (!pass) {
+                m_error = QStringLiteral("交换链渲染通道描述符创建失败");
+                return false;
+            }
+            target->setRenderPassDescriptor(pass.get());
+            if (!target->create()) {
+                m_error = QStringLiteral("交换链渲染目标创建失败");
+                return false;
+            }
+            m_swapTextures.push_back(std::move(texture));
+            m_swapPasses.push_back(std::move(pass));
+            m_swapTargets.push_back(std::move(target));
+        }
+        return true;
+    }
+    std::unique_ptr<QVulkanInstance> m_instance;
+    std::unique_ptr<QWindow> m_window;
+    std::unique_ptr<QRhi> m_rhi;
+    std::unique_ptr<VulkanPresenter> m_presenter;
+    std::vector<std::unique_ptr<QRhiTexture>> m_swapTextures;
+    std::vector<std::unique_ptr<QRhiTextureRenderTarget>> m_swapTargets;
+    std::vector<std::unique_ptr<QRhiRenderPassDescriptor>> m_swapPasses;
+    VulkanPresenter::Frame m_nativeFrame;
+    VkDevice m_device = VK_NULL_HANDLE;
+    QSize m_size;
+    QSize m_swapSize;
+    QString m_error;
+};
+} // namespace
+std::unique_ptr<PresentationBackend> createVulkanPresentationBackend() {
+    return std::make_unique<VulkanPresentationBackend>();
+}
+} // namespace RhineRender

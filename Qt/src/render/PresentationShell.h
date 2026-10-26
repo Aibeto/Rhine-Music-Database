@@ -1,9 +1,13 @@
 #pragma once
 
-#include "FgStats.h"
-#include "VulkanPresenter.h"
+#include "../fg/FgStats.h"
+#include "../fg/FgFrameTap.h"
+#include "PresentationBackend.h"
+#include "FrameGenerator.h"
 
 #include <QByteArray>
+#include <QImage>
+#include <QVariantMap>
 #include <QElapsedTimer>
 #include <QHash>
 #include <QList>
@@ -24,6 +28,7 @@ class QRhiBuffer;
 class QRhiCommandBuffer;
 class QRhiGraphicsPipeline;
 class QRhiRenderPassDescriptor;
+class QRhiRenderTarget;
 class QRhiSampler;
 class QRhiResource;
 class QRhiShaderResourceBindings;
@@ -36,40 +41,26 @@ QT_END_NAMESPACE
 
 class Engine;
 class FgBackend;
-class FgHost;
+class SceneLayerHost;
 
 /**
- * FG 呈现层的总装：自建 QVulkanInstance / QWindow / VkSwapchainKHR，自己驱动渲染循环。
- *
- * 为什么需要这一层：FG 必须在"显示分辨率的一帧"上插入一张插值帧，而 Qt 的
- * QQuickWindow 自己拥有并呈现交换链，应用插不进去。所以 FG 路径改用
- * QQuickRenderControl 把 3D 与 UI 渲到离屏纹理（FgHost），由本类接管交换链与 present。
- *
- * 一帧的实际顺序（每次 step()）：
- *   1. acquire 一张交换链图像；
- *   2. FgHost::renderFrame() 把 3D 与 UI 两个场景各渲一遍；
- *   3. 起一个离屏帧：FgBackend 跑光流 + 帧插值，然后合成通道把
- *      (插值帧 或 当前帧) 与 UI 叠在一起，写进交换链图像；
- *   4. installSubmitParams 注入"等图像可用 / 通知渲染完成"两个信号量，endOffscreenFrame；
- *   5. present。若本帧产出了插值帧，再 acquire 一张图、只做合成与 present，
- *      于是每个渲染帧呈现两次——这就是 FG 的收益来源。
- *
- * 失败策略：start() 任何一步失败都返回 false 并留下可读原因，调用方回退到默认的
- * QQuickWindow 路径。运行期 FG 算法失败则退化成"每帧直接呈现当前帧"，画面继续动。
+ * 所有后端共用的呈现调度：分别更新场景与 UI，执行可选插值，再合成到后端目标。
+ * 平台窗口、交换链、原生图像布局与同步由 PresentationBackend 负责。
+ * 启动失败可回退到 Qt Quick 默认窗口；插值降级不影响普通呈现。
  */
-class FgShell : public QObject
-{
+class PresentationShell : public QObject {
     Q_OBJECT
 
-public:
-    FgShell(QQmlEngine &engine, Engine &backend, QObject *parent = nullptr);
-    ~FgShell() override;
+  public:
+    PresentationShell(QQmlEngine &engine, Engine &backend, QString backendName, QObject *parent = nullptr);
+    ~PresentationShell() override;
 
     /// 编译期是否可能支持（Vulkan 后端 + FFX 已编入）。
     static bool compiledIn();
+    static bool supportsBackend(const QString &name);
 
     /// 用户是否要求开启（RHINE_FG=on 或设置页 panel/fg）。
-    static bool requested();
+    bool requested() const;
 
     /// 建立实例/设备/窗口/离屏层/交换链并打开渲染循环。失败时 lastError() 给出原因。
     /**
@@ -86,14 +77,22 @@ public:
     /// 启动后的收尾：返回给 main() 的退出码。渲染由事件循环里的定时器驱动。
     int run();
 
-    QString lastError() const { return m_error; }
-    bool frameGenerationActive() const { return m_fgAvailable; }
+    QString lastError() const {
+        return m_error;
+    }
+    bool frameGenerationActive() const {
+        return m_fgAvailable;
+    }
     QWindow *window() const;
+    QImage grabFrame(bool interpolated = false);
+    QVariantMap renderState() const;
+    QQuickWindow *inputWindow() const;
+    QQuickWindow *sceneWindow() const;
 
-protected:
+  protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
-private:
+  private:
     /// 交换链要的物理像素尺寸（逻辑尺寸 × 设备像素比）。
     QSize pixelSize() const;
     /// 同步补焦点：按键到达时若没有焦点项就当场重建。
@@ -107,7 +106,7 @@ private:
     qreal m_dpr = 1.0;
     /// 真实窗口上次的 devicePixelRatio，用来发现屏幕/缩放变化。
     qreal m_windowDpr = 1.0;
-    bool initializeVulkan();
+    bool initializeBackend();
     bool initializeLayers();
     bool ensureSwapchainResources();
     void releaseSwapchainResources();
@@ -117,12 +116,13 @@ private:
     void syncSizes();
     /// 帧外准备：按最新输入重建上下文并写入相机参数。必须在 beginOffscreenFrame 之前。
     bool armFrameGeneration();
+    const RhineFg::FrameInputs &currentFrameInputs() const;
     /// 记录 FG 的命令，返回"本帧是否有可用的插值帧"。
     bool recordFrameGeneration(QRhiCommandBuffer *cb);
     /// 把 base（插值帧或当前帧）与 UI 合成到交换链图像，并转到 PRESENT_SRC。
-    bool composite(QRhiCommandBuffer *cb, QRhiTexture *base, QRhiTexture *overlay,
-                   quint32 imageIndex);
-    bool presentOne(const VulkanPresenter::Frame &frame, bool allowInterpolation,
+    bool composite(QRhiCommandBuffer *cb, QRhiTexture *base, QRhiTexture *overlay, quint32 imageIndex,
+                   QRhiRenderTarget *overrideTarget = nullptr);
+    bool presentOne(const RhineRender::PresentationBackend::Frame &frame, bool allowInterpolation,
                     bool *interpolatedOut);
     QString resolveQmlUrl(const QString &file) const;
 
@@ -135,23 +135,16 @@ private:
     void refreshGapStats();
     /// 把 m_stats 的最新内容发给性能面板。
     void publishStats(bool interpolatedThisStep);
-    /// 把 VkFormat 转成面板上能读的格式名（未知格式回退成数字）。
-    static QString swapchainFormatName(int format);
 
     QQmlEngine *m_engine = nullptr;
     Engine *m_backend = nullptr;
 
-    std::unique_ptr<QVulkanInstance> m_instance;
-    std::unique_ptr<QWindow> m_window;
-    std::unique_ptr<QRhi> m_rhi;
-    std::unique_ptr<FgHost> m_host;
-    std::unique_ptr<FgBackend> m_fg;
-    std::unique_ptr<VulkanPresenter> m_presenter;
-
-    // 每个交换链图像一份"QRhi 视角的纹理 + 渲染目标 + 通道描述符"。
-    std::vector<std::unique_ptr<QRhiTexture>> m_swapTextures;
-    std::vector<std::unique_ptr<QRhiTextureRenderTarget>> m_swapTargets;
-    std::vector<std::unique_ptr<QRhiRenderPassDescriptor>> m_swapPasses;
+    QWindow *m_window = nullptr;
+    QRhi *m_rhi = nullptr;
+    QString m_backendName;
+    std::unique_ptr<SceneLayerHost> m_host;
+    std::unique_ptr<RhineRender::FrameGenerator> m_fg;
+    std::unique_ptr<RhineRender::PresentationBackend> m_presenter;
 
     QRhiBuffer *m_compositeUbo = nullptr;
     QRhiSampler *m_sampler = nullptr;
@@ -165,16 +158,17 @@ private:
     QList<QRhiResource *> m_ownedResources;
 
     QTimer *m_timer = nullptr;
+    QTimer *m_releaseTimer = nullptr;
     QElapsedTimer m_frameClock;
     // QRhi 建的设备句柄：发自己的屏障时要用设备级函数表。
-    VkDevice m_device = VK_NULL_HANDLE;
     QSize m_size;
     // 交换链包装纹理对应的真实尺寸；presenter 的 extent 变化就要重建。
-    QSize m_swapSize;
     bool m_fgAvailable = false;
     bool m_fgArmed = false;
     bool m_needRecreate = false;
+    quint64 m_lastEngineSteps = 0;
     bool m_started = false;
+    bool m_stopped = false;
     quint64 m_lastTapSerial = 0;
     quint64 m_presentedFrames = 0;
     quint64 m_interpolatedFrames = 0;
@@ -203,11 +197,9 @@ private:
     /// 交换链重建/窗口尺寸变化后必须无条件重画一次（纹理内容已失效）。
     bool m_forcePresent = true;
     /// 连续跳过的步数：引擎在推进却一直没有脏标记时用它兜底，避免画面冻住。
-    int m_skipStreak = 0;
     /// 累计跳过的步数，写进统计日志，便于确认"静止时确实没在空转"。
     quint64 m_skippedSteps = 0;
     /// 上次渲染时引擎的步进计数：它变了才说明场景状态真的推进了。
-    quint64 m_lastEngineSteps = 0;
     /// 排障计数：acquire 超时 / OutOfDate 的次数（空转时靠它们判断卡在哪条提前返回）。
     quint64 m_acquireTimeoutCount = 0;
     quint64 m_outOfDateCount = 0;

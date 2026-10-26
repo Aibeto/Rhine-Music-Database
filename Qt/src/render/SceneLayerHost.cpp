@@ -1,4 +1,4 @@
-#include "FgHost.h"
+#include "SceneLayerHost.h"
 
 #include <QColor>
 #include <QDebug>
@@ -9,14 +9,9 @@
 #include <QQuickRenderControl>
 #include <QQuickRenderTarget>
 #include <QQuickWindow>
+#include <rhi/qrhi.h>
 
-/* QVulkanInstance 与 QQuickWindow::setVulkanInstance() 只在「Qt 带 Vulkan 特性」且
- * 「应用侧能看到 vulkan.h」时存在，Qt 头里的守卫是两半：
- *   qvulkaninstance.h: #if QT_CONFIG(vulkan) → #if __has_include(<vulkan/vulkan.h>)
- * 只判其中一半，遇到「Qt 有特性但系统没 SDK」或「Qt 干脆没编 Vulkan」的机器就会编译失败。
- * macOS 的 Qt 不构建 Vulkan 特性，头文件根本不存在；而 FgHost.cpp 挂在无条件的源列表里，
- * 少这段守卫 macOS CI 直接停在 `fatal error: 'QVulkanInstance' file not found`。
- * 条件与 main.cpp:38 / RhiScene.cpp:20 完全一致，避免三处判断分歧。 */
+// Qt 的 Vulkan 类型同时受构建特性和 SDK 头文件可用性约束。
 #if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_MACOS)
 #include <QVulkanInstance>
 #define RHINE_HAVE_VULKAN_TYPES 1
@@ -25,30 +20,22 @@
 #endif
 
 namespace {
-/**
- * 离屏窗口的"内容变脏"监听器。
- * FgHost 本身不是 QObject，装不了事件过滤器；而 QML 里任何改动最终都会给
- * 离屏窗口投一个 QEvent::UpdateRequest，所以用一个极小的 QObject 转一道。
- * 没有 Q_OBJECT 也不需要：只覆盖虚函数 eventFilter。
- */
-class DirtyWatcher : public QObject
-{
-public:
-    explicit DirtyWatcher(bool *flag, QObject *parent = nullptr)
-        : QObject(parent), m_flag(flag) {}
-
-    bool eventFilter(QObject *watched, QEvent *event) override
-    {
-        if (event->type() == QEvent::UpdateRequest && m_flag)
-            *m_flag = true;
-        return QObject::eventFilter(watched, event);
+/** 给离屏窗口提供真实宿主，供对话框定位、DPR 与输入法查询使用。 */
+class LayerRenderControl final : public QQuickRenderControl {
+  public:
+    explicit LayerRenderControl(QWindow *window) : m_window(window) {
+    }
+    QWindow *renderWindow(QPoint *offset) override {
+        if (offset) {
+            *offset = {};
+        }
+        return m_window;
     }
 
-private:
-    bool *m_flag = nullptr;
+  private:
+    QWindow *m_window = nullptr;
 };
-}  // namespace
-#include <rhi/qrhi.h>
+} // namespace
 
 namespace {
 
@@ -62,24 +49,22 @@ const QColor kSceneClearColor(0xe7, 0xe7, 0xe1);
 
 } // namespace
 
-FgHost::FgHost() = default;
+SceneLayerHost::SceneLayerHost() = default;
 
-FgHost::~FgHost()
-{
+SceneLayerHost::~SceneLayerHost() {
     teardown();
 }
 
-bool FgHost::fail(const QString &message)
-{
+bool SceneLayerHost::fail(const QString &message) {
     m_lastError = message;
     m_valid = false;
-    qWarning().noquote() << "FgHost:" << message;
+    qWarning().noquote() << "SceneLayerHost:" << message;
     return false;
 }
 
-bool FgHost::start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
-                   QVulkanInstance *vulkanInstance)
-{
+bool SceneLayerHost::start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
+                           QVulkanInstance *vulkanInstance, QWindow *visibleWindow) {
+    m_visibleWindow = rhi && rhi->backend() == QRhi::Metal ? visibleWindow : nullptr;
     // 失败时立刻回收半成品：调用方会回退到默认路径，本对象可能被直接丢弃，
     // 不能把还挂着 QRhi 引用的窗口/纹理留给析构时机不确定的路径。
     if (!startInternal(engine, scene3dUrl, overlayUrl, rhi, vulkanInstance)) {
@@ -89,16 +74,18 @@ bool FgHost::start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overl
     return true;
 }
 
-bool FgHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
-                           QVulkanInstance *vulkanInstance)
-{
-    if (m_valid)
+bool SceneLayerHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl,
+                                   QRhi *rhi, QVulkanInstance *vulkanInstance) {
+    if (m_valid) {
         return fail(QStringLiteral("start() 被重复调用"));
-    if (!rhi)
+    }
+    if (!rhi) {
         return fail(QStringLiteral("传入的 QRhi 为空，无法建立离屏目标"));
-    if (scene3dUrl.isEmpty() || overlayUrl.isEmpty())
+    }
+    if (scene3dUrl.isEmpty() || overlayUrl.isEmpty()) {
         return fail(QStringLiteral("场景 URL 无效：scene3d=%1 overlay=%2")
                         .arg(scene3dUrl.toString(), overlayUrl.toString()));
+    }
 
     m_rhi = rhi;
     m_size = kFallbackSize;
@@ -107,8 +94,8 @@ bool FgHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUr
     // 两个场景各自一个 QQuickRenderControl：一个 RenderControl 每帧换 render target
     // 会触发 Qt 重新初始化渲染目标（QQuickWindow::setRenderTarget 文档明确警告），
     // 拆成两个后各自固定一个 target，代价稳定，UI 层还能按需重渲。
-    m_scene.control = std::make_unique<QQuickRenderControl>();
-    m_overlay.control = std::make_unique<QQuickRenderControl>();
+    m_scene.control = std::make_unique<LayerRenderControl>(m_visibleWindow);
+    m_overlay.control = std::make_unique<LayerRenderControl>(m_visibleWindow);
     m_scene.window = std::make_unique<QQuickWindow>(m_scene.control.get());
     m_overlay.window = std::make_unique<QQuickWindow>(m_overlay.control.get());
 
@@ -127,8 +114,7 @@ bool FgHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUr
         m_overlay.window->setVulkanInstance(vulkanInstance);
     }
 #else
-    // 没有 Vulkan 类型可用时这条路径本来就不成立（FgShell 只在 Vulkan 构建里编）。
-    // 用 Q_UNUSED 标明参数是有意不用的，而不是漏传。
+    // Metal 等后端不需要 Vulkan 实例。
     Q_UNUSED(vulkanInstance);
 #endif
 
@@ -136,48 +122,67 @@ bool FgHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUr
     // UI 层必须透明清屏，否则 FG 合成时会把整帧盖住。
     m_overlay.window->setColor(Qt::transparent);
 
-    // 脏标记：QML 里任何东西变化时 Qt 都会给离屏窗口投一个 UpdateRequest，
-    // 呈现层据此决定"这一步要不要真的渲染"。没有它就只能每帧盲渲。
-    m_scene.window->installEventFilter(new DirtyWatcher(&m_contentDirty, m_scene.window.get()));
-    m_overlay.window->installEventFilter(new DirtyWatcher(&m_contentDirty, m_overlay.window.get()));
+    // 两层分别接收 Qt 的正式更新信号；回调只标脏与安排下一步，不递归渲染。
+    const auto watch = [this](Layer &layer) {
+        const auto invalidate = [this, &layer] {
+            layer.dirty = true;
+            if (requestRender) {
+                requestRender();
+            }
+        };
+        QObject::connect(layer.control.get(), &QQuickRenderControl::renderRequested, layer.window.get(),
+                         invalidate);
+        QObject::connect(layer.control.get(), &QQuickRenderControl::sceneChanged, layer.window.get(),
+                         invalidate);
+    };
+    watch(m_scene);
+    watch(m_overlay);
 
     // 两个窗口都不 show()：RenderControl 下没有原生窗口，show() 会破坏离屏语义。
-    if (!m_scene.control->initialize())
+    if (!m_scene.control->initialize()) {
         return fail(QStringLiteral("3D 场景 QQuickRenderControl::initialize() 失败"));
-    if (!m_overlay.control->initialize())
+    }
+    if (!m_overlay.control->initialize()) {
         return fail(QStringLiteral("UI 场景 QQuickRenderControl::initialize() 失败"));
+    }
 
     // 如果 Qt 没有复用传入的 QRhi（例如图形后端不匹配），两张纹理就不在同一设备上，
     // FG 无法采样。宁可失败回退，也不要跑到合成阶段才炸。
-    if (m_scene.control->rhi() != rhi || m_overlay.control->rhi() != rhi)
+    if (m_scene.control->rhi() != rhi || m_overlay.control->rhi() != rhi) {
         return fail(QStringLiteral("QQuickRenderControl 没有复用传入的 QRhi（图形后端可能不匹配）"));
+    }
 
     applyLayerGeometry(m_scene);
     applyLayerGeometry(m_overlay);
 
-    if (!createLayerTargets(m_scene, "3D"))
+    if (!createLayerTargets(m_scene, "3D")) {
         return false;
-    if (!createLayerTargets(m_overlay, "UI"))
+    }
+    if (!createLayerTargets(m_overlay, "UI")) {
         return false;
+    }
 
-    if (!loadLayer(m_scene, engine, scene3dUrl, "3D"))
+    if (!loadLayer(m_scene, engine, scene3dUrl, "3D")) {
         return false;
-    if (!loadLayer(m_overlay, engine, overlayUrl, "UI"))
+    }
+    if (!loadLayer(m_overlay, engine, overlayUrl, "UI")) {
         return false;
+    }
 
     m_valid = true;
-    qInfo().noquote() << QStringLiteral("FgHost: 双场景宿主就绪，离屏尺寸 %1x%2")
+    qInfo().noquote() << QStringLiteral("SceneLayerHost: 双场景宿主就绪，离屏尺寸 %1x%2")
                              .arg(m_size.width())
                              .arg(m_size.height());
     return true;
 }
 
-bool FgHost::createLayerTargets(Layer &layer, const char *name)
-{
-    if (!m_rhi || !layer.window)
+bool SceneLayerHost::createLayerTargets(Layer &layer, const char *name) {
+    if (!m_rhi || !layer.window) {
         return fail(QStringLiteral("%1 层离屏目标创建时状态无效").arg(QLatin1String(name)));
-    if (m_size.isEmpty())
+    }
+    if (m_size.isEmpty()) {
         return fail(QStringLiteral("%1 层离屏目标尺寸为空").arg(QLatin1String(name)));
+    }
 
     // RenderTarget 让纹理能作为颜色附件，UsedAsTransferSource 让 FG 能采样/拷贝它。
     layer.texture = m_rhi->newTexture(QRhiTexture::RGBA8, pixelSize(), 1,
@@ -191,7 +196,16 @@ bool FgHost::createLayerTargets(Layer &layer, const char *name)
                         .arg(pixelSize().height()));
     }
 
-    const QRhiTextureRenderTargetDescription description{QRhiColorAttachment(layer.texture)};
+    // Qt Quick 的二维批次仍会启用深度测试，裁剪也可能使用模板；目标必须提供对应附件。
+    QRhiTextureRenderTargetDescription description{QRhiColorAttachment(layer.texture)};
+    if (m_rhi->backend() == QRhi::Metal) {
+        layer.depthStencil = m_rhi->newRenderBuffer(QRhiRenderBuffer::DepthStencil, pixelSize());
+        if (!layer.depthStencil->create()) {
+            releaseLayerTargets(layer);
+            return fail(QStringLiteral("%1 层深度模板附件创建失败").arg(QLatin1String(name)));
+        }
+        description.setDepthStencilBuffer(layer.depthStencil);
+    }
     layer.renderTarget = m_rhi->newTextureRenderTarget(description);
     layer.renderTarget->setName(QByteArray("fg-") + name + "-target");
     layer.renderPass = layer.renderTarget->newCompatibleRenderPassDescriptor();
@@ -206,102 +220,112 @@ bool FgHost::createLayerTargets(Layer &layer, const char *name)
     }
 
     // setRenderTarget 只能在渲染线程调用，且不要每帧换；这里只在 start()/resize() 里做。
-    layer.window->setRenderTarget(QQuickRenderTarget::fromRhiRenderTarget(layer.renderTarget));
+    auto target = QQuickRenderTarget::fromRhiRenderTarget(layer.renderTarget);
+    target.setDevicePixelRatio(m_rhi->backend() == QRhi::Metal ? m_ratio : 1.0);
+    layer.window->setRenderTarget(target);
     return true;
 }
 
-void FgHost::releaseLayerTargets(Layer &layer)
-{
+void SceneLayerHost::releaseLayerTargets(Layer &layer) {
     // 先摘掉窗口对 target 的引用，再销毁底层 QRhi 资源，避免窗口持有悬空指针。
-    if (layer.window)
+    if (layer.window) {
         layer.window->setRenderTarget(QQuickRenderTarget());
+    }
     delete layer.renderTarget;
     layer.renderTarget = nullptr;
     delete layer.renderPass;
     layer.renderPass = nullptr;
     delete layer.texture;
     layer.texture = nullptr;
+    delete layer.depthStencil;
+    layer.depthStencil = nullptr;
 }
 
-bool FgHost::loadLayer(Layer &layer, QQmlEngine &engine, const QUrl &url, const char *name)
-{
+bool SceneLayerHost::loadLayer(Layer &layer, QQmlEngine &engine, const QUrl &url, const char *name) {
     QQmlComponent component(&engine, url);
     if (component.isError()) {
-        for (const QQmlError &error : component.errors())
-            qWarning().noquote() << "FgHost:" << name << "QML 错误:" << error.toString();
+        for (const QQmlError &error : component.errors()) {
+            qWarning().noquote() << "SceneLayerHost:" << name << "QML 错误:" << error.toString();
+        }
         return fail(QStringLiteral("%1 层 QML 载入失败：%2").arg(QLatin1String(name), url.toString()));
     }
 
     QObject *object = component.create();
-    if (!object)
+    if (!object) {
         return fail(QStringLiteral("%1 层 QML 根对象创建失败：%2").arg(QLatin1String(name), url.toString()));
+    }
 
     QQuickItem *item = qobject_cast<QQuickItem *>(object);
     if (!item) {
         // 传进来的是 Window 之类的根节点：RenderControl 下没有原生窗口，不能挂载。
-        qWarning().noquote() << "FgHost:" << name << "QML 根节点不是 Item，拒绝挂载";
+        qWarning().noquote() << "SceneLayerHost:" << name << "QML 根节点不是 Item，拒绝挂载";
         delete object;
         return fail(QStringLiteral("%1 层 QML 根节点不是 Item：%2").arg(QLatin1String(name), url.toString()));
     }
 
+    item->setParent(layer.window->contentItem());
     item->setParentItem(layer.window->contentItem());
     item->setSize(QSizeF(m_size));
     item->setTransformOrigin(QQuickItem::TopLeft);
-    item->setScale(m_ratio);
+    item->setScale(1.0);
     layer.rootItem = item;
     return true;
 }
 
-QSize FgHost::pixelSize() const
-{
-    return QSize(qMax(1, qRound(m_size.width() * m_ratio)),
-                 qMax(1, qRound(m_size.height() * m_ratio)));
+QSize SceneLayerHost::pixelSize() const {
+    return QSize(qMax(1, qRound(m_size.width() * m_ratio)), qMax(1, qRound(m_size.height() * m_ratio)));
 }
 
-void FgHost::setPixelRatio(qreal ratio)
-{
-    if (!m_valid)
+void SceneLayerHost::setPixelRatio(qreal ratio) {
+    if (!m_valid) {
         return;
+    }
     ratio = qBound(1.0, ratio, 4.0);
-    if (qFuzzyCompare(ratio, m_ratio))
+    if (qFuzzyCompare(ratio, m_ratio)) {
         return;
+    }
     m_ratio = ratio;
+    m_scene.dirty = true;
+    m_overlay.dirty = true;
     // 比例变了等于渲染目标尺寸变了，必须重建，否则 QML 只会画进纹理一角。
     releaseLayerTargets(m_scene);
     releaseLayerTargets(m_overlay);
     applyLayerGeometry(m_scene);
     applyLayerGeometry(m_overlay);
-    createLayerTargets(m_scene, "3D");
-    createLayerTargets(m_overlay, "UI");
-    qInfo().noquote() << "FgHost: 离屏层放大" << m_ratio << "倍，物理像素" << pixelSize();
+    if (!m_suspended) {
+        createLayerTargets(m_scene, "3D");
+        createLayerTargets(m_overlay, "UI");
+    }
+    qInfo().noquote() << "SceneLayerHost: 离屏层放大" << m_ratio << "倍，物理像素" << pixelSize();
 }
 
-void FgHost::applyLayerGeometry(Layer &layer)
-{
-    if (!layer.window)
+void SceneLayerHost::applyLayerGeometry(Layer &layer) {
+    if (!layer.window) {
         return;
-    // 离屏窗口与 contentItem 用**物理像素**（决定光栅化面积），
-    // QML 根节点仍用**逻辑像素**并放大 m_ratio 倍（决定排版）。
-    // 这样 QML 里的 width/height/stageScale 全部保持原语义，只是画得更密。
-    const QSize px = pixelSize();
-    layer.window->resize(px);
-    if (QQuickItem *content = layer.window->contentItem())
-        content->setSize(QSizeF(px));
+    }
+    // 窗口和输入保持逻辑坐标；物理像素密度只在目标的 DPR 中设置一次。
+    const bool logicalCoordinates = m_rhi->backend() == QRhi::Metal;
+    const QSize windowSize = logicalCoordinates ? m_size : pixelSize();
+    layer.window->resize(windowSize);
+    if (QQuickItem *content = layer.window->contentItem()) {
+        content->setSize(QSizeF(windowSize));
+    }
     if (layer.rootItem) {
         layer.rootItem->setSize(QSizeF(m_size));
         layer.rootItem->setTransformOrigin(QQuickItem::TopLeft);
-        layer.rootItem->setScale(m_ratio);
+        layer.rootItem->setScale(logicalCoordinates ? 1.0 : m_ratio);
     }
 }
 
-bool FgHost::renderLayer(Layer &layer, const char *name)
-{
+bool SceneLayerHost::renderLayer(Layer &layer, const char *name) {
     QQuickRenderControl *control = layer.control.get();
-    if (!control || !layer.renderTarget)
+    if (!control || !layer.renderTarget) {
         return fail(QStringLiteral("%1 层尚未就绪就调用了 renderFrame()").arg(QLatin1String(name)));
+    }
 
     // 官方推荐的顺序：polishItems() 在 beginFrame() 之前，sync()/render() 必须在
     // beginFrame()/endFrame() 之间（QQuickRenderControl 文档的更新步骤示例）。
+    layer.dirty = false;
     control->polishItems();
     control->beginFrame();
     // beginFrame() 不返回状态；command buffer 为空是最直接的失败信号（例如设备丢失）。
@@ -315,48 +339,86 @@ bool FgHost::renderLayer(Layer &layer, const char *name)
     return true;
 }
 
-bool FgHost::renderFrame()
-{
-    // 失败原因已经在 fail() 里打印过一次，这里直接返回，避免每帧刷屏。
-    if (!m_valid)
-        return false;
-    if (!renderLayer(m_scene, "3D"))
-        return false;
-    if (!renderLayer(m_overlay, "UI"))
-        return false;
-    // 这一帧已经把两层的当前内容都画进纹理了，脏标记到此为止；
-    // 之后再有 QML 变化会重新把它置起来。
-    m_contentDirty = false;
+/** 隐藏超过宽限期后释放场景图与目标，QML 和业务状态继续保留。 */
+void SceneLayerHost::releaseGraphics() {
+    if (!m_valid || m_suspended) {
+        return;
+    }
+    m_rhi->finish();
+    for (Layer *layer : {&m_scene, &m_overlay}) {
+        releaseLayerTargets(*layer);
+        layer->control->invalidate();
+        layer->dirty = true;
+    }
+    m_suspended = true;
+}
+
+bool SceneLayerHost::resumeGraphics() {
+    if (!m_suspended) {
+        return m_valid;
+    }
+    for (Layer *layer : {&m_scene, &m_overlay}) {
+        if (!layer->control->initialize()) {
+            return fail(QStringLiteral("恢复离屏场景图失败"));
+        }
+        applyLayerGeometry(*layer);
+        if (!createLayerTargets(*layer, "恢复")) {
+            return false;
+        }
+        layer->dirty = true;
+    }
+    m_suspended = false;
     return true;
 }
 
-QQuickWindow *FgHost::overlayWindow() const
-{
+bool SceneLayerHost::renderFrame() {
+    // 失败原因已经在 fail() 里打印过一次，这里直接返回，避免每帧刷屏。
+    if (!m_valid || !resumeGraphics()) {
+        return false;
+    }
+    if (m_rhi->backend() != QRhi::Metal) {
+        m_scene.dirty = true;
+        m_overlay.dirty = true;
+    }
+    if (m_scene.dirty) {
+        if (!renderLayer(m_scene, "3D")) {
+            return false;
+        }
+        ++m_sceneRenders;
+    }
+    if (m_overlay.dirty) {
+        if (!renderLayer(m_overlay, "UI")) {
+            return false;
+        }
+        ++m_overlayRenders;
+    }
+    return true;
+}
+
+QQuickWindow *SceneLayerHost::overlayWindow() const {
     return m_overlay.window.get();
 }
 
-QQuickWindow *FgHost::sceneWindow() const
-{
+QQuickWindow *SceneLayerHost::sceneWindow() const {
     return m_scene.window.get();
 }
 
-QQuickItem *FgHost::overlayRootItem() const
-{
+QQuickItem *SceneLayerHost::overlayRootItem() const {
     return m_overlay.rootItem;
 }
 
-void FgHost::resize(QSize size)
-{
+void SceneLayerHost::resize(QSize size) {
     if (!m_valid) {
-        qWarning().noquote() << "FgHost: resize() 在宿主未就绪时被调用，已忽略";
+        qWarning().noquote() << "SceneLayerHost: resize() 在宿主未就绪时被调用，已忽略";
         return;
     }
     if (size.isEmpty()) {
-        qWarning().noquote() << "FgHost: resize() 收到空尺寸，已忽略";
+        qWarning().noquote() << "SceneLayerHost: resize() 收到空尺寸，已忽略";
         return;
     }
-    if (size == m_size)
+    if (size == m_size) {
         return;
+    }
 
     // 先释放旧目标再建新的：窗口不能指向已销毁的 QRhiRenderTarget。
     releaseLayerTargets(m_scene);
@@ -364,38 +426,42 @@ void FgHost::resize(QSize size)
     m_size = size;
     applyLayerGeometry(m_scene);
     applyLayerGeometry(m_overlay);
-    if (!createLayerTargets(m_scene, "3D"))
-        return; // fail() 已把 m_valid 置 false，调用方应回退并销毁本对象
-    if (!createLayerTargets(m_overlay, "UI"))
+    if (m_suspended) {
         return;
-    qInfo().noquote() << QStringLiteral("FgHost: 离屏目标已重建为 %1x%2")
-                             .arg(m_size.width())
-                             .arg(m_size.height());
+    }
+    if (!createLayerTargets(m_scene, "3D")) {
+        return; // fail() 已把 m_valid 置 false，调用方应回退并销毁本对象
+    }
+    if (!createLayerTargets(m_overlay, "UI")) {
+        return;
+    }
+    qInfo().noquote()
+        << QStringLiteral("SceneLayerHost: 离屏目标已重建为 %1x%2").arg(m_size.width()).arg(m_size.height());
     // 换了渲染目标，两张纹理的内容都是新的（未定义），必须重画一次。
-    m_contentDirty = true;
+    m_scene.dirty = true;
+    m_overlay.dirty = true;
 }
 
-QRhiTexture *FgHost::sceneTexture() const
-{
+QRhiTexture *SceneLayerHost::sceneTexture() const {
     return m_scene.texture;
 }
 
-QRhiTexture *FgHost::overlayTexture() const
-{
+QRhiTexture *SceneLayerHost::overlayTexture() const {
     return m_overlay.texture;
 }
 
-void FgHost::teardown()
-{
+void SceneLayerHost::teardown() {
     // 先解绑 target，再让 Qt 释放场景图，最后销毁自建 QRhi 资源。
     // 逆序销毁（overlay 在前）没有语义依赖，只是让日志顺序与创建顺序对称。
-    for (Layer *layer : { &m_overlay, &m_scene }) {
-        if (layer->window)
+    for (Layer *layer : {&m_overlay, &m_scene}) {
+        if (layer->window) {
             layer->window->setRenderTarget(QQuickRenderTarget());
+        }
         // rhi() 在 initialize() 成功前恒为 null；用它判断"确实初始化过"，
         // 避免在 start() 中途失败时对未初始化的 control 调 invalidate()。
-        if (layer->control && layer->control->rhi())
+        if (layer->control && layer->control->rhi()) {
             layer->control->invalidate();
+        }
         // 根 Item 的父项是 contentItem，随窗口析构一起销毁，这里只清观察指针。
         layer->rootItem = nullptr;
         layer->window.reset();
@@ -406,6 +472,8 @@ void FgHost::teardown()
         layer->renderPass = nullptr;
         delete layer->texture;
         layer->texture = nullptr;
+        delete layer->depthStencil;
+        layer->depthStencil = nullptr;
     }
     m_rhi = nullptr;
     m_valid = false;

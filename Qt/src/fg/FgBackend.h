@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../render/FrameGenerator.h"
 #include <QSize>
 #include <QString>
 #include <QVector3D>
@@ -32,7 +33,7 @@ class QRhiTexture;
  * 只能在帧外调用（GPU 空闲时）。dispatch()/prepare() 必须在 QRhiCommandBuffer 的
  * beginExternal()/endExternal() 之间调用。
  */
-class FgBackend
+class FgBackend : public RhineRender::FrameGenerator
 {
 public:
     FgBackend();

@@ -27,6 +27,8 @@ Item {
     // 下面的 Loader 判空后不创建（期二改成 C++ 注入 startSystemMove/startSystemResize）。
     // 不叫 window 是因为 Item 已有 window 属性（QQuickItem::window()），重名会冲突。
     property Window hostWindow: null
+    readonly property bool controlledMetalHost: Qt.platform.os === "osx"
+        && typeof rhineHostWindow !== "undefined" && rhineHostWindow !== null
     property bool frameless: false
     readonly property bool ios: Qt.platform.os === "ios"
 
@@ -43,6 +45,12 @@ Item {
         target: rhine
         function onClearCredentials() {
             overlay.clearCredentials();
+        }
+    }
+    Loader {
+        active: overlay.controlledMetalHost
+        sourceComponent: LocalMusicDialogs {
+            backend: rhine
         }
     }
     Hud {

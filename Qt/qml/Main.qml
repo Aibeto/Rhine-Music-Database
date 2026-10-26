@@ -5,7 +5,7 @@ import Rhine.Native 1.0
 // 组合根：Window 只负责窗口本身与"必须挂在窗口上"的对象，画面内容拆成两层——
 // Scene3D.qml（3D，可被 FG 单独以渲染帧率出图并插值）与 Overlay.qml（UI，按显示帧率叠加）。
 // 默认路径（不开 FG）下两层仍由这个 Window 承载，渲染顺序、坐标、焦点与交互与拆分前一致；
-// FG 路径下由 FgHost 用两个 QQuickRenderControl 分别载入这两个文件（见 Qt/src/fg/FgHost.h）。
+// FG 路径下由 SceneLayerHost 用两个 QQuickRenderControl 分别载入这两个文件。
 Window {
     id: root
     readonly property bool ios: Qt.platform.os === "ios"

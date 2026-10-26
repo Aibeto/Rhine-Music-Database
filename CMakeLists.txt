@@ -180,11 +180,15 @@ set(RHINE_APP_SOURCES
     Qt/src/RhiScene.h
     Qt/src/fsr/Fsr3Backend.cpp
     Qt/src/fsr/Fsr3Backend.h
-    Qt/src/fg/FgHost.cpp
-    Qt/src/fg/FgHost.h
+    Qt/src/render/SceneLayerHost.cpp
+    Qt/src/render/SceneLayerHost.h
     Qt/src/fg/FgBackend.cpp
     Qt/src/fg/FgBackend.h
     Qt/src/fg/FgConfig.h
+    Qt/src/render/PresentationBackend.h
+    Qt/src/render/RhiPresentationBackend.cpp
+    Qt/src/render/PresentationShell.cpp
+    Qt/src/render/PresentationShell.h
     Qt/src/OpticalScene.cpp
     Qt/src/OpticalScene.h
     Qt/src/Glyphs.cpp
@@ -200,7 +204,7 @@ endif()
 # Core/Gui/Network/Concurrent/Multimedia。
 set(RHINE_CORE_SOURCES ${RHINE_APP_SOURCES})
 list(FILTER RHINE_CORE_SOURCES EXCLUDE REGEX
-     "/(main|Engine|Icon|RhiScene|OpticalScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/|/fsr/|/fg/")
+     "/(main|Engine|Icon|RhiScene|OpticalScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/|/fsr/|/fg/|/render/")
 list(REMOVE_ITEM RHINE_APP_SOURCES ${RHINE_CORE_SOURCES})
 add_library(RhineCore STATIC ${RHINE_CORE_SOURCES})
 target_include_directories(
@@ -226,12 +230,10 @@ if(RHINE_FFX_VK_AVAILABLE AND RHINE_FFX_SHADER_BLOBS_AVAILABLE)
     # 设置页编在 RhineCore 里，只凭"后端名"猜不出构建是否真编进了 FSR3：同一个后端 在不同构建配置下可能可用也可能不可用。把能力宏一并传给 RhineCore，让置灰逻辑
     # 按实际编译结果判断。这里只传宏，不链接 FidelityFX。
     target_compile_definitions(RhineCore PRIVATE RHINE_FSR3_VULKAN=1)
-    # VulkanPresenter 直接 #include <vulkan/vulkan.h>（头文件里没有平台守卫）， 所以只能在真有 Vulkan 头的构建里编。macOS 没有 Vulkan
-    # 头，无条件列入源列表 会让它在 `fatal error: 'vulkan/vulkan.h' file not found` 处直接失败。 FgBackend 与 Fsr3Backend 的 Vulkan
-    # 部分都在 RHINE_FSR3_VULKAN 守卫内，无需移出。
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/fg/VulkanPresenter.cpp Qt/src/fg/VulkanPresenter.h)
-    # FG 呈现层总装。头文件里包含 VulkanPresenter.h（连带 vulkan/vulkan.h）， 所以只能跟着 Vulkan 条件一起编。
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/fg/FgShell.cpp Qt/src/fg/FgShell.h)
+    # 保持 Vulkan 呈现原有的构建门控，只把设备/交换链操作移入适配器。
+    target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_VULKAN_PRESENTATION=1)
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/fg/VulkanPresenter.cpp Qt/src/fg/VulkanPresenter.h
+                                              Qt/src/render/VulkanPresentationBackend.cpp)
 endif()
 if(RHINE_FFX_DX12_AVAILABLE)
     target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_FSR3_DX12=1)
@@ -345,6 +347,14 @@ if(IOS)
     target_compile_options(RhineCore PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     include(Qt/IOS.cmake)
 elseif(APPLE)
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/render/MetalFxBackend.mm Qt/src/render/MetalFxBackend.h
+                                             Qt/src/render/FrameGenerator.h Qt/src/render/MotionPass.cpp
+                                             Qt/src/render/MotionPass.h Qt/src/render/SceneResources.h
+                                             Qt/tests/PresentationChecks.cpp)
+    qt_add_shaders(RhineMusicDatabase "rhine_metalfx_motion" PREFIX "/shaders" BASE "Qt/shaders"
+                   GLSL "150,300es" HLSL 50 MSL 12 FILES Qt/shaders/motion.vert)
+    target_link_libraries(RhineMusicDatabase PRIVATE "-weak_framework MetalFX" "-framework Metal")
+    target_compile_options(RhineMusicDatabase PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     target_sources(RhineCore PRIVATE Qt/src/Platform.mm)
     target_link_libraries(RhineCore PRIVATE "-framework Security" "-framework AppKit"
                                             "-framework MediaPlayer")

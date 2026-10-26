@@ -431,7 +431,11 @@ RhineFg::FrameGenerationUi frameGenerationUi(const Host *host, bool preferenceOn
     const auto &capability = RhineFg::capability();
     const auto active = RhineGraphics::activeBackend();
     const bool backendCapable = active.isEmpty() ? host->preference("graphics-backend") != "opengl"
-                                                : active == QLatin1String("vulkan");
+                                                : active == QLatin1String("vulkan")
+#ifdef Q_OS_MACOS
+                                                      || active == QLatin1String("metal")
+#endif
+        ;
     return RhineFg::frameGenerationUi(capability.compiledIn, capability.presentLayerActive,
                                       capability.interpolationAvailable, capability.reason,
                                       backendCapable, preferenceOn);
@@ -528,8 +532,10 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"GPU / 显卡 · 重启生效", gpuLabel, "gpu-index"});
     }
 #endif
+#ifndef Q_OS_MACOS
     // 垂直同步关闭后允许帧率超过屏幕刷新率，由交换链的呈现模式决定，重启生效。
     rows.append({"V-SYNC / 垂直同步 · 重启生效", vsync ? "开启" : "关闭", "vsync"});
+#endif
     // 渲染分辨率：内部目标按百分比创建，最终合成通道再缩放回窗口，重启后生效。
     // 小于 100 换帧率，大于 100 是超采样换抗锯齿，因此用 +/- 步进而不是点击循环。
     const auto renderScale = m_host->preference("render-scale").toInt();
@@ -539,7 +545,13 @@ void NativeHud::settings(double x, double y, double width) {
     const auto aaScale = m_host->preference("aa-scale").toInt();
     const auto fgUi = frameGenerationUi(m_host, m_host->preference("fg") == "on");
     // 这一栏同时包含抗锯齿与超分（FSR），所以标题不能只写"抗锯齿"。
+#ifdef Q_OS_MACOS
+    rows.append({"METALFX / 时域抗锯齿与超分辨率",
+                 RhineFg::capability().temporalAvailable ? "" : "系统或设备不支持",
+                 RhineFg::capability().temporalAvailable ? "aa-mode" : "aa-mode:unavailable"});
+#else
     rows.append({"AA & UPSCALING / 抗锯齿与超分辨率", "", "aa-mode"});
+#endif
     // 下拉块选项表在建表时确定：展开高度与绘制共用同一份列表，避免两处不一致。
     // 名称必须用 QStringLiteral：QLatin1String 会把 UTF-8 字节逐个当 Latin-1 解释，中文变乱码。
     // FSR 只有一个选项：内部按后端能力自动选择 FFX 计算后端（FSR3）或 EASU/RCAS
@@ -550,6 +562,9 @@ void NativeHud::settings(double x, double y, double width) {
                                                {"msaa", QStringLiteral("MSAA")},
                                                {"taa", QStringLiteral("TAA")},
                                                {"fsr", QStringLiteral("FSR")}};
+#ifdef Q_OS_MACOS
+    aaOptions = {{"off", QStringLiteral("关闭")}, {"metalfx", QStringLiteral("MetalFX Temporal")}};
+#endif
     // 旧版本保存过 fsr1 / fsr3，统一按合并后的 fsr 显示，避免升级后显示成"关闭"。
     const auto aaSelected = (aaMode == "fsr1" || aaMode == "fsr3") ? QStringLiteral("fsr") : aaMode;
     int aaIndex = 0;
@@ -591,6 +606,8 @@ void NativeHud::settings(double x, double y, double width) {
     // 抗锯齿的子设置紧跟主行，按当前模式决定显示哪些：SSAA 只有倍率，MSAA 只有采样数，
     // FSR1/FSR3 有档位与锐化，off/fxaa/taa 没有子设置。不适用的行直接不出现，
     // 避免调了没有任何效果。
+
+#ifndef Q_OS_MACOS
     if (aaMode == "ssaa") {
         rows.append({"AA SCALE / 抗锯齿倍率", "", "aa-scale"});
     } else if (aaMode == "msaa") {
@@ -599,9 +616,14 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"FSR QUALITY / FSR 档位", "", "fsr-quality"});
         rows.append({"FSR SHARPNESS / 锐化", "", "fsr-sharpness"});
     }
+#endif
     // 帧生成是独立开关，不随抗锯齿模式循环。呈现层在能力可用时常驻接管窗口，
     // 所以这里的开关即时生效、不需要重启；不可用时整行置灰并写明原因。
+#ifdef Q_OS_MACOS
+    rows.append({"METALFX / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
+#else
     rows.append({"FRAME GENERATION / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
+#endif
     // 内容高度随平台可用选项变化
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;

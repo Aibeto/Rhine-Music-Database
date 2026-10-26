@@ -503,7 +503,11 @@ void FrameProfiler::formatMetrics() {
     if (backend.isEmpty()) {
         backend = QStringLiteral("未知");
     }
+#ifdef Q_OS_MACOS
+    const auto aaMode = m_engine->renderConfiguration.snapshot().modeName;
+#else
     const auto aaMode = qEnvironmentVariable("RHINE_AA_MODE").toLower();
+#endif
     const auto aaName = [&aaMode]() -> QString {
         if (aaMode.isEmpty() || aaMode == "off") {
             return QStringLiteral("关闭");
@@ -567,6 +571,13 @@ void FrameProfiler::formatMetrics() {
                                   : qEnvironmentVariableIntValue("RHINE_FSR_SHARPNESS");
         aaLine += QStringLiteral(" · 锐化 %1%").arg(sharpness);
     }
+#ifdef Q_OS_MACOS
+    if (aaMode == "metalfx") {
+        const auto actual = m_engine->renderTelemetry.snapshot().value("implementation").toString();
+        aaLine = actual == "metalfx-temporal" ? QStringLiteral("MetalFX 时域抗锯齿 / 超分")
+                                             : QStringLiteral("MetalFX 未运行（系统或设备不支持）");
+    }
+#endif
     const int renderScale =
         qEnvironmentVariableIsEmpty("RHINE_RENDER_SCALE") ? 100 : qEnvironmentVariableIntValue("RHINE_RENDER_SCALE");
     const int supersample =

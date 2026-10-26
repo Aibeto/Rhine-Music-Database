@@ -43,6 +43,16 @@ Engine::Engine(QString path, bool offline, QObject *parent)
     app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
     connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
     connect(&app->hud, &NativeHud::localImportRequested, this, &Engine::localImportRequested);
+#ifdef Q_OS_MACOS
+    renderConfiguration.initialize([this](const QString &key) { return host.preference(key); });
+    connect(&host, &Host::preferenceChanged, this, [this](const QString &key, const QString &value) {
+        if (renderConfiguration.applyPreference(key, value)) {
+            m_temporalFramesRemaining = 0;
+            resetTemporalState();
+            emit stateChanged();
+        }
+    });
+#endif
     app->initialize();
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this,
             [this] { app->saveSession(); });
@@ -283,6 +293,11 @@ void Engine::setVisible(bool value) {
     } else {
         host.restoreMemoryBudget();
         m_originalSceneWarm = false;
+#ifdef Q_OS_MACOS
+        if (app->hud.sceneEnhancement && renderConfiguration.snapshot().temporal()) {
+            resetTemporalState();
+        }
+#endif
         wake(false);
         notifySceneRenderers(true);
         emit hudUpdated();
@@ -400,7 +415,11 @@ void Engine::tick() {
     // presented 不再增长，那时测出来的"帧率"是没有负载的数字，A/B 对比没有意义。
     static const bool forceAnimate = qEnvironmentVariableIsSet("RHINE_DIAG_ANIMATE");
     if (!forceAnimate && now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
-        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot") {
+        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot"
+#ifdef Q_OS_MACOS
+        && m_temporalFramesRemaining == 0
+#endif
+    ) {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();
@@ -639,7 +658,16 @@ void Engine::step(double time) {
     // 但时间性抗锯齿（FSR3/TAA）本身就是靠相位差累积历史，没有抖动它们只会反复混合
     // 同一张图、等于白做，所以这两者开启时无条件打开。AA 模式每帧读环境变量，切换免重启。
     const auto aaMode = qEnvironmentVariable("RHINE_AA_MODE");
+#ifdef Q_OS_MACOS
+    const bool metalFxTemporal = app->hud.sceneEnhancement && m_frame.value("mode") != "boot" &&
+                                 renderConfiguration.snapshot().temporal();
+    if (!metalFxTemporal) {
+        m_temporalFramesRemaining = 0;
+    }
+    const bool temporal = app->hud.sceneEnhancement ? metalFxTemporal : aaMode == "fsr3" || aaMode == "taa";
+#else
     const bool temporal = aaMode == "fsr3" || aaMode == "taa";
+#endif
     if (m_jitterEnabled || temporal) {
         m_jitterOffset = haltonJitter(m_jitterPhase);
         m_jitterPhase = (m_jitterPhase + 1) % 8;
@@ -694,8 +722,22 @@ void Engine::step(double time) {
     const bool showDiscAngle = current["kind"] == "song" && MusicPlayer::identity(current) == identity;
     m_frame["discAngle"] = showDiscAngle ? m_discAngle : 0;
     const bool discChanged = m_discRotating || previousDiscAngle != m_frame.value("discAngle").toDouble();
+#ifdef Q_OS_MACOS
+    bool visualChanged = discChanged || !stable || current != m_current || cover != m_cover ||
+                         coverRevision != m_coverRevision;
+#else
     const bool visualChanged = discChanged || !stable || current != m_current || cover != m_cover ||
                                coverRevision != m_coverRevision;
+#endif
+#ifdef Q_OS_MACOS
+    if (metalFxTemporal && (visualChanged || m_frame["temporalReset"].toBool())) {
+        m_temporalFramesRemaining = 8;
+    }
+    if (metalFxTemporal && m_temporalFramesRemaining > 0) {
+        --m_temporalFramesRemaining;
+        visualChanged = true;
+    }
+#endif
     m_coverRevision = coverRevision;
     m_current = current;
     m_cover = object["cover"].toString();

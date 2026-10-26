@@ -1,10 +1,13 @@
-#include "FgShell.h"
+#include "PresentationShell.h"
+#ifdef Q_OS_MACOS
+#include "MetalFxBackend.h"
+#endif
 
-#include "FgBackend.h"
-#include "FgCapability.h"
-#include "FgConfig.h"
-#include "FgFrameTap.h"
-#include "FgHost.h"
+#include "../fg/FgBackend.h"
+#include "../fg/FgCapability.h"
+#include "../fg/FgConfig.h"
+#include "../fg/FgFrameTap.h"
+#include "SceneLayerHost.h"
 
 #include "../Engine.h"
 
@@ -25,8 +28,6 @@
 #include <QWheelEvent>
 #include <QQuickWindow>
 #include <QTimer>
-#include <QVulkanFunctions>
-#include <QVulkanInstance>
 #include <QWindow>
 
 #include <rhi/qrhi.h>
@@ -41,8 +42,7 @@ namespace {
 // 合成通道的 uniform：clipSpaceCorrMatrix（64）+ params vec4（16）。
 constexpr int kFgUniformSize = 64 + 16;
 
-QShader loadShader(const QString &name)
-{
+QShader loadShader(const QString &name) {
     QFile f(":/shaders/" + name + ".qsb");
     if (!f.open(QIODevice::ReadOnly)) {
         qWarning() << "FG: 缺少着色器" << name;
@@ -51,86 +51,96 @@ QShader loadShader(const QString &name)
     return QShader::fromSerialized(f.readAll());
 }
 
-quint64 bindingKey(const QRhiTexture *a, const QRhiTexture *b)
-{
+quint64 bindingKey(const QRhiTexture *a, const QRhiTexture *b) {
     return (quint64(quintptr(a)) * 0x9E3779B97F4A7C15ull) ^ quint64(quintptr(b));
 }
 
-}  // namespace
+} // namespace
 
-FgShell::FgShell(QQmlEngine &engine, Engine &backend, QObject *parent)
-    : QObject(parent), m_engine(&engine), m_backend(&backend)
-{
+PresentationShell::PresentationShell(QQmlEngine &engine, Engine &backend, QString backendName,
+                                     QObject *parent)
+    : QObject(parent), m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
 }
 
-void FgShell::shutdown()
-{
-    if (m_timer)
-        m_timer->stop();
-    releaseSwapchainResources();
-    if (m_presenter)
-        m_presenter->release();
-    RhineFg::setEnabled(false);
-}
-
-FgShell::~FgShell()
-{
-    shutdown();
-    if (m_rhi) {
-        // 管线与 SRB 都建在 QRhi 上，必须先于 QRhi 销毁。
-        delete m_pipeline;
-        m_pipeline = nullptr;
-        delete m_pipelineBindings;
-        m_pipelineBindings = nullptr;
-        for (auto *srb : std::as_const(m_bindingCache))
-            delete srb;
-        m_bindingCache.clear();
-        for (auto *resource : std::as_const(m_ownedResources))
-            delete resource;
-        m_ownedResources.clear();
-        m_compositeUbo = nullptr;
-        m_sampler = nullptr;
-        m_pipelineBase = nullptr;
+/** 停调度并按 GPU 引用顺序释放资源；原生窗口留到析构，避免在自身事件处理中销毁。 */
+void PresentationShell::shutdown() {
+    if (m_stopped) {
+        return;
     }
-    // 退出路径实测崩溃在 ffxFrameInterpolationContextDestroy → DestroyBackendContextVK
-    // 内的 free/munmap。先把 GPU 队列排空，避免 FFX 在还有队列引用时释放描述符池与
-    // uniform 内存（驱动侧会踩到已失效的池）。排空本身无害，只在退出时多等一帧。
-    if (m_rhi)
+    m_stopped = true;
+    if (m_timer) {
+        m_timer->stop();
+    }
+    if (m_releaseTimer) {
+        m_releaseTimer->stop();
+    }
+    RhineFg::setEnabled(false);
+#ifdef Q_OS_MACOS
+    m_backend->metalFxInputs = {};
+#endif
+    if (m_rhi) {
         m_rhi->finish();
+    }
+    releaseSwapchainResources();
     m_fg.reset();
     m_host.reset();
-    m_presenter.reset();
-    // QRhi（及其背后的 VkDevice/VkInstance）必须先于 QWindow 销毁：QWindow 一拆，
-    // 平台层的 wl_display/wl_surface 就没了，而 Wayland 客户端线程仍在读事件队列，
-    // 实测会在 wl_display_read_events 里 abort()。顺序错了就是退出即崩。
-    m_rhi.reset();
-    m_window.reset();
-    m_instance.reset();
-    // 呈现层没了，面板不该继续显示上一轮的旧数字。
+    delete m_pipelineBindings;
+    m_pipelineBindings = nullptr;
+    for (auto *resource : std::as_const(m_ownedResources)) {
+        delete resource;
+    }
+    m_ownedResources.clear();
+    if (m_presenter) {
+        m_presenter->release();
+    }
     RhineFg::clear();
+    m_backend->setWindow(nullptr);
+    m_engine->rootContext()->setContextProperty(QStringLiteral("rhineHostWindow"),
+                                                QVariant::fromValue(static_cast<QWindow *>(nullptr)));
 }
 
-bool FgShell::compiledIn()
-{
-#if defined(RHINE_FSR3_VULKAN) && RHINE_FSR3_VULKAN
+PresentationShell::~PresentationShell() {
+    shutdown();
+    m_presenter.reset();
+}
+
+bool PresentationShell::compiledIn() {
+#if defined(Q_OS_MACOS) && __has_include(<MetalFX/MTLFXFrameInterpolator.h>)
+    return true;
+#elif defined(RHINE_FSR3_VULKAN) && RHINE_FSR3_VULKAN
     return FgBackend::compiledIn();
 #else
     return false;
 #endif
 }
 
-bool FgShell::requested()
-{
+bool PresentationShell::supportsBackend(const QString &name) {
+#if QT_CONFIG(metal)
+    if (name == QLatin1String("metal")) {
+        return true;
+    }
+#endif
+#if defined(RHINE_VULKAN_PRESENTATION) && RHINE_VULKAN_PRESENTATION
+    return name == QLatin1String("vulkan");
+#else
+    Q_UNUSED(name);
+    return false;
+#endif
+}
+
+bool PresentationShell::requested() const {
+#ifdef Q_OS_MACOS
+    return m_backend->renderConfiguration.snapshot().interpolation;
+#else
     return FgConfig::fromEnvironment().enabled;
+#endif
 }
 
-QWindow *FgShell::window() const
-{
-    return m_window.get();
+QWindow *PresentationShell::window() const {
+    return m_window;
 }
 
-QString FgShell::resolveQmlUrl(const QString &file) const
-{
+QString PresentationShell::resolveQmlUrl(const QString &file) const {
     // qt_add_qml_module 的默认资源前缀是 /qt/qml；也兼容直接以 URI 命名的老布局。
     const QStringList candidates{
         QStringLiteral("qrc:/qt/qml/RhineMusic/") + file,
@@ -138,93 +148,42 @@ QString FgShell::resolveQmlUrl(const QString &file) const
         QStringLiteral("qrc:/") + file,
     };
     for (const auto &candidate : candidates) {
-        if (QFileInfo::exists(candidate))
+        if (QFileInfo::exists(candidate)) {
             return candidate;
+        }
     }
     return candidates.first();
 }
 
-bool FgShell::initializeVulkan()
-{
-    m_instance = std::make_unique<QVulkanInstance>();
-    // 交换链与 present 只要 1.1 就够；调高只会让旧驱动在设备创建时更容易失败。
-    m_instance->setApiVersion(QVersionNumber(1, 1));
-    if (!m_instance->create()) {
-        m_error = QStringLiteral("QVulkanInstance 创建失败（errorCode=%1）")
-                      .arg(int(m_instance->errorCode()));
+bool PresentationShell::initializeBackend() {
+    m_presenter = RhineRender::createPresentationBackend(m_backendName);
+    if (!m_presenter || !m_presenter->initialize(m_size, FgConfig::fromEnvironment().vsync)) {
+        m_error = m_presenter ? m_presenter->lastError() : QStringLiteral("当前呈现后端未编入");
         return false;
     }
-
-    m_window = std::make_unique<QWindow>();
-    // 必须声明成 Vulkan surface：平台窗口默认按 raster/OpenGL 建，
-    // 那样 surfaceForWindow() 永远返回 VK_NULL_HANDLE。
-    m_window->setSurfaceType(QSurface::VulkanSurface);
-    m_window->setVulkanInstance(m_instance.get());
-    m_window->setTitle(QStringLiteral("Rhine Music Database"));
-    m_window->resize(m_size.isEmpty() ? QSize(1280, 720) : m_size);
-    m_window->create();
-    if (!m_window->handle()) {
-        m_error = QStringLiteral("QWindow 没有创建出平台窗口");
-        return false;
-    }
+    m_window = m_presenter->window();
+    m_rhi = m_presenter->rhi();
     m_window->installEventFilter(this);
-
-    QRhiVulkanInitParams params;
-    params.inst = m_instance.get();
-    // 自建交换链需要设备支持该扩展；QRhi 默认不请求它。
-    params.deviceExtensions = {QByteArrayLiteral("VK_KHR_swapchain")};
-    m_rhi.reset(QRhi::create(QRhi::Vulkan, &params, {}));
-    if (!m_rhi) {
-        m_error = QStringLiteral("QRhi(Vulkan) 创建失败");
-        return false;
-    }
-
-    m_device = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles())->dev;
-    if (m_device == VK_NULL_HANDLE) {
-        m_error = QStringLiteral("拿不到 QRhi 的 VkDevice");
-        return false;
-    }
-
-    m_window->show();
-    // Wayland 下 surface 要等窗口真正 expose 之后才存在，只 create() 会拿到空句柄。
-    QElapsedTimer exposeClock;
-    exposeClock.start();
-    while (!m_window->isExposed() && exposeClock.elapsed() < 2000)
-        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
-
-    const VkSurfaceKHR surface = QVulkanInstance::surfaceForWindow(m_window.get());
-    if (surface == VK_NULL_HANDLE) {
-        m_error = QStringLiteral("拿不到 QWindow 的 VkSurfaceKHR");
-        return false;
-    }
-
     m_size = m_window->size();
-    const auto config = FgConfig::fromEnvironment();
-    m_presenter = std::make_unique<VulkanPresenter>();
-    if (!m_presenter->init(m_rhi.get(), surface, m_size, config.vsync)) {
-        m_error = QStringLiteral("交换链创建失败：%1").arg(m_presenter->lastError());
-        return false;
-    }
     return true;
 }
 
-bool FgShell::initializeLayers()
-{
+bool PresentationShell::initializeLayers() {
     // Overlay.qml 的窗口行为（拖动/最大化/关闭/全屏）原来由 Main.qml 的 Window 提供；
     // FG 路径没有那个 Window，改为把真实的 QWindow 注入上下文。
     m_engine->rootContext()->setContextProperty(QStringLiteral("rhineHostWindow"),
-                                               QVariant::fromValue(m_window.get()));
+                                                QVariant::fromValue(m_window));
 
-    m_host = std::make_unique<FgHost>();
+    m_host = std::make_unique<SceneLayerHost>();
+    m_host->requestRender = [this] { scheduleNext(); };
     if (!m_host->start(*m_engine, QUrl(resolveQmlUrl(QStringLiteral("Scene3D.qml"))),
-                       QUrl(resolveQmlUrl(QStringLiteral("Overlay.qml"))), m_rhi.get(),
-                       m_instance.get())) {
+                       QUrl(resolveQmlUrl(QStringLiteral("Overlay.qml"))), m_rhi,
+                       m_presenter->vulkanInstance(), m_window)) {
         m_error = QStringLiteral("离屏场景建立失败：%1").arg(m_host->lastError());
         return false;
     }
     m_host->resize(m_size);
-    // 离屏层不会自己去拿屏幕 DPR（QQuickRenderControl 不支持），这里显式注入：
-    // 由我们自己把 contentItem 放大到物理像素、QML 根节点保持逻辑像素。
+    // 纹理按物理尺寸分配；Qt Quick 的排版和输入始终保持逻辑像素。
     m_dpr = m_window->devicePixelRatio();
     m_windowDpr = m_dpr;
     m_host->setPixelRatio(m_dpr);
@@ -238,40 +197,54 @@ bool FgShell::initializeLayers()
     // 这里显式调一次 Overlay.qml 导出的 focusInputLayer()（内部是 forceActiveFocus，
     // 对未激活的离屏窗口同样有效），与默认路径对齐。
     if (QQuickItem *overlayRoot = m_host->overlayRootItem()) {
-        const bool focused =
-            QMetaObject::invokeMethod(overlayRoot, "focusInputLayer", Qt::DirectConnection);
+        const bool focused = QMetaObject::invokeMethod(overlayRoot, "focusInputLayer", Qt::DirectConnection);
         QQuickItem *focusItem = m_host->overlayWindow()->activeFocusItem();
-        qInfo().noquote() << "FG: 覆盖层输入焦点"
-                          << (focused && focusItem ? "已建立" : "未建立") << "activeFocusItem:"
+        qInfo().noquote() << "FG: 覆盖层输入焦点" << (focused && focusItem ? "已建立" : "未建立")
+                          << "activeFocusItem:"
                           << (focusItem ? focusItem->metaObject()->className() : "null");
     }
     // 只在这里打开每帧输入通道：RhiScene 的渲染器只在 tap 打开时才发布。
-    RhineFg::setEnabled(true);
-    m_fgAvailable = FgBackend::supported(m_rhi.get());
-    if (m_fgAvailable)
+#ifdef Q_OS_MACOS
+    // Main.qml 未加载时仍需接上原窗口的资源统计清理，否则隐藏后会残留旧计数。
+    QObject::connect(
+        m_host->sceneWindow(), &QQuickWindow::sceneGraphInvalidated, m_backend,
+        [this] { m_backend->recordResourceRelease(); }, Qt::DirectConnection);
+    const bool temporalAvailable = RhineRender::MetalFxTemporal::supported(m_rhi);
+    m_backend->renderConfiguration.setNativeTemporalAvailable(temporalAvailable);
+    RhineFg::capabilityMutable().temporalAvailable = temporalAvailable;
+    m_fg = RhineRender::createMetalFxFrameGenerator(m_rhi);
+    m_fgAvailable = bool(m_fg);
+#else
+    m_fgAvailable = FgBackend::supported(m_rhi);
+    if (m_fgAvailable) {
         m_fg = std::make_unique<FgBackend>();
+    }
+#endif
+#ifdef Q_OS_MACOS
+    RhineFg::setEnabled(false);
+    m_backend->metalFxInputs = {};
+#else
+    RhineFg::setEnabled(m_fgAvailable);
+#endif
     return true;
 }
 
-QSize FgShell::pixelSize() const
-{
-    return QSize(qMax(1, qRound(m_size.width() * m_dpr)),
-                 qMax(1, qRound(m_size.height() * m_dpr)));
+QSize PresentationShell::pixelSize() const {
+    return QSize(qMax(1, qRound(m_size.width() * m_dpr)), qMax(1, qRound(m_size.height() * m_dpr)));
 }
 
-bool FgShell::ensureCompositeResources()
-{
-    if (m_compositeUbo && m_sampler)
+bool PresentationShell::ensureCompositeResources() {
+    if (m_compositeUbo && m_sampler) {
         return true;
+    }
 
-    if (!loadShader(QStringLiteral("fgComposite.vert")).isValid()
-        || !loadShader(QStringLiteral("fgComposite.frag")).isValid()) {
+    if (!loadShader(QStringLiteral("fgComposite.vert")).isValid() ||
+        !loadShader(QStringLiteral("fgComposite.frag")).isValid()) {
         m_error = QStringLiteral("fgComposite 着色器缺失");
         return false;
     }
 
-    m_compositeUbo = m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
-                                      kFgUniformSize);
+    m_compositeUbo = m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, kFgUniformSize);
     if (!m_compositeUbo->create()) {
         m_error = QStringLiteral("合成 uniform 缓冲创建失败");
         return false;
@@ -301,10 +274,10 @@ bool FgShell::ensureCompositeResources()
         QRhiShaderResourceBinding::uniformBuffer(
             0, QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage,
             m_compositeUbo),
-        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage,
-                                                  m_pipelineBase, m_sampler),
-        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
-                                                  m_pipelineBase, m_sampler),
+        QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, m_pipelineBase,
+                                                  m_sampler),
+        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage, m_pipelineBase,
+                                                  m_sampler),
     });
     if (!m_pipelineBindings->create()) {
         m_error = QStringLiteral("合成模板 SRB 创建失败");
@@ -313,11 +286,11 @@ bool FgShell::ensureCompositeResources()
     return true;
 }
 
-QRhiShaderResourceBindings *FgShell::bindingsFor(QRhiTexture *base, QRhiTexture *overlay)
-{
+QRhiShaderResourceBindings *PresentationShell::bindingsFor(QRhiTexture *base, QRhiTexture *overlay) {
     const quint64 key = bindingKey(base, overlay);
-    if (auto it = m_bindingCache.constFind(key); it != m_bindingCache.constEnd())
+    if (auto it = m_bindingCache.constFind(key); it != m_bindingCache.constEnd()) {
         return *it;
+    }
 
     auto *srb = m_rhi->newShaderResourceBindings();
     srb->setBindings({
@@ -326,8 +299,8 @@ QRhiShaderResourceBindings *FgShell::bindingsFor(QRhiTexture *base, QRhiTexture 
             m_compositeUbo),
         QRhiShaderResourceBinding::sampledTexture(1, QRhiShaderResourceBinding::FragmentStage, base,
                                                   m_sampler),
-        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
-                                                  overlay, m_sampler),
+        QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage, overlay,
+                                                  m_sampler),
     });
     if (!srb->create()) {
         delete srb;
@@ -337,78 +310,20 @@ QRhiShaderResourceBindings *FgShell::bindingsFor(QRhiTexture *base, QRhiTexture 
     return srb;
 }
 
-bool FgShell::ensureSwapchainResources()
-{
-    if (!m_presenter || !m_presenter->ready())
-        return false;
-    const quint32 count = m_presenter->imageCount();
-    const QSize extent = m_presenter->extent();
-    if (count == 0 || extent.isEmpty())
-        return false;
-    if (!m_swapTextures.empty() && m_swapSize == extent
-        && qint32(m_swapTextures.size()) == qint32(count)) {
-        return true;
-    }
-    releaseSwapchainResources();
-    m_swapSize = extent;
-
-    for (quint32 i = 0; i < count; ++i) {
-        const VkImage image = m_presenter->imageAt(i);
-        if (image == VK_NULL_HANDLE) {
-            m_error = QStringLiteral("交换链第 %1 张图像为空").arg(i);
-            return false;
-        }
-        // 包装格式必须与交换链图像的真实通道序一致。QRhi 里 RGBA8 与 BGRA8 是两个
-        // 不同的格式：按 RGBA8 去解释一张 B8G8R8A8 图像，着色器写进第 0 字节的 R
-        // 会被合成器当成 B 读出来——整屏 R/B 互换（暖色场景整体发蓝，AA 边缘出现
-        // 彩色光点）。presenter 只会选 B8G8R8A8_UNORM(44) 或 R8G8B8A8_UNORM(37)。
-        const int swapFormat = int(m_presenter->colorFormat());
-        const QRhiTexture::Format textureFormat =
-            (swapFormat == 44 || swapFormat == 50) ? QRhiTexture::BGRA8 : QRhiTexture::RGBA8;
-        auto texture = std::unique_ptr<QRhiTexture>(m_rhi->newTexture(textureFormat, extent));
-        texture->setFlags(QRhiTexture::RenderTarget);
-        // 布局不在这里固定：每帧合成前用 setNativeLayout(UNDEFINED) 声明"内容作废"，
-        // 因此不需要跟踪 present 之后的真实布局。
-        if (!texture->createFrom(
-                {quint64(quintptr(image)), int(VK_IMAGE_LAYOUT_UNDEFINED)})) {
-            m_error = QStringLiteral("包装交换链图像失败（第 %1 张）").arg(i);
-            return false;
-        }
-        auto target = std::unique_ptr<QRhiTextureRenderTarget>(
-            m_rhi->newTextureRenderTarget({QRhiColorAttachment(texture.get())}));
-        auto pass =
-            std::unique_ptr<QRhiRenderPassDescriptor>(target->newCompatibleRenderPassDescriptor());
-        if (!pass) {
-            m_error = QStringLiteral("交换链渲染通道描述符创建失败");
-            return false;
-        }
-        target->setRenderPassDescriptor(pass.get());
-        if (!target->create()) {
-            m_error = QStringLiteral("交换链渲染目标创建失败");
-            return false;
-        }
-        m_swapTextures.push_back(std::move(texture));
-        m_swapPasses.push_back(std::move(pass));
-        m_swapTargets.push_back(std::move(target));
-    }
-    return true;
+bool PresentationShell::ensureSwapchainResources() {
+    return m_presenter && m_presenter->ready();
 }
 
-void FgShell::releaseSwapchainResources()
-{
-    m_swapTargets.clear();
-    m_swapPasses.clear();
-    m_swapTextures.clear();
-    // 管线绑定了旧渲染通道描述符，交换链一换就必须重建。
+void PresentationShell::releaseSwapchainResources() {
     delete m_pipeline;
     m_pipeline = nullptr;
-    for (auto *srb : std::as_const(m_bindingCache))
-        delete srb;
+    for (auto *binding : std::as_const(m_bindingCache)) {
+        delete binding;
+    }
     m_bindingCache.clear();
 }
 
-bool FgShell::recreateSwapchain()
-{
+bool PresentationShell::recreateSwapchain() {
     // 强制重建：OutOfDate 的交换链即使窗口尺寸没变也已经不可用，不能走 resize() 里
     // "尺寸没变就返回"的捷径——以前就是被这条捷径吞掉，acquire 于是永远 OutOfDate。
     if (!m_presenter->resize(pixelSize(), true)) {
@@ -420,8 +335,8 @@ bool FgShell::recreateSwapchain()
     // 呈现（典型是没有直连显示输出的独显），继续重建只会白等 GPU 空闲，直接判死。
     if (++m_recreateStreak > 5) {
         m_failed = true;
-        m_error = QStringLiteral("呈现层连续 %1 次重建都没有新帧上屏，判定这台设备无法呈现")
-                      .arg(m_recreateStreak);
+        m_error =
+            QStringLiteral("呈现层连续 %1 次重建都没有新帧上屏，判定这台设备无法呈现").arg(m_recreateStreak);
         return false;
     }
     m_needRecreate = false;
@@ -433,14 +348,14 @@ bool FgShell::recreateSwapchain()
     m_pendingRealFrame = false;
     m_forcePresent = true;
     m_framesSinceRecreate = 0;
-    if (m_fg)
+    if (m_fg) {
         m_fg->requestReset();
+    }
     releaseSwapchainResources();
     return ensureSwapchainResources();
 }
 
-void FgShell::syncSizes()
-{
+void PresentationShell::syncSizes() {
     // 设备像素比会在窗口被拖到另一块屏幕、或系统缩放变化时改变。
     // 它一变，交换链和离屏纹理的目标尺寸都变了，必须重建，否则会出现
     // "画面只占左上角一块"（纹理偏大）或"整体糊一层"（纹理偏小）。
@@ -452,13 +367,14 @@ void FgShell::syncSizes()
             m_host->setPixelRatio(m_dpr);
             m_needRecreate = true;
             m_forcePresent = true;
-            qInfo().noquote() << "FG: 窗口设备像素比" << windowDpr << "离屏层实际比例" << m_dpr
-                              << "物理像素" << pixelSize();
+            qInfo().noquote() << "FG: 窗口设备像素比" << windowDpr << "离屏层实际比例" << m_dpr << "物理像素"
+                              << pixelSize();
         }
     }
     const QSize windowSize = m_window->size();
-    if (windowSize.isEmpty())
+    if (windowSize.isEmpty()) {
         return;
+    }
     if (windowSize != m_size) {
         m_size = windowSize;
         m_host->resize(m_size);
@@ -469,68 +385,78 @@ void FgShell::syncSizes()
     //
     // 为什么：FG 路径没有 Main.qml 的 Window（它的 onWidthChanged → rhine.resize()），
     // 而 Engine 默认停在 1280x720，HUD 舞台宽度是 width/(height/1080)=1920。而
-    // initializeVulkan() 在 show() 之后就已经把 m_size 读成真实尺寸（如 1262x1370）
+    // initializeBackend() 在 show() 之后就已经把 m_size 读成真实尺寸（如 1262x1370）
     // 了，于是第一次 step() 时 windowSize == m_size，"尺寸没变"——同步永远不发生，
     // Engine 一直按 1920 的逻辑宽度布局 HUD：导航、歌曲列表、Tab Mode/COLLECTION、
     // 弹窗右列、播放条右半边这些按 width 相对定位的内容全被画到离屏层外面，看起来
     // 就是"UI 少了一整块"；同时 fit() 不再截断，文字也变长。
     // Engine::resize() 对相同尺寸会早退，所以这里每帧调用没有额外开销。
     m_backend->resize(m_size.width(), m_size.height());
-    m_backend->setVisible(m_window->isVisible() && m_window->visibility() != QWindow::Minimized);
 }
 
-bool FgShell::armFrameGeneration()
-{
-    if (!m_fg)
+const RhineFg::FrameInputs &PresentationShell::currentFrameInputs() const {
+#ifdef Q_OS_MACOS
+    return m_backend->metalFxInputs;
+#else
+    return RhineFg::latest();
+#endif
+}
+
+bool PresentationShell::armFrameGeneration() {
+    if (!m_fg) {
         return false;
-    const RhineFg::FrameInputs &inputs = RhineFg::latest();
-    if (!inputs.depth || !inputs.motionVectors || inputs.renderSize.isEmpty()
-        || inputs.displaySize.isEmpty()) {
+    }
+    const RhineFg::FrameInputs &inputs = currentFrameInputs();
+    if (!inputs.depth || !inputs.motionVectors || inputs.renderSize.isEmpty() ||
+        inputs.displaySize.isEmpty()) {
         return false;
     }
     // 只有场景真的重渲了才有新的光流输入；相机参数（列表页与详情页 near/far 不同）
     // 每帧都要写，纹理新鲜度用 serial 判断。
-    if (inputs.serial == m_lastTapSerial && m_fg->available())
+    if (inputs.serial == m_lastTapSerial && m_fg->available()) {
         return m_fgArmed;
+    }
     m_lastTapSerial = inputs.serial;
 
     // 注意：resize() 会销毁/重建 GPU 资源并等设备空闲，必须在任何 QRhi 帧之外调用，
     // 不能在 beginOffscreenFrame 之后——那样会卡死在设备等待上。
-    // FgHost 的场景纹理是 RGBA8（Qt 的渲染目标格式），FG 的三张主纹理格式必须一致，
+    // SceneLayerHost 的场景纹理是 RGBA8（Qt 的渲染目标格式），FG 的三张主纹理格式必须一致，
     // 所以这里显式传 RGBA8，而不是用 FgBackend 的默认 RGBA16F。
     // displaySize 必须是**物理像素**：插帧的输出要直接铺满交换链。若沿用逻辑尺寸，
     // 高 DPI 下 FG 输出小于合成目标，画面会被拉伸而发糊。renderSize 保持原值——
     // 那是运动矢量/深度的分辨率，跟着 3D 渲染尺寸走，与设备像素比无关。
     const QSize fgDisplaySize = pixelSize().isEmpty() ? inputs.displaySize : pixelSize();
-    if (!m_fg->resize(m_rhi.get(), inputs.renderSize, fgDisplaySize, QRhiTexture::RGBA8))
+    if (!m_fg->resize(m_rhi, inputs.renderSize, fgDisplaySize, QRhiTexture::RGBA8)) {
         return false;
+    }
     m_fg->setCamera(inputs.nearPlane, inputs.farPlane, inputs.fovYRadians, inputs.frameTimeMs);
     m_fg->setJitter(float(inputs.jitter.x()), float(inputs.jitter.y()));
-    if (inputs.reset)
+    if (inputs.reset) {
         m_fg->requestReset();
+    }
     m_fgArmed = true;
-    RhineFg::publishActive(m_fg->available());
+    RhineFg::publishCapability(true, true, m_fg->available());
     return true;
 }
 
-bool FgShell::recordFrameGeneration(QRhiCommandBuffer *cb)
-{
-    if (!m_fg || !m_fgArmed)
+bool PresentationShell::recordFrameGeneration(QRhiCommandBuffer *cb) {
+    if (!m_fg || !m_fgArmed) {
         return false;
+    }
 
     QRhiTexture *color = m_host->sceneTexture();
     cb->beginExternal();
     m_probe.restart();
     // prepare 里跑的是光流（ffxOpticalflowContextDispatch）与深度重建，
     // dispatch 里跑的是帧插值本身——两者的成本差一个数量级，分开计才有诊断价值。
-    const bool prepared = m_fg->prepare(m_rhi.get(), cb, color, RhineFg::latest().depth,
-                                       RhineFg::latest().motionVectors);
+    const bool prepared =
+        m_fg->prepare(m_rhi, cb, color, currentFrameInputs().depth, currentFrameInputs().motionVectors);
     m_stats.prepareMs = blend(m_stats.prepareMs, tookMs());
     bool dispatched = false;
     if (prepared) {
         // 3D 层不带 UI，所以"含 UI 的颜色"与"无 UI 的颜色"是同一张：UI 由合成通道
         // 在插值之后单独叠加（UI 不该跟着插值动，否则文字会重影）。
-        dispatched = m_fg->dispatch(m_rhi.get(), cb, color, color, nullptr);
+        dispatched = m_fg->dispatch(m_rhi, cb, color, color, nullptr);
         m_stats.dispatchMs = blend(m_stats.dispatchMs, tookMs());
     }
     cb->endExternal();
@@ -543,45 +469,47 @@ bool FgShell::recordFrameGeneration(QRhiCommandBuffer *cb)
     return !m_fg->lastFrameReset();
 }
 
-double FgShell::tookMs()
-{
-    if (!m_probe.isValid())
+double PresentationShell::tookMs() {
+    if (!m_probe.isValid()) {
         return 0.0;
+    }
     const double ms = double(m_probe.nsecsElapsed()) / 1e6;
     m_probe.restart();
     return ms;
 }
 
-double FgShell::blend(double previous, double sample)
-{
+double PresentationShell::blend(double previous, double sample) {
     // 指数滑动平均：单帧耗时会被排队与调度拉出几倍抖动，面板要的是趋势不是尖峰。
     // 前 1/0.15 ≈ 7 帧就能跟上真实水平，切换插值开关后不到 0.15 秒就稳定下来。
     constexpr double kAlpha = 0.15;
-    if (previous <= 0.0)
+    if (previous <= 0.0) {
         return sample;
+    }
     return previous * (1.0 - kAlpha) + sample * kAlpha;
 }
 
-void FgShell::recordGap(double gapMs)
-{
+void PresentationShell::recordGap(double gapMs) {
     m_gapRing[size_t(m_gapCursor)] = gapMs;
     m_gapCursor = (m_gapCursor + 1) % kGapCapacity;
-    if (m_gapFilled < kGapCapacity)
+    if (m_gapFilled < kGapCapacity) {
         m_gapFilled++;
+    }
     // 每次呈现都排序 600 个数没必要，但要够新：面板每 500ms 采一次样，
     // 每 8 帧刷一次（60Hz 下约 130ms）既保证新鲜，成本也可以忽略。
-    if (m_presentedFrames % 8 == 0)
+    if (m_presentedFrames % 8 == 0) {
         refreshGapStats();
+    }
 }
 
-void FgShell::refreshGapStats()
-{
-    if (m_gapFilled < 2)
+void PresentationShell::refreshGapStats() {
+    if (m_gapFilled < 2) {
         return;
+    }
     QList<double> sorted;
     sorted.reserve(m_gapFilled);
-    for (int index = 0; index < m_gapFilled; ++index)
+    for (int index = 0; index < m_gapFilled; ++index) {
         sorted.append(m_gapRing[size_t(index)]);
+    }
     std::sort(sorted.begin(), sorted.end());
     const auto pick = [&sorted](double quantile) {
         const int last = sorted.size() - 1;
@@ -593,8 +521,8 @@ void FgShell::refreshGapStats()
     m_stats.gapP99Ms = pick(0.99);
     m_stats.gapMaxMs = sorted.last();
     const auto over = [&sorted](double limit) {
-        return int(std::count_if(sorted.cbegin(), sorted.cend(),
-                                 [limit](double gap) { return gap > limit; }));
+        return int(
+            std::count_if(sorted.cbegin(), sorted.cend(), [limit](double gap) { return gap > limit; }));
     };
     m_stats.over33 = over(33.0);
     m_stats.over50 = over(50.0);
@@ -602,34 +530,11 @@ void FgShell::refreshGapStats()
     m_stats.sampleCount = int(sorted.size());
 }
 
-QString FgShell::swapchainFormatName(int format)
-{
-    // 直接写数值而不引用 VK_FORMAT_* 枚举：这里只是给面板看的可读名，
-    // 而枚举值的稳定性由 Vulkan 规范保证。未知格式回退成数字，不隐藏信息。
-    switch (format) {
-    case 37:
-        return QStringLiteral("R8G8B8A8_UNORM");
-    case 43:
-        return QStringLiteral("R8G8B8A8_SRGB");
-    case 44:
-        return QStringLiteral("B8G8R8A8_UNORM");
-    case 50:
-        return QStringLiteral("B8G8R8A8_SRGB");
-    case 58:
-        return QStringLiteral("A2B10G10R10_UNORM_PACK32");
-    case 97:
-        return QStringLiteral("R16G16B16A16_SFLOAT");
-    default:
-        return QStringLiteral("VkFormat %1").arg(format);
-    }
-}
-
-void FgShell::publishStats(bool interpolatedThisStep)
-{
-    const RhineFg::FrameInputs &inputs = RhineFg::latest();
+void PresentationShell::publishStats(bool interpolatedThisStep) {
+    const RhineFg::FrameInputs &inputs = currentFrameInputs();
     m_stats.layerActive = m_started && m_window && m_window->isVisible();
     m_stats.interpolationAvailable = m_fgAvailable;
-    m_stats.interpolationWanted = FgConfig::fromEnvironment().enabled;
+    m_stats.interpolationWanted = requested();
     m_stats.interpolationActive = interpolatedThisStep;
     m_stats.depthReady = inputs.depth != nullptr;
     m_stats.motionVectorsReady = inputs.motionVectors != nullptr;
@@ -637,35 +542,29 @@ void FgShell::publishStats(bool interpolatedThisStep)
     m_stats.interpolated = m_interpolatedFrames;
     m_stats.rendered = m_renderedFrames;
     m_stats.renderSize = inputs.renderSize;
+#ifdef Q_OS_MACOS
+    if (m_stats.renderSize.isEmpty()) {
+        const auto telemetry = m_backend->renderTelemetry.snapshot();
+        m_stats.renderSize = {telemetry.value("renderWidth").toInt(),
+                              telemetry.value("renderHeight").toInt()};
+    }
+#endif
     m_stats.displaySize = m_presenter ? m_presenter->extent() : QSize();
+    ++m_stats.serial;
     RhineFg::publish(m_stats);
 }
 
-bool FgShell::composite(QRhiCommandBuffer *cb, QRhiTexture *base, QRhiTexture *overlay,
-                        quint32 imageIndex)
-{
-    if (imageIndex >= m_swapTargets.size())
+bool PresentationShell::composite(QRhiCommandBuffer *cb, QRhiTexture *base, QRhiTexture *overlay,
+                                  quint32 imageIndex, QRhiRenderTarget *overrideTarget) {
+    const RhineRender::PresentationBackend::Frame frame{imageIndex};
+    QRhiRenderTarget *target = overrideTarget ? overrideTarget : m_presenter->target(frame);
+    if (!target) {
         return false;
-    QRhiTexture *target = m_swapTextures[imageIndex].get();
-    // 这一帧要整屏重写，所以声明旧布局为 UNDEFINED：QRhi 每次都会发一次
-    // UNDEFINED → COLOR_ATTACHMENT 的转换，不必跟踪 present 之后的真实布局。
-    target->setNativeLayout(int(VK_IMAGE_LAYOUT_UNDEFINED));
-
-    // 排障：合成源与交换链尺寸不一致时，画面会被拉伸或错位——改窗口大小"闪一下"
-    // 如果还有残留，这一行会直接指出来。只在尺寸变化时打，避免刷屏。
-    if (qEnvironmentVariableIsSet("RHINE_FG_DIAG")) {
-        static QSize reported;
-        const QSize source = base ? base->pixelSize() : QSize();
-        if (source != target->pixelSize() && source != reported) {
-            reported = source;
-            qWarning().noquote() << "FG 合成: 尺寸不一致 源" << source << "目标"
-                                 << target->pixelSize();
-        }
     }
-
     QRhiShaderResourceBindings *srb = bindingsFor(base, overlay);
-    if (!srb)
+    if (!srb) {
         return false;
+    }
 
     if (!m_pipeline) {
         m_pipeline = m_rhi->newGraphicsPipeline();
@@ -676,7 +575,7 @@ bool FgShell::composite(QRhiCommandBuffer *cb, QRhiTexture *base, QRhiTexture *o
         m_pipeline->setCullMode(QRhiGraphicsPipeline::None);
         m_pipeline->setDepthTest(false);
         m_pipeline->setShaderResourceBindings(m_pipelineBindings);
-        m_pipeline->setRenderPassDescriptor(m_swapPasses[imageIndex].get());
+        m_pipeline->setRenderPassDescriptor(target->renderPassDescriptor());
         if (!m_pipeline->create()) {
             m_error = QStringLiteral("合成管线创建失败");
             return false;
@@ -693,53 +592,25 @@ bool FgShell::composite(QRhiCommandBuffer *cb, QRhiTexture *base, QRhiTexture *o
     batch->updateDynamicBuffer(m_compositeUbo, 0, kFgUniformSize, uniforms);
 
     const QSize pixelSize = target->pixelSize();
-    cb->beginPass(m_swapTargets[imageIndex].get(), Qt::black, {1.0f, 0}, batch);
+    cb->beginPass(target, Qt::black, {1.0f, 0}, batch);
     cb->setGraphicsPipeline(m_pipeline);
     cb->setShaderResources(srb);
     cb->setViewport({0, 0, float(pixelSize.width()), float(pixelSize.height())});
     cb->draw(3);
     cb->endPass();
 
-    // 呈现引擎要求图像处于 PRESENT_SRC_KHR。QRhi 不知道这张图会被 present，
-    // 所以这一步只能自己发屏障。
-    const auto *handles =
-        static_cast<const QRhiVulkanCommandBufferNativeHandles *>(cb->nativeHandles());
-    if (!handles || handles->commandBuffer == VK_NULL_HANDLE)
-        return false;
-
-    VkImageMemoryBarrier barrier{};
-    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
-    barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    barrier.dstAccessMask = 0;
-    barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    barrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    barrier.image = m_presenter->imageAt(imageIndex);
-    barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-
-    QVulkanDeviceFunctions *deviceFunctions = m_instance->deviceFunctions(m_device);
-    if (!deviceFunctions)
-        return false;
-
-    cb->beginExternal();
-    deviceFunctions->vkCmdPipelineBarrier(handles->commandBuffer,
-                                                  VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                                                  VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, //
-                                                  0, 0, nullptr, 0, nullptr, 1, &barrier);
-    cb->endExternal();
-    return true;
+    return overrideTarget || m_presenter->finishTarget(cb, frame);
 }
 
-bool FgShell::presentOne(const VulkanPresenter::Frame &frame, bool allowInterpolation,
-                         bool *interpolatedOut)
-{
-    if (interpolatedOut)
+bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame &frame,
+                                   bool allowInterpolation, bool *interpolatedOut) {
+    if (interpolatedOut) {
         *interpolatedOut = false;
+    }
 
     QRhiCommandBuffer *cb = nullptr;
     m_probe.restart();
-    const QRhi::FrameOpResult begun = m_rhi->beginOffscreenFrame(&cb);
+    const QRhi::FrameOpResult begun = m_presenter->beginFrame(frame, &cb);
     m_stats.beginMs = blend(m_stats.beginMs, tookMs());
     if (begun != QRhi::FrameOpSuccess) {
         m_error = QStringLiteral("beginOffscreenFrame 失败（%1）").arg(int(begun));
@@ -753,69 +624,64 @@ bool FgShell::presentOne(const VulkanPresenter::Frame &frame, bool allowInterpol
     m_probe.restart();
     const bool composed = composite(cb, base, m_host->overlayTexture(), frame.imageIndex);
     m_stats.compositeMs = blend(m_stats.compositeMs, tookMs());
-    if (composed) {
-        // 注入失败不能静默：present 会退回 vkDeviceWaitIdle 硬同步（单次 50ms 级），
-        // 帧率会掉到同步节奏而日志里什么都看不到。这里直接把原因写进 m_error 并放弃这一帧。
-        if (!m_presenter->installSubmitParams(m_rhi.get(), frame)) {
-            m_error = m_presenter->lastError();
-            m_rhi->endOffscreenFrame();
-            return false;
-        }
-        m_presentedFrames++;
-        if (interpolated)
-            m_interpolatedFrames++;
-    }
     m_probe.restart();
-    m_rhi->endOffscreenFrame();
+    const bool presented = m_presenter->endFrame(frame, composed);
     m_stats.endMs = blend(m_stats.endMs, tookMs());
-    if (!composed)
+    if (!presented) {
+        m_error = m_presenter->lastError();
         return false;
-    if (interpolatedOut)
+    }
+    ++m_presentedFrames;
+    if (interpolated) {
+        ++m_interpolatedFrames;
+    }
+    if (interpolatedOut) {
         *interpolatedOut = interpolated;
-
-    m_probe.restart();
-    const bool presented = m_presenter->present(frame, nullptr);
+    }
     // 呈现间隔与分项耗时都按"真的上屏了"来记，失败的那次不计入，免得把
     // 交换链重建的停顿算成 FG 的成本。
     if (presented) {
         m_stats.presentMs = blend(m_stats.presentMs, tookMs());
-        if (m_presentClock.isValid())
+        if (m_presentClock.isValid()) {
             recordGap(double(m_presentClock.nsecsElapsed()) / 1e6);
+        }
         m_presentClock.restart();
         // 真的上屏了，说明重建是有效的：清掉"连续重建次数"，别让偶发的
         // 一两次 OutOfDate 累积成误判。
         m_recreateStreak = 0;
-        if (m_framesSinceRecreate < 1000)
+        if (m_framesSinceRecreate < 1000) {
             ++m_framesSinceRecreate;
+        }
     }
     return presented;
 }
 
-void FgShell::step()
-{
-    if (!m_frameClock.isValid())
+void PresentationShell::step() {
+    if (m_stopped || m_failed || !m_window || !m_host) {
+        return;
+    }
+    if (!m_frameClock.isValid()) {
         m_frameClock.start();
+    }
     // 两步之间的空档：定时器排队 + 事件循环。和渲染成本分开统计，否则"各项都 <1ms、
     // 帧间隔 30ms+"根本看不出钱花在哪。
     if (!m_stepClock.isValid()) {
         m_stepClock.start();
     } else if (m_stepEndNs > 0) {
-        m_stats.idleGapMs = blend(m_stats.idleGapMs,
-                                  double(m_stepClock.nsecsElapsed() - m_stepEndNs) / 1e6);
+        m_stats.idleGapMs = blend(m_stats.idleGapMs, double(m_stepClock.nsecsElapsed() - m_stepEndNs) / 1e6);
     }
-    if (!m_window->isVisible()) {
-        scheduleNext();
+    if (!m_window->isVisible() || !m_window->isExposed() || m_window->visibility() == QWindow::Minimized) {
         return;
     }
-    // 引擎空闲（没有动画也没有输入）时默认路径是完全停渲的。这里不能停——
-    // 自建呈现层停掉就没人 present，窗口会被合成器判成卡死——所以降频到 10Hz，
-    // 并且跳过高成本的光流/插值，只用已经渲染好的场景纹理重新合成。
     const bool idle = m_backend->performance().value(QStringLiteral("idle")).toBool();
-    // 呈现层一旦接管窗口，设置页的开关就能立刻生效：和渲染器读 RHINE_FG 一样，
-    // 这里每帧重新解析一次（Host::setPreference 写偏好时会同步刷新这个变量）。
-    // 关掉只是不再跑光流/插值；呈现层本身要重启才能退回 QQuickWindow 路径。
-    const bool interpolationWanted = FgConfig::fromEnvironment().enabled;
+    const bool interpolationWanted = requested();
     syncSizes();
+
+    if (!m_host->resumeGraphics()) {
+        m_error = m_host->lastError();
+        m_failed = true;
+        return;
+    }
     if (m_needRecreate && !recreateSwapchain()) {
         qWarning().noquote() << "FG:" << m_error;
         m_needRecreate = false;
@@ -828,20 +694,15 @@ void FgShell::step()
         return;
     }
 
-    // 内容没变就整步跳过：不渲染、不插值、不合成。
-    // 以前这里每步盲渲盲呈现，静止画面上反复拿同一对旧帧插值——纯浪费 GPU，
-    // 静止时的掉帧就是这么来的。判定信号：
-    //   a) 引擎步进计数变了 → 场景状态推进了，必须重画；
-    //   b) 离屏窗口收到过 UpdateRequest → UI 自己有变化（悬停、提示、时钟）；
-    //   c) 交换链重建/尺寸变化（m_forcePresent）→ 纹理内容已失效。
-    // 实测 UpdateRequest 在离屏 QQuickWindow 上并不可靠，所以 a) 是主信号。
-    const auto perf = m_backend->performance();
-    const quint64 engineSteps = perf.value(QStringLiteral("steps")).toULongLong();
-    const bool engineAdvanced = engineSteps != m_lastEngineSteps;
-    if (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent) {
+    // 引擎计时推进不等于画面改变。两层都无更新且没有待呈现帧时让事件循环休眠。
+    const auto engineSteps = m_backend->performance().value(QStringLiteral("steps")).toULongLong();
+    const bool engineAdvanced = m_backendName == "vulkan" && engineSteps != m_lastEngineSteps;
+    if (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent && !m_pendingRealFrame) {
         ++m_skippedSteps;
         publishStats(false);
-        scheduleNext(perf.value(QStringLiteral("idle")).toBool() ? 100 : 4);
+        if (m_backendName == "vulkan") {
+            scheduleNext(idle ? 100 : 4);
+        }
         return;
     }
     m_lastEngineSteps = engineSteps;
@@ -851,17 +712,17 @@ void FgShell::step()
     // 之间能拿回执行权；以前两步的活在一步里做完，输入和窗口事件会被整段吞掉。
     if (m_pendingRealFrame) {
         m_pendingRealFrame = false;
-        VulkanPresenter::Frame frame;
+        RhineRender::PresentationBackend::Frame frame;
         m_probe.start();
         const auto acquired = m_presenter->acquire(&frame);
         m_stats.acquireMs = blend(m_stats.acquireMs, tookMs());
-        if (acquired == VulkanPresenter::AcquireResult::OutOfDate) {
+        if (acquired == RhineRender::PresentationBackend::AcquireResult::OutOfDate) {
             m_needRecreate = true;
             scheduleNext();
             return;
         }
-        if (acquired == VulkanPresenter::AcquireResult::Ok
-            || acquired == VulkanPresenter::AcquireResult::Suboptimal) {
+        if (acquired == RhineRender::PresentationBackend::AcquireResult::Ok ||
+            acquired == RhineRender::PresentationBackend::AcquireResult::Suboptimal) {
             if (!presentOne(frame, false, nullptr)) {
                 qWarning().noquote() << "FG: present 失败" << m_presenter->lastError();
                 m_needRecreate = true;
@@ -874,38 +735,42 @@ void FgShell::step()
         return;
     }
 
-    armFrameGeneration();
-    VulkanPresenter::Frame frame;
+    if (m_backendName == "vulkan") {
+        armFrameGeneration();
+    }
+    RhineRender::PresentationBackend::Frame frame;
     m_probe.start();
     const auto acquired = m_presenter->acquire(&frame);
     m_stats.acquireMs = blend(m_stats.acquireMs, tookMs());
     // Suboptimal 只表示"这张图能呈现，但交换链不再最优"。以前这里把图一起丢掉并整链重建
     // （deviceWaitIdle + 5 张 image/view/semaphore + 全部纹理与管线），代价是掉几帧、
     // 画面还会闪一下。重建只由 OutOfDate 与窗口 Resize/Expose 驱动。
-    if (acquired == VulkanPresenter::AcquireResult::OutOfDate) {
+    if (acquired == RhineRender::PresentationBackend::AcquireResult::OutOfDate) {
         m_needRecreate = true;
-        if (++m_outOfDateCount % 100 == 1)
+        if (++m_outOfDateCount % 100 == 1) {
             qWarning().noquote() << "FG: acquire 返回 OutOfDate，累计" << m_outOfDateCount;
+        }
         scheduleNext();
         return;
     }
-    if (acquired == VulkanPresenter::AcquireResult::Suboptimal) {
+    if (acquired == RhineRender::PresentationBackend::AcquireResult::Suboptimal) {
         static bool warnedSuboptimal = false;
         if (!warnedSuboptimal) {
             warnedSuboptimal = true;
-            qWarning().noquote()
-                << "FG: 交换链 suboptimal，继续使用（等 OutOfDate 或窗口事件再重建）";
+            qWarning().noquote() << "FG: 交换链 suboptimal，继续使用（等 OutOfDate 或窗口事件再重建）";
         }
-    } else if (acquired != VulkanPresenter::AcquireResult::Ok) {
+    } else if (acquired != RhineRender::PresentationBackend::AcquireResult::Ok) {
         // Timeout：窗口最小化或设备忙，跳过这一帧即可，重建没有意义。
-        if (++m_acquireTimeoutCount % 100 == 1)
+        if (++m_acquireTimeoutCount % 100 == 1) {
             qWarning().noquote() << "FG: acquire 超时（窗口不可见/合成器未取图），累计"
                                  << m_acquireTimeoutCount;
+        }
         scheduleNext();
         return;
     }
 
     m_probe.restart();
+    const auto previousSceneFrames = m_host->sceneRenderCount();
     const bool sceneRendered = m_host->renderFrame();
     m_stats.sceneMs = blend(m_stats.sceneMs, tookMs());
     if (!sceneRendered) {
@@ -913,12 +778,17 @@ void FgShell::step()
         scheduleNext();
         return;
     }
-    m_renderedFrames++;  // 场景真的重渲了一帧（FG 的输入新鲜度就看它）
+    const bool newScene = m_host->sceneRenderCount() != previousSceneFrames;
+    m_renderedFrames +=
+        m_host->sceneRenderCount() - previousSceneFrames; // 场景真的重渲了一帧（FG 的输入新鲜度就看它）
 
     bool interpolated = false;
     // 重建后的前两帧只呈现真实帧：那时 QML 可能还在按旧尺寸排版、交换链也是全新的，
     // 跨尺寸插出来的帧就是满屏错色（改窗口大小时"闪一下"的来源）。
-    const bool interpolationAllowed = !idle && interpolationWanted && m_framesSinceRecreate >= 2;
+    // 在离屏提交结束后读取这一帧输入；UI 单独更新不能再次插值同一帧场景。
+    const bool interpolationAllowed = newScene && !idle && interpolationWanted &&
+                                      m_framesSinceRecreate >= 2 &&
+                                      (m_backendName == "vulkan" || armFrameGeneration());
     if (!presentOne(frame, interpolationAllowed, &interpolated)) {
         qWarning().noquote() << "FG: present 失败" << m_presenter->lastError();
         m_needRecreate = true;
@@ -931,62 +801,81 @@ void FgShell::step()
     publishStats(interpolated);
     m_forcePresent = false;
     reportStats();
-    // 空闲时把节奏压到 10Hz：既让 UI 的偶发变化（悬停、提示）仍能在 100ms 内上屏，
-    // 又不用为一张静止画面持续跑光流。
-    scheduleNext(idle ? 100 : 0);
+    // 新更新和待呈现的真实帧继续排队；其余情况等待下一次内容更新。
+    if (m_backendName == "vulkan") {
+        scheduleNext(idle ? 100 : 0);
+    } else if (m_pendingRealFrame || m_host->contentDirty()) {
+        scheduleNext();
+    }
 }
 
-void FgShell::reportStats()
-{
+void PresentationShell::reportStats() {
     // 第一行要在启动后很快出现：空闲时呈现节奏会降到 10Hz，等"每 300 帧一行"
     // 要半分钟才看得到第一条，冒烟测试和现场排障都等不起。
     const bool firstWindow = m_presentedFrames == 60;
-    if (!firstWindow && (m_presentedFrames < 60 || m_presentedFrames % 300 != 0))
+    if (!firstWindow && (m_presentedFrames < 60 || m_presentedFrames % 300 != 0)) {
         return;
-    const RhineFg::FrameInputs &inputs = RhineFg::latest();
-    qWarning().noquote() << "FG stats: presented" << m_presentedFrames << "interpolated"
-                         << m_interpolatedFrames << "tapSerial" << inputs.serial << "depth"
-                         << (inputs.depth ? "ok" : "null") << "mv"
-                         << (inputs.motionVectors ? "ok" : "null") << "render"
-                         << inputs.renderSize << "display" << inputs.displaySize << "gapP50"
-                         << QString::number(m_stats.gapP50Ms, 'f', 1) << "ms/frame"
-                         // 分项：取图 / 场景 / 合成 / 上屏（上屏在 FIFO 下会阻塞到刷新点，
-                         // 它就是"为什么每帧都掉到 20ms 档"的直接证据，必须一起打出来）
-                         << "取图" << QString::number(m_stats.acquireMs, 'f', 2)
-                         << "场景" << QString::number(m_stats.sceneMs, 'f', 2)
-                         // 光流+深度重建（prepare）与插值本身（dispatch）必须分开看：
-                         // 两者的优化手段完全不同，混在一起就不知道该调哪个。
-                         << "光流" << QString::number(m_stats.prepareMs, 'f', 2)
-                         << "插值" << QString::number(m_stats.dispatchMs, 'f', 2)
-                         << "合成" << QString::number(m_stats.compositeMs, 'f', 2)
-                         << "上屏" << QString::number(m_stats.presentMs, 'f', 2)
-                         << "起始" << QString::number(m_stats.beginMs, 'f', 2)
-                         << "收尾" << QString::number(m_stats.endMs, 'f', 2)
-                         << "空档" << QString::number(m_stats.idleGapMs, 'f', 2)
-                         << "跳过" << m_skippedSteps
-                         << (m_frameClock.isValid()
-                                 ? m_frameClock.restart() / double(m_presentedFrames - m_statsBase)
-                                 : 0.0);
+    }
+    const RhineFg::FrameInputs &inputs = currentFrameInputs();
+    qWarning().noquote()
+        << "FG stats: presented" << m_presentedFrames << "interpolated" << m_interpolatedFrames << "tapSerial"
+        << inputs.serial << "depth" << (inputs.depth ? "ok" : "null") << "mv"
+        << (inputs.motionVectors ? "ok" : "null") << "render" << inputs.renderSize << "display"
+        << inputs.displaySize << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1)
+        << "ms/frame"
+        // 分项：取图 / 场景 / 合成 / 上屏（上屏在 FIFO 下会阻塞到刷新点，
+        // 它就是"为什么每帧都掉到 20ms 档"的直接证据，必须一起打出来）
+        << "取图" << QString::number(m_stats.acquireMs, 'f', 2) << "场景"
+        << QString::number(m_stats.sceneMs, 'f', 2)
+        // 光流+深度重建（prepare）与插值本身（dispatch）必须分开看：
+        // 两者的优化手段完全不同，混在一起就不知道该调哪个。
+        << "光流" << QString::number(m_stats.prepareMs, 'f', 2) << "插值"
+        << QString::number(m_stats.dispatchMs, 'f', 2) << "合成"
+        << QString::number(m_stats.compositeMs, 'f', 2) << "上屏"
+        << QString::number(m_stats.presentMs, 'f', 2) << "起始" << QString::number(m_stats.beginMs, 'f', 2)
+        << "收尾" << QString::number(m_stats.endMs, 'f', 2) << "空档"
+        << QString::number(m_stats.idleGapMs, 'f', 2) << "跳过" << m_skippedSteps
+        << (m_frameClock.isValid() ? m_frameClock.restart() / double(m_presentedFrames - m_statsBase) : 0.0);
     m_statsBase = m_presentedFrames;
 }
 
-void FgShell::scheduleNext(int delayMs)
-{
+void PresentationShell::scheduleNext(int delayMs) {
     // 单次定时器串起来而不是固定间隔：FIFO present 自带节流，让事件循环在两次
     // 呈现之间拿到执行权（输入、窗口事件），比追着刷新率跑更稳。
-    if (!m_timer)
+    if (!m_timer || m_stopped || m_failed) {
         return;
-    if (m_stepClock.isValid())
-        m_stepEndNs = m_stepClock.nsecsElapsed();  // 空档计时的起点
+    }
+    if (m_stepClock.isValid()) {
+        m_stepEndNs = m_stepClock.nsecsElapsed(); // 空档计时的起点
+    }
     m_timer->setSingleShot(true);
     m_timer->start(delayMs);
 }
 
-bool FgShell::eventFilter(QObject *watched, QEvent *event)
-{
-    if (watched != m_window.get())
+bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
+    if (watched != m_window) {
         return QObject::eventFilter(watched, event);
+    }
 
+    const bool visible = m_window->isVisible() && m_window->visibility() != QWindow::Minimized;
+    if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
+        event->type() == QEvent::WindowStateChange || event->type() == QEvent::Expose) {
+        m_backend->setVisible(visible);
+        if (visible) {
+            if (m_releaseTimer) {
+                m_releaseTimer->stop();
+            }
+            m_forcePresent = true;
+            scheduleNext();
+        } else {
+            if (m_timer) {
+                m_timer->stop();
+            }
+            if (m_releaseTimer) {
+                m_releaseTimer->start(2000);
+            }
+        }
+    }
     switch (event->type()) {
     case QEvent::Close:
         // 与 Ctrl+Q 同一条退出顺序：先把交换链/呈现层拆掉，再让事件循环退出。
@@ -999,11 +888,13 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
         if (m_window->isExposed()) {
             m_needRecreate = true;
             m_forcePresent = true;
+            scheduleNext();
         }
         break;
     case QEvent::Resize:
         m_needRecreate = true;
         m_forcePresent = true;
+        scheduleNext();
         break;
     default:
         break;
@@ -1012,8 +903,8 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
     // 探针（RHINE_KEY_PROBE=1）：打印真正到达可见窗口的按键。
     // 被 Qt 快捷键地图（QShortcutMap）消费掉的按键不会出现在这里——用它区分
     // "快捷键没匹配上"与"快捷键已触发、但动作没生效"。
-    if (qEnvironmentVariableIntValue("RHINE_KEY_PROBE") == 1
-        && (event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride)) {
+    if (qEnvironmentVariableIntValue("RHINE_KEY_PROBE") == 1 &&
+        (event->type() == QEvent::KeyPress || event->type() == QEvent::ShortcutOverride)) {
         auto *key = static_cast<QKeyEvent *>(event);
         qInfo().noquote() << "按键探针:"
                           << (event->type() == QEvent::KeyPress ? "KeyPress" : "ShortcutOverride")
@@ -1024,6 +915,7 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
     // QQuickRenderControl 没有自己的事件来源：可见窗口收到的输入必须原样转发给
     // 离屏的 UI 窗口，否则按钮、滚轮、快捷键全部失效。
     if (QQuickWindow *overlay = m_host ? m_host->overlayWindow() : nullptr) {
+        const qreal inputRatio = m_backendName == "metal" ? 1.0 : m_dpr;
         switch (event->type()) {
         case QEvent::KeyPress:
             // 兜底且是真正的保障：按键到达时离屏窗口若没有焦点项，KeyPress 会被
@@ -1043,12 +935,11 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
             // 离屏窗口按物理像素、QML 根节点按逻辑像素缩放：Qt 投递的窗口坐标是
             // 物理空间的，不乘比例的话 QML 收到的点只有真实位置的 1/dpr，点击会错位。
             auto *me = static_cast<QMouseEvent *>(event);
-            if (qFuzzyCompare(m_dpr, 1.0)) {
+            if (qFuzzyCompare(inputRatio, 1.0)) {
                 QCoreApplication::sendEvent(overlay, event);
             } else {
-                QMouseEvent scaled(me->type(), me->position() * m_dpr,
-                                   me->scenePosition() * m_dpr, me->globalPosition(),
-                                   me->button(), me->buttons(), me->modifiers(),
+                QMouseEvent scaled(me->type(), me->position() * inputRatio, me->scenePosition() * inputRatio,
+                                   me->globalPosition(), me->button(), me->buttons(), me->modifiers(),
                                    me->pointingDevice());
                 QCoreApplication::sendEvent(overlay, &scaled);
             }
@@ -1056,13 +947,12 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
         }
         case QEvent::Wheel: {
             auto *we = static_cast<QWheelEvent *>(event);
-            if (qFuzzyCompare(m_dpr, 1.0)) {
+            if (qFuzzyCompare(inputRatio, 1.0)) {
                 QCoreApplication::sendEvent(overlay, event);
             } else {
-                QWheelEvent scaled(we->position() * m_dpr, we->globalPosition(),
-                                   we->pixelDelta(), we->angleDelta(), we->buttons(),
-                                   we->modifiers(), we->phase(), we->inverted(), we->source(),
-                                   we->pointingDevice());
+                QWheelEvent scaled(we->position() * inputRatio, we->globalPosition(), we->pixelDelta(),
+                                   we->angleDelta(), we->buttons(), we->modifiers(), we->phase(),
+                                   we->inverted(), we->source(), we->pointingDevice());
                 QCoreApplication::sendEvent(overlay, &scaled);
             }
             break;
@@ -1071,11 +961,11 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
         case QEvent::HoverLeave:
         case QEvent::HoverMove: {
             auto *he = static_cast<QHoverEvent *>(event);
-            if (qFuzzyCompare(m_dpr, 1.0)) {
+            if (qFuzzyCompare(inputRatio, 1.0)) {
                 QCoreApplication::sendEvent(overlay, event);
             } else {
-                QHoverEvent scaled(he->type(), he->position() * m_dpr, he->globalPosition(),
-                                   he->oldPos() * m_dpr, he->modifiers(), he->pointingDevice());
+                QHoverEvent scaled(he->type(), he->position() * inputRatio, he->globalPosition(),
+                                   he->oldPos() * inputRatio, he->modifiers(), he->pointingDevice());
                 QCoreApplication::sendEvent(overlay, &scaled);
             }
             break;
@@ -1105,49 +995,84 @@ bool FgShell::eventFilter(QObject *watched, QEvent *event)
             break;
         }
     }
+    if (m_host && (event->isInputEvent() || event->type() == QEvent::InputMethod)) {
+        m_host->markOverlayDirty();
+        scheduleNext();
+    }
     return QObject::eventFilter(watched, event);
 }
 
 // 同步版：立刻把 QML 焦点补回来（排队恢复会被后续事件搅掉，实测重新聚焦后仍为 null）。
-void FgShell::ensureOverlayFocus(QQuickWindow *overlay)
-{
-    if (!overlay || !m_host || overlay->activeFocusItem())
+void PresentationShell::ensureOverlayFocus(QQuickWindow *overlay) {
+    if (!overlay || !m_host || overlay->activeFocusItem()) {
         return;
-    if (QQuickItem *root = m_host->overlayRootItem())
+    }
+    if (QQuickItem *root = m_host->overlayRootItem()) {
         QMetaObject::invokeMethod(root, "focusInputLayer", Qt::DirectConnection);
+    }
 }
 
-
-bool FgShell::start()
-{
-    if (!compiledIn()) {
-        m_error = QStringLiteral("这个构建没有编入 FG（需要 Vulkan + FFX 着色器）");
+bool PresentationShell::start() {
+    if (!supportsBackend(m_backendName)) {
+        m_error = QStringLiteral("这个构建未编入所选呈现后端");
         return false;
     }
     m_size = QSize(1280, 720);
-    if (!initializeVulkan())
+    if (!initializeBackend()) {
         return false;
-    if (!initializeLayers())
+    }
+    if (!initializeLayers()) {
         return false;
+    }
 
     m_timer = new QTimer(this);
     m_timer->setTimerType(Qt::PreciseTimer);
-    connect(m_timer, &QTimer::timeout, this, &FgShell::step);
+    connect(m_timer, &QTimer::timeout, this, &PresentationShell::step);
+    connect(m_backend, &Engine::sceneUpdated, this, [this] {
+        m_host->markSceneDirty();
+        scheduleNext();
+    });
+    connect(m_backend, &Engine::opticalSceneUpdated, this, [this] {
+        m_host->markSceneDirty();
+        scheduleNext();
+    });
+    connect(m_backend, &Engine::hudUpdated, this, [this] {
+        m_host->markOverlayDirty();
+        scheduleNext();
+    });
 
+#ifdef Q_OS_MACOS
+    m_releaseTimer = new QTimer(this);
+    m_releaseTimer->setSingleShot(true);
+    connect(m_releaseTimer, &QTimer::timeout, this, [this] {
+        if (!m_window->isVisible() || m_window->visibility() == QWindow::Minimized) {
+            m_backend->metalFxInputs = {};
+            m_rhi->finish();
+            if (m_fg) {
+                m_fg->release();
+            }
+            releaseSwapchainResources();
+            m_host->releaseGraphics();
+            m_backend->trimMemory();
+        }
+    });
+#endif
     // 预检：有些设备能建出交换链，却撑不住持续上屏（典型是"没有直连显示输出"的独显
     // ——surface 由跑在集显上的合成器管理）。实测独显上会先成功呈现 4 帧，随后
     // OutOfDate 一路涨到几万次、再也没出过一帧（白窗 + 空转）。
     // 判据要贴着"真坏了"写，不能贴"慢了"：首帧编译着色器本来就是慢的。
     //   · OutOfDate 超过 200 次 → 交换链撑不住，判死；
     //   · 3 秒过去一帧都没上屏 → 判死；
-    //   · 其余情况放行（能出 20 帧就提前结束预检，不拖慢启动）。
+    //   · 按适配器要求检查连续呈现；预检结束后恢复按需调度。
     // 判死后由 main.cpp 干净回退到默认 QQuickWindow 路径。这比
     // vkGetPhysicalDeviceSurfaceSupportKHR 靠谱：后者对这类设备仍返回支持。
     {
         QElapsedTimer probeClock;
         probeClock.start();
-        while (probeClock.elapsed() < 3000 && m_presentedFrames < 20 && !m_failed
-               && m_outOfDateCount <= 200) {
+        const auto probeFrames = quint64(qMax(1, m_presenter->startupProbeFrames()));
+        while (probeClock.elapsed() < 3000 && m_presentedFrames < probeFrames && !m_failed &&
+               m_outOfDateCount <= 200) {
+            m_forcePresent = true;
             step();
             QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
         }
@@ -1171,34 +1096,98 @@ bool FgShell::start()
         connect(diag, &QTimer::timeout, this, [this] {
             qWarning().noquote() << "FG diag: presented" << m_presentedFrames << "rendered"
                                  << m_renderedFrames << "skipped" << m_skippedSteps << "acqTimeout"
-                                 << m_acquireTimeoutCount << "outOfDate" << m_outOfDateCount
-                                 << "visible" << (m_window && m_window->isVisible()) << "pendingReal"
-                                 << m_pendingRealFrame << "gapP50"
-                                 << QString::number(m_stats.gapP50Ms, 'f', 1);
+                                 << m_acquireTimeoutCount << "outOfDate" << m_outOfDateCount << "visible"
+                                 << (m_window && m_window->isVisible()) << "pendingReal" << m_pendingRealFrame
+                                 << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1);
         });
         diag->start();
     }
 
-    m_backend->setWindow(m_window.get());
+    m_backend->setWindow(m_window);
     m_window->installEventFilter(m_backend);
     m_started = true;
+    publishStats(false);
     // 交换链与设备信息整个生命周期不变，这里写一次就够，之后 publishStats 带出去。
     m_stats.swapchainImages = int(m_presenter->imageCount());
-    m_stats.swapchainFormat = swapchainFormatName(int(m_presenter->colorFormat()));
+    m_stats.swapchainFormat = m_presenter->formatName();
     m_stats.presentMode = m_presenter->presentModeName();
     m_stats.adapterName = QString::fromUtf8(m_rhi->driverInfo().deviceName);
-    m_stats.backendName = QStringLiteral("Vulkan");
-    RhineFg::publishActive(m_fgAvailable);
+    m_stats.backendName = m_presenter->backendName();
+    RhineFg::publishCapability(compiledIn(), true, m_fgAvailable,
+                               m_backendName == "metal" && !m_fgAvailable
+                                   ? QStringLiteral("当前构建、系统或设备不支持 MetalFX 帧生成")
+                                   : QString());
     qWarning().noquote() << "FG: 呈现层已启动；插值" << (m_fgAvailable ? "可用" : "不可用") << "，"
                          << m_presenter->imageCount() << "张交换链图像" << m_presenter->extent()
                          << "，呈现模式" << m_presenter->presentModeName();
     return true;
 }
 
-int FgShell::run()
-{
-    if (!m_started)
+int PresentationShell::run() {
+    if (!m_started) {
         return 1;
+    }
     m_timer->start(0);
     return 0;
+}
+
+QQuickWindow *PresentationShell::inputWindow() const {
+    return m_host ? m_host->overlayWindow() : nullptr;
+}
+
+QQuickWindow *PresentationShell::sceneWindow() const {
+    return m_host ? m_host->sceneWindow() : nullptr;
+}
+
+QVariantMap PresentationShell::renderState() const {
+    return {{"sceneFrames", qulonglong(m_host ? m_host->sceneRenderCount() : 0)},
+            {"overlayFrames", qulonglong(m_host ? m_host->overlayRenderCount() : 0)},
+            {"presented", qulonglong(m_presentedFrames)},
+            {"interpolated", qulonglong(m_interpolatedFrames)},
+            {"timerActive", m_timer && m_timer->isActive()},
+#ifdef Q_OS_MACOS
+            {"renderer", m_backend->renderTelemetry.snapshot()},
+#endif
+            {"backend", m_backendName}};
+}
+
+/** 从现有两层纹理抓取同一合成结果，不推进动画或重画场景。 */
+QImage PresentationShell::grabFrame(bool interpolated) {
+    if (!m_rhi || !m_host || !m_host->sceneTexture() || !m_host->overlayTexture()) {
+        return {};
+    }
+    std::unique_ptr<QRhiTexture> texture(m_rhi->newTexture(
+        QRhiTexture::RGBA8, pixelSize(), 1, QRhiTexture::RenderTarget | QRhiTexture::UsedAsTransferSource));
+    if (!texture->create()) {
+        return {};
+    }
+    std::unique_ptr<QRhiTextureRenderTarget> target(
+        m_rhi->newTextureRenderTarget({QRhiColorAttachment(texture.get())}));
+    std::unique_ptr<QRhiRenderPassDescriptor> pass(target->newCompatibleRenderPassDescriptor());
+    target->setRenderPassDescriptor(pass.get());
+    if (!target->create()) {
+        return {};
+    }
+    QRhiCommandBuffer *commands = nullptr;
+    if (m_rhi->beginOffscreenFrame(&commands) != QRhi::FrameOpSuccess) {
+        return {};
+    }
+    // 读回目标为 RGBA8，交换链可能是 BGRA8，不能复用两者的 render pass 管线。
+    releaseSwapchainResources();
+    auto base = interpolated && m_fg && !m_fg->lastFrameReset() ? m_fg->output() : m_host->sceneTexture();
+    const bool composed = composite(commands, base, m_host->overlayTexture(), 0, target.get());
+    QRhiReadbackResult result;
+    auto updates = m_rhi->nextResourceUpdateBatch();
+    updates->readBackTexture(QRhiReadbackDescription(texture.get()), &result);
+    commands->resourceUpdate(updates);
+    m_rhi->endOffscreenFrame();
+    m_rhi->finish();
+    releaseSwapchainResources();
+    if (!composed || result.data.isEmpty()) {
+        return {};
+    }
+    QImage image(reinterpret_cast<const uchar *>(result.data.constData()), result.pixelSize.width(),
+                 result.pixelSize.height(), QImage::Format_RGBA8888);
+    image = image.copy();
+    return m_rhi->isYUpInFramebuffer() ? image.flipped(Qt::Vertical) : image;
 }

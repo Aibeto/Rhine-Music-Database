@@ -2,6 +2,10 @@
 #include "Glyphs.h"
 #include "Host.h"
 #include "NativeApplication.h"
+#ifdef Q_OS_MACOS
+#include "render/RenderConfiguration.h"
+#include "fg/FgFrameTap.h"
+#endif
 #include <QElapsedTimer>
 #include <QPointF>
 #include <QVariantMap>
@@ -82,6 +86,11 @@ class Engine : public QObject {
         return m_musicTextures;
     }
     void trimMemory();
+#ifdef Q_OS_MACOS
+    RhineRender::RenderConfiguration renderConfiguration;
+    RhineRender::RenderTelemetry renderTelemetry;
+    RhineFg::FrameInputs metalFxInputs;
+#endif
     void recordResourceRelease() {
         m_gpuResources.store(0, std::memory_order_relaxed);
         m_musicTextureBytes.store(0, std::memory_order_relaxed);
@@ -182,6 +191,9 @@ class Engine : public QObject {
     QString m_discIdentity;
     quint64 m_steps = 0, m_sceneUpdates = 0, m_hudUpdates = 0;
     int m_stableFrames = 0;
+#ifdef Q_OS_MACOS
+    int m_temporalFramesRemaining = 0;
+#endif
     // FSR3 亚像素抖动：默认关闭；开启后每帧推进一个相位，重置时归零。
     bool m_jitterEnabled = false;
     int m_jitterPhase = 0;

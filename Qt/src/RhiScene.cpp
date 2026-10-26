@@ -1975,6 +1975,12 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         backend = engine;
         if (engine) {
             frame = engine->frame();
+#ifdef Q_OS_MACOS
+            // 原版唱片旁路不做 MetalFX 历史累积，保持原采样，避免直接显示增强通道的抖动。
+            if (engine->app->hud.sceneEnhancement && engine->renderConfiguration.snapshot().temporal()) {
+                frame.remove("jitter");
+            }
+#endif
             buffers = engine->drawBuffers();
             musicTextures = engine->musicTextures();
             item = engine->current();

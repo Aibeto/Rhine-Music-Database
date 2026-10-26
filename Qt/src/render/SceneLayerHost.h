@@ -4,52 +4,35 @@
 #include <QString>
 #include <QUrl>
 #include <memory>
+#include <functional>
 
 QT_BEGIN_NAMESPACE
 class QScreen;
 class QQmlEngine;
 class QRhi;
 class QRhiRenderPassDescriptor;
+class QRhiRenderBuffer;
 class QRhiTexture;
 class QRhiTextureRenderTarget;
 class QQuickItem;
 class QQuickRenderControl;
 class QQuickWindow;
 class QVulkanInstance;
+class QWindow;
 QT_END_NAMESPACE
 
 /**
- * FG（帧生成）的离屏双场景宿主。
- *
- * 职责：把 Scene3D.qml 与 Overlay.qml 分别渲染进两张 QRhiTexture，供 FG 后端
- * 做 optical flow / 帧插值，并在插值帧之后重新叠加 UI。两个场景各自一个
- * QQuickWindow + QQuickRenderControl，但共用调用方传入的同一个 QRhi——FG 要直接
- * 采样 3D 纹理，跨 QRhi 的纹理不可共享。
- *
- * 只在 FG 启用时实例化；默认路径（不开 FG）完全不碰这个类。
- *
- * 失败策略：任何一步失败都返回 false 并打印可诊断日志，绝不 abort。
- * 调用方据此回退到现有在屏 QQuickWindow 路径——FG 是可选增强，不能阻断启动。
- *
- * 线程与生命周期约束（调用方必须保证）：
- *   - 所有成员函数都在 Qt Quick 的渲染线程调用（本项目是 GUI 线程），且调用时
- *     不能有另一个 QRhi 帧正在录制：beginFrame()/endFrame() 内部会开离屏帧。
- *   - start() 传入的 QRhi 必须比本对象活得久；析构会释放建在该 QRhi 上的纹理与
- *     渲染目标，所以必须在 QRhi 所有者（主窗口的场景图）销毁之前析构本对象。
- *   - 两个离屏 QQuickWindow 永不 show()：RenderControl 下没有原生窗口。
- *
- * Qt 6.12 说明：QQuickRenderControl 没有 initialize(QRhi*) 重载。共享 QRhi 的公开
- * 入口是 QQuickWindow::setGraphicsDevice(QQuickGraphicsDevice::fromRhi(rhi))，
- * 之后 initialize() 不会再自建 QRhi（见 QQuickRenderControl::initialize 文档）。
+ * 场景与 UI 的离屏宿主，共享一个 QRhi 并分别响应 Qt Quick 更新信号。
+ * 所有操作在同一渲染线程执行，且调用前不得存在活动的 QRhi 帧。
+ * QRhi 与可见窗口必须活到宿主销毁之后；两层离屏窗口不能 show。
  */
-class FgHost
-{
-public:
-    FgHost();
-    ~FgHost();
+class SceneLayerHost {
+  public:
+    SceneLayerHost();
+    ~SceneLayerHost();
 
-    FgHost(const FgHost &) = delete;
-    FgHost &operator=(const FgHost &) = delete;
+    SceneLayerHost(const SceneLayerHost &) = delete;
+    SceneLayerHost &operator=(const SceneLayerHost &) = delete;
 
     /**
      * 建立两个离屏场景并载入 QML。
@@ -62,10 +45,12 @@ public:
     /// QQuickWindow 上有 QVulkanInstance，否则直接失败并报
     /// "No QVulkanInstance set for QQuickWindow, cannot initialize"。
     bool start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
-               QVulkanInstance *vulkanInstance = nullptr);
+               QVulkanInstance *vulkanInstance = nullptr, QWindow *visibleWindow = nullptr);
 
     /** 两个场景各走一遍 polishItems → beginFrame → sync → render → endFrame。 */
     bool renderFrame();
+    void releaseGraphics();
+    bool resumeGraphics();
 
     /** 重建离屏目标。换 target 会触发 Qt 重新初始化渲染目标，所以只在这里做，不要每帧换。 */
     void resize(QSize size);
@@ -85,34 +70,54 @@ public:
     /// 所以 FG 路径需要拿它显式做一次焦点初始化（Overlay.qml 导出 focusInputLayer()）。
     QQuickItem *overlayRootItem() const;
 
-    bool isValid() const { return m_valid; }
-    QSize size() const { return m_size; }
+    bool isValid() const {
+        return m_valid;
+    }
+    QSize size() const {
+        return m_size;
+    }
     /// 离屏目标的**物理像素**尺寸 = 逻辑尺寸 × 设备像素比。
     /// QML 仍按逻辑像素排版，只有光栅化面积变大；两者搞混就会出现"高 DPI 下发糊"。
     QSize pixelSize() const;
-    /// 设置离屏层的放大比例。QQuickRenderControl 窗口不认 setScreen()，
-    /// 拿不到屏幕 DPR，所以由调用方显式注入，我们自己做内容缩放。
+    /// 设置纹理的物理像素密度，不改变 QML 排版和输入坐标。
     void setPixelRatio(qreal ratio);
-    qreal pixelRatio() const { return m_ratio; }
-    QString lastError() const { return m_lastError; }
+    qreal pixelRatio() const {
+        return m_ratio;
+    }
+    QString lastError() const {
+        return m_lastError;
+    }
 
-    /**
-     * 内容有没有变化。
-     * 两个离屏窗口收到 Qt 的 UpdateRequest（QML 里任何东西改了都会发）或者被
-     * resize()/输入转发显式标脏时为真。呈现层只在为真时渲染：静止画面下继续
-     * "渲染→合成→present"是纯浪费，实测这条路径每步仍在消耗 GPU，还会把
-     * 呈现节奏挤到 40ms 一帧。
-     */
-    bool contentDirty() const { return m_contentDirty; }
+    /** 两层是否收到更新；各层在自己的渲染完成后独立清除标记。 */
+    bool contentDirty() const {
+        return m_scene.dirty || m_overlay.dirty;
+    }
     /// 外部改了离屏窗口内容（比如转发输入）时显式标脏。
-    void markContentDirty() { m_contentDirty = true; }
+    void markContentDirty() {
+        markOverlayDirty();
+    }
+    void markSceneDirty() {
+        m_scene.dirty = true;
+    }
+    void markOverlayDirty() {
+        m_overlay.dirty = true;
+    }
+    std::function<void()> requestRender;
+    quint64 sceneRenderCount() const {
+        return m_sceneRenders;
+    }
+    quint64 overlayRenderCount() const {
+        return m_overlayRenders;
+    }
 
-private:
+  private:
     struct Layer {
         std::unique_ptr<QQuickRenderControl> control;
         std::unique_ptr<QQuickWindow> window;
-        QQuickItem *rootItem = nullptr;   // 由 window->contentItem() 持有，这里只观察
+        bool dirty = true;
+        QQuickItem *rootItem = nullptr; // 由 window->contentItem() 持有，这里只观察
         QRhiTexture *texture = nullptr;
+        QRhiRenderBuffer *depthStencil = nullptr;
         QRhiTextureRenderTarget *renderTarget = nullptr;
         QRhiRenderPassDescriptor *renderPass = nullptr;
     };
@@ -133,7 +138,10 @@ private:
     QSize m_size;
     qreal m_ratio = 1.0;
     /// 首帧必须渲染，所以初值为真；renderFrame() 成功后清零。
-    bool m_contentDirty = true;
+    QWindow *m_visibleWindow = nullptr;
+    quint64 m_sceneRenders = 0;
+    quint64 m_overlayRenders = 0;
     bool m_valid = false;
+    bool m_suspended = false;
     QString m_lastError;
 };
