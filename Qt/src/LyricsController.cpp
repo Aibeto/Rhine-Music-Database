@@ -473,19 +473,20 @@ void LyricsController::loadLocal(const QJsonObject &track, const Pending &pendin
         return;
     }
     const QFileInfo audio(track["path"].toString());
-    auto content = track["localLyrics"].toString();
+    const auto content = track["localLyrics"].toString();
+    QByteArray sidecarBytes;
     const auto basename = audio.absolutePath() + '/' + audio.completeBaseName();
     for (const auto &suffix : {".lrc", ".LRC"}) {
         QFile file(basename + suffix);
         if (file.open(QIODevice::ReadOnly) && file.size() <= 1000000) {
-            const auto sidecar = QString::fromUtf8(file.readAll());
+            const auto sidecar = file.readAll();
             if (!sidecar.trimmed().isEmpty()) {
-                content = sidecar;
+                sidecarBytes = sidecar;
                 break;
             }
         }
     }
-    if (content.trimmed().isEmpty()) {
+    if (sidecarBytes.isEmpty() && content.trimmed().isEmpty()) {
         if (localSource == "local") {
             pending->needsLyrics = false;
             status = "empty";
@@ -515,8 +516,13 @@ void LyricsController::loadLocal(const QJsonObject &track, const Pending &pendin
     }
     status = "loading";
     emit changed();
+    // 原始字节交给桥接统一识别编码；内嵌歌词已由标签库转换为 Unicode，作为回退保留。
+    QJsonObject parameters{{"content", content}};
+    if (!sidecarBytes.isEmpty()) {
+        parameters["contentBase64"] = QString::fromLatin1(sidecarBytes.toBase64());
+    }
     m_host->requestJson(
-        "/local/lyrics", {{"content", content}},
+        "/local/lyrics", parameters,
         [this, pending, alive = valid(pending)](QJsonObject response, QString error) {
             if (!alive()) {
                 return;

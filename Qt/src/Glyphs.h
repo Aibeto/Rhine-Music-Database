@@ -17,7 +17,7 @@ class Glyphs : public QObject {
     Q_OBJECT
   public:
     explicit Glyphs(const QString &root);
-    ~Glyphs() override = default;
+    ~Glyphs() override;
     struct Glyph {
         double advance = 1;
         QPainterPath path;
@@ -45,6 +45,12 @@ class Glyphs : public QObject {
     QCache<QString, QPainterPath> paths{1024};
     QCache<QString, double> widths{1024};
     QCache<QString, QStringList> wrapped{128 * 1024};
+    QList<int> applicationFonts;
+    QHash<QString, QString> layoutFamilies;
+    QCache<QString, Glyph> shapedText{32 * 1024};
+    QCache<QString, bool> layoutRequired{1024};
+    bool needsLayout(const QString &text, const QString &weight);
+    Glyph layoutText(const QString &text, const QString &weight, double spacing);
     Glyph glyph(QString ch, QString weight);
 };
 

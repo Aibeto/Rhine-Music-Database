@@ -103,6 +103,7 @@ function prepareResources() {
         'qq.cjs',
         'kugou.cjs',
         'lyrics-format.cjs',
+        'lyrics-text.cjs',
         'lyrics-source.json',
         'LyricsKit-LICENSE',
         'package.json',

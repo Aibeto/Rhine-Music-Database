@@ -660,6 +660,20 @@ if(RHINE_VISUAL_TESTS)
                      "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/scene-frame.qz")
 endif()
 
+qt_add_executable(RhineGlyphsRegression Qt/tests/GlyphsChecks.cpp)
+target_link_libraries(RhineGlyphsRegression PRIVATE RhineCore)
+if(MSVC)
+    target_compile_options(RhineGlyphsRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_glyphs_regression COMMAND RhineGlyphsRegression
+                                           "${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
+if(WIN32)
+    # offscreen 插件不使用 Windows 字体库，缺字回退需要原生平台插件；测试本身不创建窗口。
+    set_tests_properties(qt_glyphs_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=windows")
+else()
+    set_tests_properties(qt_glyphs_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+endif()
+
 qt_add_executable(RhineNativeHudRegression Qt/tests/NativeHudChecks.cpp)
 target_compile_definitions(RhineNativeHudRegression PRIVATE RHINE_HUD_REGRESSION_TEST_MAIN)
 target_link_libraries(RhineNativeHudRegression PRIVATE RhineCore)

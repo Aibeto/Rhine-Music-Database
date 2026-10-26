@@ -1,5 +1,9 @@
 #include "Glyphs.h"
 #include <QFile>
+#include <QFontDatabase>
+#include <QGlyphRun>
+#include <QTextLayout>
+#include <QTextBoundaryFinder>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLinearGradient>
@@ -45,7 +49,12 @@ QRawFont Glyphs::loadFont(const QString &filename) {
 
 Glyphs::Glyphs(const QString &root) {
     for (auto weight : {"light", "regular", "demibold", "bold"}) {
-        fonts[weight] = loadFont(root + "/RhineMiSans-" + weight + ".otf");
+        const auto file = root + "/RhineMiSans-" + weight + ".otf";
+        fonts[weight] = QRawFont(file, 1000, QFont::PreferNoHinting);
+        const int id = QFontDatabase::addApplicationFont(file);
+        applicationFonts.append(id);
+        const auto families = QFontDatabase::applicationFontFamilies(id);
+        layoutFamilies[weight] = families.value(0);
     }
     fonts["symbols"] = loadFont(root + "/NotoSansSymbols2-Regular.ttf");
     const auto data = load(root + "/misans-glyphs.json");
@@ -64,6 +73,96 @@ Glyphs::Glyphs(const QString &root) {
         }
     }
 }
+Glyphs::~Glyphs() {
+    for (int id : applicationFonts) {
+        if (id >= 0) {
+            QFontDatabase::removeApplicationFont(id);
+        }
+    }
+}
+
+/** 保留已有轮廓和度量；缺字、组合字符和复杂文字才交给 Qt 排版与系统字体回退。 */
+bool Glyphs::needsLayout(const QString &text, const QString &weight) {
+    const auto key = weight + ':' + text;
+    if (const auto cached = layoutRequired.object(key)) {
+        return *cached;
+    }
+    const auto font = fonts.value(weight, fonts["regular"]);
+    const auto symbols = fonts["symbols"];
+    bool required = false;
+    for (char32_t point : text.toUcs4()) {
+        const auto category = QChar::category(point);
+        const auto direction = QChar::direction(point);
+        const auto script = QChar::script(point);
+        const bool combining = category == QChar::Mark_NonSpacing ||
+                               category == QChar::Mark_SpacingCombining || category == QChar::Mark_Enclosing;
+        const bool hangulJamo = script == QChar::Script_Hangul && (point < 0xac00 || point > 0xd7a3);
+        const bool contextual = script != QChar::Script_Common && script != QChar::Script_Inherited &&
+                                script != QChar::Script_Latin && script != QChar::Script_Han &&
+                                script != QChar::Script_Hiragana && script != QChar::Script_Katakana &&
+                                script != QChar::Script_Hangul;
+        if (point > 0xffff || combining || hangulJamo || contextual || point == 0x200d ||
+            direction == QChar::DirR || direction == QChar::DirAL ||
+            (!font.supportsCharacter(point) && !symbols.supportsCharacter(point))) {
+            required = true;
+            break;
+        }
+    }
+    if (text.size() <= 4096) {
+        layoutRequired.insert(key, new bool(required));
+    }
+    return required;
+}
+
+/** 缓存不依赖线程的轮廓，不跨线程保存 QGlyphRun 或其回退 QRawFont。 */
+Glyphs::Glyph Glyphs::layoutText(const QString &text, const QString &weight, double spacing) {
+    const auto key = weight + ':' + QString::number(spacing, 'g', 17) + ':' + text;
+    if (const auto cached = shapedText.object(key)) {
+        return *cached;
+    }
+    const auto raw = fonts.value(weight, fonts["regular"]);
+    // 部分平台能直接读取裁剪字库，却不能注册为应用字体，此时使用有效的系统字体族。
+    QFont font = QFontDatabase::systemFont(QFontDatabase::GeneralFont);
+    const auto family = layoutFamilies.value(weight, layoutFamilies["regular"]);
+    if (!family.isEmpty()) {
+        font.setFamily(family);
+        font.setStyleName(raw.styleName());
+    }
+    font.setWeight(static_cast<QFont::Weight>(raw.weight()));
+    font.setPixelSize(1000);
+    font.setHintingPreference(QFont::PreferNoHinting);
+    font.setLetterSpacing(QFont::AbsoluteSpacing, spacing);
+    QTextLayout layout(text.normalized(QString::NormalizationForm_C), font);
+    QTextOption option;
+    option.setAlignment(Qt::AlignLeft);
+    layout.setTextOption(option);
+    layout.beginLayout();
+    auto line = layout.createLine();
+    if (line.isValid()) {
+        line.setLineWidth(1000000);
+    }
+    layout.endLayout();
+    Glyph result;
+    result.advance = line.isValid() ? qMax(0., line.horizontalAdvance() - spacing) / 1000 : 0;
+    QPainterPath outline;
+    outline.setFillRule(Qt::WindingFill);
+    for (const auto &run : layout.glyphRuns()) {
+        const auto indexes = run.glyphIndexes();
+        const auto positions = run.positions();
+        const auto fallback = run.rawFont();
+        for (qsizetype i = 0; i < indexes.size(); ++i) {
+            auto path = fallback.pathForGlyph(indexes[i]);
+            path.translate(positions[i].x(), positions[i].y() - line.ascent());
+            outline.addPath(path);
+        }
+    }
+    result.path = QTransform::fromScale(1, -1).map(outline);
+    if (text.size() <= 4096) {
+        shapedText.insert(key, new Glyph(result), qMax(1, text.size()));
+    }
+    return result;
+}
+
 QPainterPath Glyphs::path(const QString &svg) {
     QMutexLocker lock(&mutex);
     if (paths.contains(svg)) {
@@ -167,6 +266,11 @@ double Glyphs::width(QString text, double size, QString weight, double tracking)
     if (const auto cached = widths.object(key)) {
         return *cached;
     }
+    if (needsLayout(text, weight)) {
+        const auto result = layoutText(text, weight, size > 0 ? tracking * 1000 / size : 0).advance * size;
+        widths.insert(key, new double(result));
+        return result;
+    }
     double result = 0;
     for (auto ch : text) {
         auto g = glyph(QString(ch), weight);
@@ -180,6 +284,13 @@ double Glyphs::width(QString text, double size, QString weight, double tracking)
 }
 QVariantMap Glyphs::bounds(QString value, double size, QString weight) {
     QMutexLocker lock(&mutex);
+    if (needsLayout(value, weight)) {
+        QTransform transform;
+        transform.translate(0, size * 1.044);
+        transform.scale(size / 1000, -size / 1000);
+        const auto bounds = transform.map(layoutText(value, weight, 0).path).boundingRect();
+        return {{"x", bounds.x()}, {"y", bounds.y()}, {"width", bounds.width()}, {"height", bounds.height()}};
+    }
     QRectF bounds;
     bool visible = false;
     double x = 0;
@@ -203,6 +314,9 @@ double Glyphs::inset(QString text, double size, QString weight) {
     if (text.isEmpty()) {
         return 0;
     }
+    if (needsLayout(text, weight)) {
+        return layoutText(text, weight, 0).path.boundingRect().x() * size / 1000;
+    }
     auto g = glyph(text.first(1), weight);
     return !g.path.isEmpty() ? g.path.boundingRect().x() * size / 1000 : 0;
 }
@@ -215,6 +329,26 @@ QStringList Glyphs::wrap(QString value, double limit, double size, QString weigh
     }
     QStringList lines;
     QString line;
+    if (needsLayout(value, weight)) {
+        QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, value);
+        int start = 0;
+        for (int end = finder.toNextBoundary(); end >= 0; end = finder.toNextBoundary()) {
+            const auto cluster = value.mid(start, end - start);
+            start = end;
+            if (cluster.contains('\n')) {
+                lines.append(line);
+                line.clear();
+            } else if (!line.isEmpty() && width(line + cluster, size, weight) > limit) {
+                lines.append(line);
+                line = cluster;
+            } else {
+                line += cluster;
+            }
+        }
+        lines.append(line);
+        wrapped.insert(key, new QStringList(lines), qMax(1, value.size()));
+        return lines;
+    }
     double length = 0;
     for (auto ch : value) {
         if (ch == '\n') {
@@ -250,6 +384,15 @@ double Glyphs::artWidth(QString key, double size, double tracking, int count) {
 void Glyphs::text(QPainter &c, QString value, double x, double y, double size, QString weight,
                   double tracking, QColor ink) {
     QMutexLocker lock(&mutex);
+    if (needsLayout(value, weight)) {
+        const auto shaped = layoutText(value, weight, size > 0 ? tracking * 1000 / size : 0);
+        c.save();
+        c.translate(x, y + size * 1.044);
+        c.scale(size / 1000, -size / 1000);
+        c.fillPath(shaped.path, ink);
+        c.restore();
+        return;
+    }
     for (auto ch : value) {
         auto g = glyph(QString(ch), weight);
         c.save();

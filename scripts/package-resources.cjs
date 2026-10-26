@@ -102,7 +102,12 @@ function collectPackage(name, from, optional = false) {
         collectPackage(dep, location, dep in optionalDeps);
     }
 }
-for (const name of ['@neteasecloudmusicapienhanced/api', '@yakult-green-tea/qq-music-api', 'kugoumusicapi']) {
+for (const name of [
+    '@neteasecloudmusicapienhanced/api',
+    '@yakult-green-tea/qq-music-api',
+    'kugoumusicapi',
+    'chardet',
+]) {
     collectPackage(name, bridge);
 }
 fs.copyFileSync('NOTICE', path.join(out, 'NOTICE'));
