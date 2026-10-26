@@ -89,7 +89,7 @@ static QSettings graphicsSettings() {
  *  而 vulkanDeviceAvailable() 同样只在非 macOS 下定义。 */
 #if !defined(Q_OS_DARWIN)
 static bool applyNamedBackend(const QString &requested) {
-#if defined(Q_OS_WIN)
+#if defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND
     if (requested == "d3d12") {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D12);
         RhineGraphics::setActiveBackend(QStringLiteral("d3d12"));
@@ -103,7 +103,7 @@ static bool applyNamedBackend(const QString &requested) {
     }
     if (requested == "vulkan") {
         if (!vulkanDeviceAvailable()) {
-            qWarning() << "Vulkan is unavailable; falling back to the platform default backend.";
+            qWarning() << "Vulkan is unavailable; falling back to Vulkan/OpenGL selection.";
             return false;
         }
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
@@ -114,13 +114,21 @@ static bool applyNamedBackend(const QString &requested) {
 }
 #endif
 static void selectGraphicsBackend() {
-    // Qt 自己的变量优先级最高，保留它才能用 QSG_RHI_BACKEND 做后端对照。
+    // 停用的 D3D 后端
     if (!qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND")) {
+        const auto overrideBackend = qEnvironmentVariable("QSG_RHI_BACKEND").trimmed().toLower();
+#ifdef Q_OS_DARWIN
 #ifdef Q_OS_MACOS
-        RhineGraphics::setActiveBackend(qEnvironmentVariable("QSG_RHI_BACKEND").trimmed().toLower());
+        RhineGraphics::setActiveBackend(overrideBackend);
 #endif
-        qInfo() << "QSG_RHI_BACKEND is set; keeping" << qEnvironmentVariable("QSG_RHI_BACKEND");
         return;
+#else
+        if (applyNamedBackend(overrideBackend)) {
+            return;
+        }
+        qWarning() << "QSG_RHI_BACKEND" << overrideBackend << "is unavailable; selecting Vulkan/OpenGL.";
+        qunsetenv("QSG_RHI_BACKEND");
+#endif
     }
 #if defined(Q_OS_DARWIN)
 #ifdef Q_OS_MACOS
@@ -155,21 +163,22 @@ static void selectGraphicsBackend() {
         // 旧配置里可能还留着已移除的 d3d11；同样不能直接返回，否则会落回 D3D11。
         qWarning() << "Saved graphics backend" << saved << "is unavailable; using the default backend.";
     }
-    // 都没有：Windows 与 Linux 上优先 Vulkan，不可用时回退平台默认（Windows 为 D3D12，
-    // 其余为 OpenGL）；macOS 只提供 Metal，走上面的分支。
+    // Windows 与 Linux 共用 Vulkan 优先、OpenGL 回退；不能交给 Qt 的平台默认选择。
     if (vulkanDeviceAvailable()) {
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Vulkan);
         RhineGraphics::setActiveBackend(QStringLiteral("vulkan"));
         qInfo() << "No backend configured; Vulkan detected and selected as default.";
     } else {
-#if defined(Q_OS_WIN)
+#if defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND
         // 不能交给平台默认：Qt 在 Windows 的默认后端是 D3D11，本项目已彻底移除该后端，
         // 必须显式指定 D3D12，否则会把 D3D11 请回来。
         QQuickWindow::setGraphicsApi(QSGRendererInterface::Direct3D12);
         RhineGraphics::setActiveBackend(QStringLiteral("d3d12"));
         qInfo() << "No backend configured; Vulkan unavailable, using Direct3D 12 on Windows.";
 #else
-        qInfo() << "No backend configured; Vulkan unavailable, using the platform default.";
+        QQuickWindow::setGraphicsApi(QSGRendererInterface::OpenGL);
+        RhineGraphics::setActiveBackend(QStringLiteral("opengl"));
+        qInfo() << "Vulkan unavailable; using OpenGL.";
 #endif
     }
 #endif

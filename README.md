@@ -53,8 +53,8 @@ chmod +x 'RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage'
 macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BACKEND=windows` 可临时对照原生后端。
 各平台播放都会跟随系统默认输出设备
 
-图形后端默认在 Windows 与 Linux 上优先使用 Vulkan，不可用时回退平台默认（Windows 为 Direct3D 12，其余为 OpenGL）；macOS 固定使用 Metal。
-`RHINE_GRAPHICS=vulkan|opengl|d3d12|auto` 可手动指定（`d3d12` 仅 Windows），`QSG_RHI_BACKEND` 的优先级更高，便于做后端对照。
+图形后端在 Windows 与 Linux 上优先使用 Vulkan，不可用时回退 OpenGL；macOS 固定使用 Metal。
+`RHINE_GRAPHICS=vulkan|opengl|auto` 可手动指定，`QSG_RHI_BACKEND` 的优先级更高。
 
 Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生效。列表只显示序号（0 基，与 `/sys/class/drm` 的 `cardN` 顺序一致），保存的也是序号——型号会随驱动更新和换卡变化，序号才是稳定的东西。序号在下次启动时不存在（换卡、拔掉 eGPU 或配置被改坏）就自动回退到默认行为：不注入任何厂商变量，完全等同于此前的版本，设置页会注明「序号 N 不存在」。
 实现上按驱动分流：Mesa 系（i915 / xe / amdgpu / nouveau）用 `DRI_PRIME=pci-0000_01_00_0` 把目标卡排到物理设备列表首位，NVIDIA 专有驱动用 `__NV_PRIME_RENDER_OFFLOAD=1` 加 `__VK_LAYER_NV_optimus=NVIDIA_only`（选非 NVIDIA 卡时为 `non_NVIDIA_only`），Qt 取枚举到的第一块卡即等于选中。`RHINE_GPU_INDEX=N` 只对本次启动生效，不改配置，便于对照；`RHINE_SOFTWARE_GPU=1` 时不做任何选择。两张同型号 NVIDIA 显卡之间无法区分（NVIDIA 图层只能表达「要 / 不要 NVIDIA」），此时会打一条警告。
@@ -144,16 +144,16 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 
 | Platform | Vulkan | Direct3D 12 | OpenGL | Metal |
 | -------- | ------ | ----------- | ------ | ----- |
-| Windows  | ✅     | ✅          | -      | -     |
+| Windows  | ✅     | 已停用      | ✅     | -     |
 | macOS    | -      | -           | -      | ✅    |
 | Linux    | ✅     | -           | ✅     | -     |
 
-| API         | FXAA | SSAA   | MSAA   | TAA     | Upscaling                  | Frame Generation |
-| ----------- | ---- | ------ | ------ | ------- | -------------------------- | ---------------- |
-| Vulkan      | ✅   | 2x MAX | 8x MAX | ✅      | EASU + RCAS                | ✅               |
-| Direct3D 12 | ✅   | 2x MAX | 8x MAX | ✅      | EASU + RCAS / TU (default) | -                |
-| OpenGL      | ✅   | 2x MAX | 8x MAX | ✅      | EASU + RCAS                | -                |
-| Metal       | -    | -      | -      | MetalFX | MetalFX Temporal           | MetalFX          |
+| API         | FXAA   | SSAA   | MSAA   | TAA     | Upscaling        | Frame Generation |
+| ----------- | ------ | ------ | ------ | ------- | ---------------- | ---------------- |
+| Vulkan      | ✅     | 2x MAX | 8x MAX | ✅      | EASU + RCAS      | ✅               |
+| Direct3D 12 | 已停用 | -      | -      | -       | -                | -                |
+| OpenGL      | ✅     | 2x MAX | 8x MAX | ✅      | EASU + RCAS      | -                |
+| Metal       | -      | -      | -      | MetalFX | MetalFX Temporal | MetalFX          |
 
 插帧（FSR Frame Generation）在 Vulkan 上是**常驻能力、即时开关**：只要设备支持，启动时应用就自建
 交换链接管窗口（呈现层常驻），设置页里的帧生成开关**点一下就生效、不需要重启**——它只决定每次呈现

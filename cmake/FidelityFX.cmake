@@ -502,7 +502,7 @@ endif()
 # ---------------------------------------------------------------------------
 
 set(RHINE_FFX_DX12_AVAILABLE FALSE)
-if(WIN32)
+if(WIN32 AND RHINE_ENABLE_D3D12_BACKEND)
     include("${CMAKE_CURRENT_LIST_DIR}/Dxc.cmake")
 
     set(FFX_API_DX12 ON)

@@ -59,7 +59,10 @@ jobs:
           # FSR3 超分与插帧需要 FidelityFX SDK；着色器预编译需要 dxc 与 glslang。
           # 三者都以 submodule 记录，缺 SDK 时 cmake 会静默跳过 FSR 目标，
           # 因此必须显式递归检出，否则 CI 测不到 FSR 代码路径。
-          submodules: recursive
+          submodules: false
+      - name: Check out enabled graphics dependencies
+        shell: bash
+        run: git submodule update --init --recursive FidelityFX-SDK third_party/glslang
       - name: Check out glslang vendored dependencies
         # 只有 Vulkan 分支会解析 glslang，但不在 macOS 上跳过：万一 runner 带了
         # MoltenVK 让 find_package(Vulkan) 成立，跳过就等于把 FSR3 静默关掉，
@@ -137,7 +140,7 @@ jobs:
         # 因此 key 要同时带上 rev 和工具链标识：rev 换版本、镜像换工具链都会得到新 key，
         # 缓存自然失效并重新保存。若只按 rev 取 key，actions/cache 不会覆盖已存在的
         # key，镜像升级后就会永久命中旧缓存，而签名校验每次都判不等，退化成每次全量重建。
-        if: runner.os == 'Windows'
+        if: false && runner.os == 'Windows'
         id: dxc
         shell: bash
         run: |
@@ -163,7 +166,7 @@ jobs:
         #
         # 拆成 restore/save 两步而不是单个 actions/cache：后者的保存在 post 步骤，
         # job 被 timeout 掐掉时不执行，会出现“编完了但没存上、下次再编一遍”的死循环。
-        if: runner.os == 'Windows'
+        if: false && runner.os == 'Windows'
         id: dxc-cache
         uses: actions/cache/restore@v4
         with:
@@ -233,7 +236,7 @@ jobs:
         # 这份坏缓存、签名校验失败、重新全量构建，而保存又被 cache-hit 挡住，就永远
         # 修不好。dxc-source-revision.txt 由 ExternalProject 的 INSTALL 步骤最后写入，
         # 它和两个 DLL 同时存在才代表 dxc/dxcompiler/dxildll 三个目标都编完了。
-        if: always() && runner.os == 'Windows'
+        if: false && always() && runner.os == 'Windows'
         id: dxc-artifacts
         shell: bash
         run: |
@@ -252,7 +255,7 @@ jobs:
         #
         # continue-on-error：来自 fork 的 PR 只有缓存读权限，保存会 403；配额或网络
         # 出问题也一样。缓存只是加速手段，存不进去不该把构建判失败。
-        if: always() && runner.os == 'Windows' && steps.dxc-cache.outputs.cache-hit != 'true' && steps.dxc-artifacts.outputs.complete == 'true'
+        if: false && always() && runner.os == 'Windows' && steps.dxc-cache.outputs.cache-hit != 'true' && steps.dxc-artifacts.outputs.complete == 'true'
         continue-on-error: true
         uses: actions/cache/save@v4
         with:

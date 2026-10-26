@@ -57,8 +57,13 @@ if (!mac && !linux) {
 env.PATH = win ? `${systemRoot}\\System32;${systemRoot}` : '/usr/bin:/bin';
 env.QT_QPA_PLATFORM = 'offscreen';
 env.QT_LOGGING_RULES = 'qt.multimedia.plugin=true';
-// 无显示服务器的构建机没有 GL 设备，只有 Windows 默认强制 GPU 参考比较。
+// Windows 使用随包软件 OpenGL 保留 GPU 参考比较；其余无显示服务的环境默认只查离线行为。
 env.RHINE_GPU_TEST = process.env.RHINE_GPU_TEST || (win ? '1' : '0');
+if (win && env.RHINE_GPU_TEST === '1') {
+    // offscreen 平台插件不提供 WGL 上下文；原生平台只创建隐藏表面，不显示测试窗口。
+    env.QT_QPA_PLATFORM = 'windows';
+    env.QT_OPENGL = 'software';
+}
 if (linux) {
     // 强制走软件光栅，避免无 DRI 设备时回落到驱动初始化失败。
     env.LIBGL_ALWAYS_SOFTWARE = '1';

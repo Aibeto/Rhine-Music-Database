@@ -13,6 +13,9 @@ project(
     # C is required by the vendored glslang/SPIRV-Tools that compiles the FidelityFX shader permutations at
     # build time.
     LANGUAGES CXX C)
+# 停用D3D12入口
+set(RHINE_ENABLE_D3D12_BACKEND OFF)
+add_compile_definitions(RHINE_ENABLE_D3D12_BACKEND=$<BOOL:${RHINE_ENABLE_D3D12_BACKEND}>)
 set(RHINE_APPLICATION_ID "rhine.music.database")
 find_package(Git QUIET)
 set(RHINE_COMMIT_SHA "unknown")
@@ -354,7 +357,10 @@ elseif(APPLE)
                    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Qt/Info.plist.in")
 elseif(WIN32)
     target_sources(RhineMusicDatabase PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp)
-    target_link_libraries(RhineMusicDatabase PRIVATE dxgi d3d12 ole32 uuid gdi32 dwmapi)
+    target_link_libraries(RhineMusicDatabase PRIVATE dxgi ole32 uuid gdi32 dwmapi)
+    if(RHINE_ENABLE_D3D12_BACKEND)
+        target_link_libraries(RhineMusicDatabase PRIVATE d3d12)
+    endif()
     # ffx_backend_vk 链接了 Vulkan 导入库，而该依赖 PUBLIC 传播到本目标，于是 vulkan-1.dll 成了加载期依赖。这与 README 承诺的「Vulkan
     # 不可用时回退平台默认」 直接矛盾：缺少 Vulkan 运行库的机器（CI runner、虚拟机、远程桌面）会在进程启动 阶段就拿到 0xc0000135，main.cpp 里的
     # vulkanDeviceAvailable() 探测和回退逻辑 根本没机会执行。改成延迟加载：不调用 Vulkan 就不加载，探测失败就正常回退。

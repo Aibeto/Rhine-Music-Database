@@ -1434,7 +1434,7 @@ QImage renderReference(const QString &root, const QJsonObject &frame, const QJso
         QRhiMetalInitParams params;
         rhi.reset(QRhi::create(QRhi::Metal, &params));
     }
-#elif defined(Q_OS_WIN)
+#elif defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND
     if (!rhi) {
         // Windows 上不再回退 D3D11：项目已彻底移除该后端（FSR3 只支持 DX12/Vulkan，
         // 保留 D3D11 会让同一份着色器与管线在两条完全不同的能力集上各走一遍）。

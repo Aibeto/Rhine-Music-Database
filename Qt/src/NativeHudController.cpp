@@ -622,15 +622,14 @@ void NativeHud::action(QString value) {
         m_host->setPreference("detail-autoplay", enabled ? "off" : "on");
     } else if (value == "graphics-backend") {
         // 后端切换需要重启生效：仅写入配置，由下次启动的 selectGraphicsBackend 应用。
-        // 顺序：默认（自动探测）→ Vulkan → OpenGL → Direct3D 12（仅 Windows）→ 默认。
-        // 非 Windows 没有 D3D12，OpenGL 之后直接回到默认。
+        // 顺序：默认（自动探测）→ Vulkan → OpenGL → 默认
         const auto current = m_host->preference("graphics-backend");
         QString next;
         if (current.isEmpty()) {
             next = QStringLiteral("vulkan");
         } else if (current == "vulkan") {
             next = QStringLiteral("opengl");
-#if defined(Q_OS_WIN)
+#if defined(Q_OS_WIN) && RHINE_ENABLE_D3D12_BACKEND
         } else if (current == "opengl") {
             next = QStringLiteral("d3d12");
 #endif

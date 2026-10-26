@@ -1,15 +1,20 @@
 #include <QDebug>
 #include <QtGlobal>
+#include <windows.h>
+#if RHINE_ENABLE_D3D12_BACKEND
 #include <d3d12.h>
 #include <dxgi1_6.h>
 #include <wrl/client.h>
+#endif
 
 extern "C" {
 __declspec(dllexport) DWORD NvOptimusEnablement = 1;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
 
+#if RHINE_ENABLE_D3D12_BACKEND
 using Microsoft::WRL::ComPtr;
+#endif
 
 /**
  * Windows 默认使用独立显卡：按 DXGI 的高性能偏好枚举适配器，确认能创建 D3D12 设备后
@@ -17,6 +22,7 @@ using Microsoft::WRL::ComPtr;
  * 用户已指定索引或要求软件渲染时不覆盖。
  */
 void initializeWindowsGraphics() {
+#if RHINE_ENABLE_D3D12_BACKEND
     if (qEnvironmentVariableIsSet("QT_D3D_ADAPTER_INDEX") ||
         qEnvironmentVariableIntValue("QSG_RHI_PREFER_SOFTWARE_RENDERER") != 0 ||
         qEnvironmentVariableIntValue("RHINE_SOFTWARE_GPU") == 1) {
@@ -73,4 +79,5 @@ void initializeWindowsGraphics() {
         }
     }
     qWarning() << "No usable high-performance D3D12 adapter found; using Qt default adapter";
+#endif
 }

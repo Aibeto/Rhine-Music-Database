@@ -400,10 +400,8 @@ void NativeHud::qualityPanel(double x, double y, double width) {
 
 namespace {
 /**
- * 设置页在窗口创建前构造，QSGRendererInterface::graphicsApi() 还拿不到，因此按持久化的
- * panel/graphics-backend 静态判断：空值代表"默认/自动"，启动逻辑在 Windows 默认 D3D12、
- * 其余平台优先 Vulkan，两者都有计算着色器；只有显式选择 OpenGL 时返回 false，
- * 因为 Qt 的 GL RHI 没有计算着色器。
+ * 优先使用本次启动实际后端，避免 Vulkan 探测失败后仍按保存的偏好启用 FSR3。
+ * Qt 的 GL RHI 没有计算着色器，OpenGL 回退时必须关闭此能力。
  */
 bool backendRunsFsr3(const Host *host) {
 #if defined(Q_OS_MACOS)
@@ -416,7 +414,14 @@ bool backendRunsFsr3(const Host *host) {
     Q_UNUSED(host);
     return false;
 #else
-    return host->preference("graphics-backend") != "opengl";
+    const auto active = RhineGraphics::activeBackend();
+    const auto backend = active.isEmpty() ? host->preference("graphics-backend") : active;
+#if RHINE_ENABLE_D3D12_BACKEND
+    if (backend == "d3d12") {
+        return true;
+    }
+#endif
+    return backend.isEmpty() || backend == "vulkan";
 #endif
 }
 /**
@@ -478,7 +483,8 @@ void NativeHud::settings(double x, double y, double width) {
                  "single-play-mode"});
     rows.append({"RIGHT MASK / 右侧画面遮罩", "", "archive-mask"});
     // 图形后端写入配置，重启后由启动逻辑应用；用于定位玻璃渲染是否为特定后端的问题。
-    const auto backendSetting = m_host->preference("graphics-backend");
+    const auto savedBackend = m_host->preference("graphics-backend");
+    const auto backendSetting = savedBackend == "d3d12" || savedBackend == "d3d11" ? QString() : savedBackend;
     static const QHash<QString, QString> backendNames{
         {"vulkan", "Vulkan"}, {"opengl", "OpenGL"}, {"d3d12", "Direct3D 12"}};
     const auto pending = backendSetting.isEmpty() ? QStringLiteral("默认 / 自动探测")
