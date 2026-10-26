@@ -97,7 +97,6 @@ class NativeHud : public QObject {
     bool reduced = false;
     bool startupAnimation = false;
     bool discRotation = false;
-    bool sceneEnhancement = true;
     bool vsync = true;
     int archiveMaskStrength = 50;
     bool closing = false;

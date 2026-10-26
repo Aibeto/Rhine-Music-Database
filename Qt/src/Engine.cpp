@@ -206,38 +206,18 @@ QVariantMap Engine::performance() const {
             {"sceneUpdates", qulonglong(m_sceneUpdates)},
             {"hudUpdates", qulonglong(m_hudUpdates)},
             {"renderFrames", qulonglong(m_renderFrames.load(std::memory_order_relaxed))},
-            {"gpuResources", qulonglong(m_gpuResources.load(std::memory_order_relaxed) +
-                                        m_opticalGpuResources.load(std::memory_order_relaxed))},
+            {"gpuResources", qulonglong(m_gpuResources.load(std::memory_order_relaxed))},
             {"bindingCreations", qulonglong(m_bindingCreations.load(std::memory_order_relaxed))},
-            {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed) +
-                                                m_opticalTextureBytes.load(std::memory_order_relaxed))},
+            {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed))},
             {"coverUploads", qulonglong(m_coverUploads.load(std::memory_order_relaxed))},
             {"gpuDrawCalls", qulonglong(m_lastDrawCalls.load(std::memory_order_relaxed))},
             {"timerActive", timer.isActive()}};
 }
-/**
- * 只唤醒当前选用的渲染分支
- */
+/** 仅在画面变化时通知唯一场景，静止时保留按需休眠。 */
 void Engine::notifySceneRenderers(bool visualChanged) {
-    const bool enhanced = app->hud.sceneEnhancement;
-    if (enhanced) {
-        m_originalSceneDirty |= visualChanged;
-        // 进入资料库时预热一次原版管线，避免抽取末尾才同步编译和分配整套资源。
-        const bool prewarm = !m_originalSceneWarm && m_frame.value("mode") != "boot";
-        if ((prewarm || m_frame.value("originalActorBlend").toDouble() > 0) && m_originalSceneDirty) {
-            m_originalSceneDirty = false;
-            m_originalSceneWarm = true;
-            emit sceneUpdated();
-        }
-        if (visualChanged || !m_sceneEnhancement) {
-            emit opticalSceneUpdated();
-        }
-    } else if (visualChanged || (m_sceneEnhancement && m_originalSceneDirty)) {
-        m_originalSceneDirty = false;
-        m_originalSceneWarm = true;
+    if (visualChanged) {
         emit sceneUpdated();
     }
-    m_sceneEnhancement = enhanced;
 }
 void Engine::wake(bool input) {
     const bool wasSleeping = m_sleeping;
@@ -292,9 +272,8 @@ void Engine::setVisible(bool value) {
         m_sleeping = true;
     } else {
         host.restoreMemoryBudget();
-        m_originalSceneWarm = false;
 #ifdef Q_OS_MACOS
-        if (app->hud.sceneEnhancement && renderConfiguration.snapshot().temporal()) {
+        if (renderConfiguration.snapshot().temporal()) {
             resetTemporalState();
         }
 #endif
@@ -415,11 +394,8 @@ void Engine::tick() {
     // presented 不再增长，那时测出来的"帧率"是没有负载的数字，A/B 对比没有意义。
     static const bool forceAnimate = qEnvironmentVariableIsSet("RHINE_DIAG_ANIMATE");
     if (!forceAnimate && now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
-        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot"
-#ifdef Q_OS_MACOS
-        && m_temporalFramesRemaining == 0
-#endif
-    ) {
+        !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot" &&
+        m_temporalFramesRemaining == 0) {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();
@@ -647,26 +623,26 @@ void Engine::step(double time) {
     }
     const auto previousDiscAngle = m_frame.value("discAngle").toDouble();
     m_frame = scene.frame;
-    m_frame["originalActorBlend"] = scene.originalActorBlend();
     auto signature = m_frame;
-    for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor", "originalActorBlend",
-                            "jitter", "temporalReset"}) {
+    for (const auto &key : {"time", "stats", "labels", "boot", "pointerCursor", "jitter", "temporalReset"}) {
         signature.remove(key);
     }
     // FSR3 亚像素抖动：默认关闭；关闭时 frame 里没有 jitter 键，渲染路径与之前完全一致。
     // 相位只在真正产生帧的 step 里推进，按 8 帧循环。
     // 但时间性抗锯齿（FSR3/TAA）本身就是靠相位差累积历史，没有抖动它们只会反复混合
     // 同一张图、等于白做，所以这两者开启时无条件打开。AA 模式每帧读环境变量，切换免重启。
-    const auto aaMode = qEnvironmentVariable("RHINE_AA_MODE");
 #ifdef Q_OS_MACOS
-    const bool metalFxTemporal = app->hud.sceneEnhancement && m_frame.value("mode") != "boot" &&
-                                 renderConfiguration.snapshot().temporal();
+    const bool metalFxTemporal = m_frame.value("mode") != "boot" && renderConfiguration.snapshot().temporal();
     if (!metalFxTemporal) {
         m_temporalFramesRemaining = 0;
     }
-    const bool temporal = app->hud.sceneEnhancement ? metalFxTemporal : aaMode == "fsr3" || aaMode == "taa";
+    const bool temporal = metalFxTemporal;
 #else
-    const bool temporal = aaMode == "fsr3" || aaMode == "taa";
+    const auto aaMode = qEnvironmentVariable("RHINE_AA_MODE");
+    // 空间 FSR 回退不累积历史，不能继续投影抖动，否则静止画面会逐帧闪动。
+    const bool computeFsr =
+        (aaMode == "fsr" || aaMode == "fsr3") && qEnvironmentVariable("RHINE_FSR_ENGINE") == "fsr3";
+    const bool temporal = aaMode == "taa" || computeFsr;
 #endif
     if (m_jitterEnabled || temporal) {
         m_jitterOffset = haltonJitter(m_jitterPhase);
@@ -722,22 +698,18 @@ void Engine::step(double time) {
     const bool showDiscAngle = current["kind"] == "song" && MusicPlayer::identity(current) == identity;
     m_frame["discAngle"] = showDiscAngle ? m_discAngle : 0;
     const bool discChanged = m_discRotating || previousDiscAngle != m_frame.value("discAngle").toDouble();
-#ifdef Q_OS_MACOS
     bool visualChanged = discChanged || !stable || current != m_current || cover != m_cover ||
                          coverRevision != m_coverRevision;
-#else
-    const bool visualChanged = discChanged || !stable || current != m_current || cover != m_cover ||
-                               coverRevision != m_coverRevision;
-#endif
-#ifdef Q_OS_MACOS
-    if (metalFxTemporal && (visualChanged || m_frame["temporalReset"].toBool())) {
+    if (!temporal) {
+        m_temporalFramesRemaining = 0;
+    }
+    if (temporal && (visualChanged || m_frame["temporalReset"].toBool())) {
         m_temporalFramesRemaining = 8;
     }
-    if (metalFxTemporal && m_temporalFramesRemaining > 0) {
+    if (temporal && m_temporalFramesRemaining > 0) {
         --m_temporalFramesRemaining;
         visualChanged = true;
     }
-#endif
     m_coverRevision = coverRevision;
     m_current = current;
     m_cover = object["cover"].toString();
@@ -774,7 +746,6 @@ void Engine::step(double time) {
     }
     notifySceneRenderers(visualChanged);
     auto state = object["state"].toObject().toVariantMap();
-    state["originalActorVisible"] = m_frame.value("originalActorBlend").toDouble() > 0;
     if (state != m_state) {
         m_state = state;
         const auto loginMethod = m_state.value("loginMethod").toString();
@@ -800,7 +771,13 @@ void Engine::snapshot(QString path) {
     }
     QDir().mkpath(path);
     const QSize size(1920, 1080);
+#ifdef Q_OS_MACOS
+    const auto settings = renderConfiguration.snapshot();
+    auto metal =
+        renderReference(root(), m_frame, m_current, cover(), size, scene.drawBuffers, nullptr, &settings);
+#else
     auto metal = renderReference(root(), m_frame, m_current, cover(), size, scene.drawBuffers);
+#endif
     saveImageNative(metal, path + "/qt-metal.png");
     QImage hud(size, QImage::Format_RGBA8888_Premultiplied);
     hud.fill(Qt::transparent);
@@ -823,12 +800,9 @@ int Engine::selfTest() {
         ready() && DiscGeometry::validate() && runNativeHostChecks(root()) && runNativeMusicChecks(root());
     // 首帧尚未生成时，渲染通知不能通过非 const JSON 读取插入空字段。
     const auto savedFrame = m_frame;
-    const auto savedEnhancement = app->hud.sceneEnhancement;
     m_frame = {};
-    app->hud.sceneEnhancement = true;
     notifySceneRenderers(true);
     ok &= m_frame.isEmpty();
-    app->hud.sceneEnhancement = savedEnhancement;
     m_frame = savedFrame;
     notifySceneRenderers(true);
     scene.review("archive");

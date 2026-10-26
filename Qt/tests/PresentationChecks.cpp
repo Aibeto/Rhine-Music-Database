@@ -92,7 +92,7 @@ int runPresentationChecks(PresentationShell &shell, Engine &backend, const QStri
     check(counter(shell, "overlayFrames") > uiFrames && counter(shell, "sceneFrames") == rendered,
           "只更新 UI 时复用场景纹理");
     const auto uiAfter = counter(shell, "overlayFrames");
-    backend.opticalSceneUpdated();
+    backend.sceneUpdated();
     settle(150);
     check(counter(shell, "sceneFrames") > rendered && counter(shell, "overlayFrames") == uiAfter,
           "只更新场景时复用 UI 纹理");
@@ -168,8 +168,8 @@ int runPresentationChecks(PresentationShell &shell, Engine &backend, const QStri
     backend.host.preferenceChanged("aa-mode", "off");
     settle(1000);
     if (backend.performance().value("timerActive").toBool()) {
-        qInfo() << "MetalFX close diagnostic" << backend.performance()
-                << "mode" << backend.frame().value("mode") << "time" << backend.frame().value("time")
+        qInfo() << "MetalFX close diagnostic" << backend.performance() << "mode"
+                << backend.frame().value("mode") << "time" << backend.frame().value("time")
                 << "pendingAnimations" << backend.frame().value("pendingAnimations");
     }
     check(!backend.performance().value("timerActive").toBool(), "中途关闭 MetalFX 后恢复引擎休眠");

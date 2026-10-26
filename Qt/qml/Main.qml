@@ -43,7 +43,7 @@ Window {
     // 原因：FG 路径根本不加载 Main.qml，留在 Window 侧等于 FG 完全没有快捷键；
     // 而 Overlay.qml 在两条路径下都会被实例化，所以只保留那一份定义，
     // 默认路径不会出现重复注册。
-    // 3D 层：原 Main.qml:60 的 RhiScene 与原 :67-77 的增强 Loader。
+    // 3D 层：RhiScene。
     Scene3D {
         anchors.fill: parent
     }

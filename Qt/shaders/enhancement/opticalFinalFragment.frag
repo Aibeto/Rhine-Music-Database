@@ -2,7 +2,6 @@
 #extension GL_GOOGLE_include_directive : enable
 #include "opticalCommon.glsl"
 layout(binding = 2) uniform sampler2D color;
-layout(binding = 3) uniform sampler2D originalActor;
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 fragColor;
 vec4 effect() {
@@ -39,14 +38,6 @@ vec4 effect() {
                      : v_uv.x < .68 ? mix(.2, .92, (v_uv.x - .59) / .09)
                                     : mix(.92, 1.0, (v_uv.x - .68) / .32);
         rgb = mix(rgb, paper, side * shade);
-    }
-    if (opticalLight.w > 0.0) {
-        // 只在取出唱片的投影范围内读取原版最终像素，不再给封面和外壳叠加烘焙色。
-        float inside = 1.0;
-        for (int index = 0; index < 8; ++index) {
-            inside *= step(0.0, dot(actorEdges[index].xyz, vec3(v_uv, 1.0)));
-        }
-        rgb = mix(rgb, texture(originalActor, rtUV(v_uv)).rgb, inside * opticalLight.w);
     }
     return vec4(rgb, 1);
 }

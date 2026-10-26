@@ -31,7 +31,6 @@ layout(std140, binding = 0) uniform GlobalBlock {
     mat4 emitterInverse;
     vec4 opticalLight;
     vec4 emissionColor;
-    vec4 actorEdges[8];
 };
 vec2 rtUV(vec2 uv) {
     return backend.x > 0.5 ? vec2(uv.x, 1 - uv.y) : uv;

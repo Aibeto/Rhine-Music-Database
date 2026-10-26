@@ -8,7 +8,6 @@
 #include "Hud.h"
 #include "LinuxGraphics.h"
 #include "RhiScene.h"
-#include "OpticalScene.h"
 #ifdef Q_OS_IOS
 #include "IOSWindow.h"
 #endif
@@ -399,7 +398,6 @@ int main(int argc, char **argv) {
     QObject::connect(&backend, &Engine::performanceRequested, &profiler, &FrameProfiler::toggleVisible);
     backend.start();
     qmlRegisterType<RhiScene>("Rhine.Native", 1, 0, "RhiScene");
-    qmlRegisterType<OpticalScene>("Rhine.Native", 1, 0, "OpticalScene");
     qmlRegisterType<Hud>("Rhine.Native", 1, 0, "Hud");
     qmlRegisterUncreatableType<Engine>("Rhine.Native", 1, 0, "Engine", "Provided by application");
     QQmlApplicationEngine engine;

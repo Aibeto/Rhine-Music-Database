@@ -181,12 +181,12 @@ function prepareResources() {
     fs.chmodSync(path.join(bridge, nodeName), 0o755);
     // 桥接在部署前打成单文件
     run(process.execPath, ['scripts/bundle-bridge.cjs']);
-    for (const name of ['dfg-lut.bin', 'ao-kernel.bin', 'ao-noise.bin']) {
-        fs.copyFileSync(path.join('Assets/lighting', name), path.join('output/resources', name));
-    }
-    fs.copyFileSync('Assets/room-pmrem.bin', 'output/resources/room-pmrem.bin');
     // 同步清理旧暂存文件，开发运行与发布包使用相同的纯原生资源。
     for (const name of [
+        'room-pmrem.bin',
+        'dfg-lut.bin',
+        'ao-kernel.bin',
+        'ao-noise.bin',
         'runtime.js',
         'timeline.js',
         'qt-logic.js',

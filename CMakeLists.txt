@@ -113,7 +113,8 @@ set(RHINE_APP_SOURCES
     Qt/src/UiMotion.cpp
     Qt/src/UiMotion.h
     Qt/tests/UiChecks.cpp
-    Qt/tests/SceneEnhancementChecks.cpp
+    Qt/tests/RhiSceneChecks.cpp
+    Qt/tests/ScenePostProcessChecks.cpp
     Qt/tests/NativeHostChecks.cpp
     Qt/tests/NativeMusicChecks.cpp
     Qt/tests/SessionChecks.cpp
@@ -178,6 +179,10 @@ set(RHINE_APP_SOURCES
     Qt/src/Hud.h
     Qt/src/RhiScene.cpp
     Qt/src/RhiScene.h
+    Qt/src/render/MotionPass.cpp
+    Qt/src/render/MotionPass.h
+    Qt/src/render/ScenePostProcess.cpp
+    Qt/src/render/ScenePostProcess.h
     Qt/src/fsr/Fsr3Backend.cpp
     Qt/src/fsr/Fsr3Backend.h
     Qt/src/render/SceneLayerHost.cpp
@@ -189,8 +194,6 @@ set(RHINE_APP_SOURCES
     Qt/src/render/RhiPresentationBackend.cpp
     Qt/src/render/PresentationShell.cpp
     Qt/src/render/PresentationShell.h
-    Qt/src/OpticalScene.cpp
-    Qt/src/OpticalScene.h
     Qt/src/Glyphs.cpp
     Qt/src/Glyphs.h
     vendor/qrcodegen/qrcodegen.cpp)
@@ -204,7 +207,7 @@ endif()
 # Core/Gui/Network/Concurrent/Multimedia。
 set(RHINE_CORE_SOURCES ${RHINE_APP_SOURCES})
 list(FILTER RHINE_CORE_SOURCES EXCLUDE REGEX
-     "/(main|Engine|Icon|RhiScene|OpticalScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/|/fsr/|/fg/|/render/")
+     "/(main|Engine|Icon|RhiScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/|/fsr/|/fg/|/render/")
 list(REMOVE_ITEM RHINE_APP_SOURCES ${RHINE_CORE_SOURCES})
 add_library(RhineCore STATIC ${RHINE_CORE_SOURCES})
 target_include_directories(
@@ -281,29 +284,17 @@ qt_add_shaders(
     MSL
     12
     FILES
-    Qt/shaders/geometry.vert
-    Qt/shaders/shadow.vert
-    Qt/shaders/shadow.frag
-    Qt/shaders/surface.frag
-    Qt/shaders/surfaceHashed.frag
-    Qt/shaders/normal.frag
     Qt/shaders/quad.vert
-    Qt/shaders/aoFragment.frag
-    Qt/shaders/blurAO.frag
-    Qt/shaders/combineAO.frag
     Qt/shaders/copyColor.frag
-    Qt/shaders/bokehFragment.frag
-    Qt/shaders/finalFragment.frag
     Qt/shaders/aaFragment.frag
     Qt/shaders/taa.frag
-    Qt/shaders/downsample.frag
-    Qt/shaders/velocity.vert
+    Qt/shaders/motion.vert
     Qt/shaders/velocity.frag
     Qt/shaders/fsr1_easu.frag
     Qt/shaders/fsr1_rcas.frag
     Qt/shaders/fgComposite.vert
     Qt/shaders/fgComposite.frag)
-# 增强模式单独打包
+# 唯一场景的烘焙材质与最终合成着色器
 qt_add_shaders(
     RhineMusicDatabase
     "rhine_enhancement_shaders"
@@ -321,7 +312,6 @@ qt_add_shaders(
     Qt/shaders/enhancement/opticalGeometry.vert
     Qt/shaders/enhancement/opticalQuad.vert
     Qt/shaders/enhancement/opticalSurface.frag
-    Qt/shaders/enhancement/opticalGlass.frag
     Qt/shaders/enhancement/opticalFinalFragment.frag)
 target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}"
                                                       $<$<CONFIG:Debug>:QT_QML_DEBUG>)
@@ -347,12 +337,10 @@ if(IOS)
     target_compile_options(RhineCore PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     include(Qt/IOS.cmake)
 elseif(APPLE)
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/render/MetalFxBackend.mm Qt/src/render/MetalFxBackend.h
-                                             Qt/src/render/FrameGenerator.h Qt/src/render/MotionPass.cpp
-                                             Qt/src/render/MotionPass.h Qt/src/render/SceneResources.h
-                                             Qt/tests/PresentationChecks.cpp)
-    qt_add_shaders(RhineMusicDatabase "rhine_metalfx_motion" PREFIX "/shaders" BASE "Qt/shaders"
-                   GLSL "150,300es" HLSL 50 MSL 12 FILES Qt/shaders/motion.vert)
+    target_sources(
+        RhineMusicDatabase
+        PRIVATE Qt/src/render/MetalFxBackend.mm Qt/src/render/MetalFxBackend.h Qt/src/render/FrameGenerator.h
+                Qt/src/render/SceneResources.h Qt/tests/PresentationChecks.cpp)
     target_link_libraries(RhineMusicDatabase PRIVATE "-weak_framework MetalFX" "-framework Metal")
     target_compile_options(RhineMusicDatabase PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     target_sources(RhineCore PRIVATE Qt/src/Platform.mm)

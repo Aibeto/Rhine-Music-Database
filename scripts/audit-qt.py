@@ -36,13 +36,16 @@ assert not re.search(
 for name in [
     "slots.json",
     "scene-fixture.json",
-    "room-pmrem.bin",
     "misans-glyphs.json",
     "LICENSE",
     "NOTICE",
 ]:
     assert (resources / name).is_file(), name
 for name in (
+    "room-pmrem.bin",
+    "dfg-lut.bin",
+    "ao-kernel.bin",
+    "ao-noise.bin",
     "runtime.js",
     "timeline.js",
     "qt-logic.js",

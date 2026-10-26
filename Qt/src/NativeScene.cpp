@@ -59,15 +59,6 @@ bool NativeScene::ready() const {
 int NativeScene::selection() const {
     return m_selected;
 }
-/**
- * 原版外观合成权重恒为 0：详情页与查看封面页改由增强渲染器（OpticalScene）直接绘制。
- * 旧实现会在唱片投影多边形内部回读 RhiScene 的整帧纹理，唱片贴图因此依赖另一条渲染路径，
- * 一旦该路径的贴图或后处理出问题（例如超分下的封面），唱片区域就只剩外壳玻璃。
- * 保留该接口是为了让合成通路的接线继续成立，但不再产生任何回读。
- */
-double NativeScene::originalActorBlend() const {
-    return 0.;
-}
 NativeScene::Cell NativeScene::fileLocation(int index) const {
     for (int lane = 0; lane < 5; ++lane) {
         const auto row = m_columns[lane].indexOf(index);

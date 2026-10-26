@@ -28,7 +28,6 @@ class NativeScene {
     QString mode() const {
         return m_mode;
     }
-    double originalActorBlend() const;
     bool isSelectedCell(SceneMotion::Cell cell) const {
         return cell == m_actor.cell;
     }

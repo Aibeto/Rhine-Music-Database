@@ -1,7 +1,7 @@
 import QtQuick
 import Rhine.Native 1.0
 
-// 3D 层：只放 RhiScene 与增强场景，不含 HUD、输入层和任何面板。
+// 3D 层：只放唯一的 RhiScene，不含 HUD、输入层和任何面板。
 // FG 需要这一层按渲染帧率单独出图并做帧间插值；它一旦和 UI 混在同一张纹理里，
 // 插值就会把文字和按钮一起算出鬼影。所以这里的边界必须与 Overlay.qml 严格对应：
 // 凡是"每帧随 3D 变化"的内容留在本文件，凡是"叠加在 3D 之上"的内容去 Overlay.qml。
@@ -15,21 +15,8 @@ Item {
     objectName: "scene3dRoot"
 
     RhiScene {
-        id: originalScene
+        objectName: "rhiScene"
         anchors.fill: parent
         engine: rhine
-        // 增强画布完全遮住底层；原版只接收预热和取出唱片真正需要的更新。
-        visible: true
-    }
-    Loader {
-        id: sceneEnhancementLoader
-        objectName: "sceneEnhancementLoader"
-        anchors.fill: parent
-        active: rhine.state.sceneEnhancement === true
-        sourceComponent: OpticalScene {
-            objectName: "enhancementComposite"
-            engine: rhine
-            originalSource: originalScene
-        }
     }
 }

@@ -20,7 +20,7 @@
  * 场景增强和窗口 Chrome 测试已移至可选的手动验证流程。
  */
 
-bool runSceneEnhancementChecks(Engine &backend, QQuickWindow *window, const QString &output);
+bool runRhiSceneChecks(Engine &backend, QQuickWindow *window, const QString &output);
 
 namespace {
 // 为原生全屏与最小化动画留出稳定时间
@@ -206,16 +206,6 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     check(!frameData.isEmpty(), "frame data available");
     check(frameData.contains("stats"), "frame stats present");
 
-    // === 测试 10: 场景增强开关 ===
-    const bool initialEnhancement = hud.sceneEnhancement;
-    hud.sceneEnhancement = !initialEnhancement;
-    backend.step(50);
-    settle();
-    check(hud.sceneEnhancement != initialEnhancement, "scene enhancement toggle");
-
-    hud.sceneEnhancement = initialEnhancement;
-    backend.step(50);
-
     // === 测试 11: 音乐数据加载 ===
     if (!music.tracks.isEmpty()) {
         check(music.tracks.first().toObject().contains("id"), "music track data structure");
@@ -259,7 +249,7 @@ int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, Fr
     hud.modal = savedModal;
 
     // 场景增强使用同一真实窗口继续验收，不重复创建应用实例。
-    ok &= runSceneEnhancementChecks(backend, window, output.isEmpty() ? QString() : output + "/enhancement");
+    ok &= runRhiSceneChecks(backend, window, output.isEmpty() ? QString() : output + "/scene");
 
     qInfo() << "UI core functionality tests:" << testCount << (ok ? "passed" : "FAILED");
     return ok ? 0 : 1;

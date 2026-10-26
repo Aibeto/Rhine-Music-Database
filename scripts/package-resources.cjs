@@ -6,10 +6,6 @@ const assert = require('node:assert/strict');
 const root = path.resolve('output/resources');
 const out = path.resolve(process.argv[2]);
 const files = [
-    'room-pmrem.bin',
-    'ao-kernel.bin',
-    'ao-noise.bin',
-    'dfg-lut.bin',
     'archive-baked-surface.bin',
     'archive-baked-light.bin',
     'archive-baked-normal.bin',

@@ -40,7 +40,6 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     vsync = host->preference("vsync") != "off";
 #endif
     discRotation = host->preference("disc-rotation") == "on";
-    sceneEnhancement = host->preference("scene-enhancement") != "off";
     bool hasMaskStrength = false;
     const auto savedMaskStrength = host->preference("archive-mask-strength").toInt(&hasMaskStrength);
     if (hasMaskStrength) {
@@ -618,9 +617,6 @@ void NativeHud::action(QString value) {
             archiveMaskStrength = std::clamp(strength, 0, 100);
             m_host->setPreference("archive-mask-strength", QString::number(archiveMaskStrength));
         }
-    } else if (value == "scene-enhancement") {
-        sceneEnhancement = !sceneEnhancement;
-        m_host->setPreference("scene-enhancement", sceneEnhancement ? "on" : "off");
     } else if (value == "detail-autoplay") {
         const bool enabled = m_host->preference("detail-autoplay") == "on";
         m_host->setPreference("detail-autoplay", enabled ? "off" : "on");
@@ -665,8 +661,8 @@ void NativeHud::action(QString value) {
     } else if (value.startsWith("fsr-quality:")) {
         // FSR 超分档位：渲染器每帧读取，下一帧生效（内部尺寸变化会触发渲染目标重建）。
         const auto quality = value.mid(12);
-        if (quality == "super" || quality == "performance" || quality == "balanced" ||
-            quality == "quality" || quality == "native") {
+        if (quality == "super" || quality == "performance" || quality == "balanced" || quality == "quality" ||
+            quality == "native") {
             m_host->setPreference("fsr-quality", quality);
             qputenv("RHINE_FSR_QUALITY", quality.toUtf8());
             expandedPreference.clear();

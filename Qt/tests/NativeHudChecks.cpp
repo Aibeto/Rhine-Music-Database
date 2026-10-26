@@ -202,10 +202,9 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                 ok = false;
             }
 
-            const QStringList requiredSettings{"theme",           "motion",           "startup-animation",
-                                               "detail-autoplay", "single-play-mode", "scene-enhancement",
-                                               "quality",         "disc-rotation",    "performance:toggle",
-                                               "update:check"};
+            const QStringList requiredSettings{
+                "theme",   "motion",        "startup-animation",  "detail-autoplay", "single-play-mode",
+                "quality", "disc-rotation", "performance:toggle", "update:check"};
             QSet<QString> visibleSettings;
             for (double offset = 0;; offset += 400) {
                 hud.settingsScroll = std::min(offset, hud.settingsScrollMaximum());

@@ -148,12 +148,12 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 | macOS    | -      | -           | -      | ✅    |
 | Linux    | ✅     | -           | ✅     | -     |
 
-| API         | FXAA | SSAA   | MSAA   | TAA | Upscaling                  | Frame Generation     |
-| ----------- | ---- | ------ | ------ | --- | -------------------------- | -------------------- |
-| Vulkan      | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS                | ✅                   |
-| Direct3D 12 | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS / TU (default) | -                    |
-| OpenGL      | ✅   | 2x MAX | 8x MAX | ✅  | EASU + RCAS                | -                    |
-| Metal | - | - | - | MetalFX | MetalFX Temporal | MetalFX |
+| API         | FXAA | SSAA   | MSAA   | TAA     | Upscaling                  | Frame Generation |
+| ----------- | ---- | ------ | ------ | ------- | -------------------------- | ---------------- |
+| Vulkan      | ✅   | 2x MAX | 8x MAX | ✅      | EASU + RCAS                | ✅               |
+| Direct3D 12 | ✅   | 2x MAX | 8x MAX | ✅      | EASU + RCAS / TU (default) | -                |
+| OpenGL      | ✅   | 2x MAX | 8x MAX | ✅      | EASU + RCAS                | -                |
+| Metal       | -    | -      | -      | MetalFX | MetalFX Temporal           | MetalFX          |
 
 插帧（FSR Frame Generation）在 Vulkan 上是**常驻能力、即时开关**：只要设备支持，启动时应用就自建
 交换链接管窗口（呈现层常驻），设置页里的帧生成开关**点一下就生效、不需要重启**——它只决定每次呈现

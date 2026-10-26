@@ -190,7 +190,6 @@ QJsonObject NativeHud::state() const {
             {"modalOffset", motion.offset},
             {"dark", dark},
             {"reduced", reduced},
-            {"sceneEnhancement", sceneEnhancement},
             {"archiveMaskStrength", archiveMaskStrength},
             {"trackListMode", trackListMode},
             {"mode", frame["mode"]},

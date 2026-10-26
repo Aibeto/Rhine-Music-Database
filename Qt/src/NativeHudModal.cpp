@@ -431,14 +431,14 @@ RhineFg::FrameGenerationUi frameGenerationUi(const Host *host, bool preferenceOn
     const auto &capability = RhineFg::capability();
     const auto active = RhineGraphics::activeBackend();
     const bool backendCapable = active.isEmpty() ? host->preference("graphics-backend") != "opengl"
-                                                : active == QLatin1String("vulkan")
+                                                 : active == QLatin1String("vulkan")
 #ifdef Q_OS_MACOS
-                                                      || active == QLatin1String("metal")
+                                                       || active == QLatin1String("metal")
 #endif
         ;
     return RhineFg::frameGenerationUi(capability.compiledIn, capability.presentLayerActive,
-                                      capability.interpolationAvailable, capability.reason,
-                                      backendCapable, preferenceOn);
+                                      capability.interpolationAvailable, capability.reason, backendCapable,
+                                      preferenceOn);
 }
 
 } // namespace
@@ -455,7 +455,6 @@ void NativeHud::settings(double x, double y, double width) {
     QVector<QStringList> rows{
         {"WINDOW / 窗口显示", "切换全屏 / F11", "window:fullscreen"},
         {"COLOR THEME / 界面配色", theme, "theme"},
-        {"RhineLab Enhance", sceneEnhancement ? "开启" : "关闭", "scene-enhancement"},
         {"REDUCED MOTION / 动态效果", reduced ? "减少动态效果" : "完整动效", "motion"},
         {"STARTUP ANIMATION / 初始化动画", startupAnimation ? "开启" : "关闭", "startup-animation"},
         {"AUDIO QUALITY / 音质", qualities.value(music.player.quality), "quality"}};
@@ -480,9 +479,8 @@ void NativeHud::settings(double x, double y, double width) {
     rows.append({"RIGHT MASK / 右侧画面遮罩", "", "archive-mask"});
     // 图形后端写入配置，重启后由启动逻辑应用；用于定位玻璃渲染是否为特定后端的问题。
     const auto backendSetting = m_host->preference("graphics-backend");
-    static const QHash<QString, QString> backendNames{{"vulkan", "Vulkan"},
-                                                      {"opengl", "OpenGL"},
-                                                      {"d3d12", "Direct3D 12"}};
+    static const QHash<QString, QString> backendNames{
+        {"vulkan", "Vulkan"}, {"opengl", "OpenGL"}, {"d3d12", "Direct3D 12"}};
     const auto pending = backendSetting.isEmpty() ? QStringLiteral("默认 / 自动探测")
                                                   : backendNames.value(backendSetting, backendSetting);
     // 显示本次启动实际应用的后端：只读配置值会在环境变量覆盖或保存值过期时与画面不一致。
@@ -493,8 +491,7 @@ void NativeHud::settings(double x, double y, double width) {
         if (backendSetting.isEmpty()) {
             backendLabel = appliedName + QStringLiteral("（自动）");
         } else if (applied != backendSetting) {
-            backendLabel =
-                appliedName + QStringLiteral("（下次启动：") + pending + QStringLiteral("）");
+            backendLabel = appliedName + QStringLiteral("（下次启动：") + pending + QStringLiteral("）");
         } else {
             backendLabel = appliedName;
         }
@@ -556,12 +553,9 @@ void NativeHud::settings(double x, double y, double width) {
     // 名称必须用 QStringLiteral：QLatin1String 会把 UTF-8 字节逐个当 Latin-1 解释，中文变乱码。
     // FSR 只有一个选项：内部按后端能力自动选择 FFX 计算后端（FSR3）或 EASU/RCAS
     // 片元实现（FSR1），用户不需要理解两代算法的差别，也不会选到跑不了的那个。
-    QVector<QPair<QString, QString>> aaOptions{{"off", QStringLiteral("关闭")},
-                                               {"fxaa", QStringLiteral("FXAA")},
-                                               {"ssaa", QStringLiteral("SSAA")},
-                                               {"msaa", QStringLiteral("MSAA")},
-                                               {"taa", QStringLiteral("TAA")},
-                                               {"fsr", QStringLiteral("FSR")}};
+    QVector<QPair<QString, QString>> aaOptions{
+        {"off", QStringLiteral("关闭")},  {"fxaa", QStringLiteral("FXAA")}, {"ssaa", QStringLiteral("SSAA")},
+        {"msaa", QStringLiteral("MSAA")}, {"taa", QStringLiteral("TAA")},   {"fsr", QStringLiteral("FSR")}};
 #ifdef Q_OS_MACOS
     aaOptions = {{"off", QStringLiteral("关闭")}, {"metalfx", QStringLiteral("MetalFX Temporal")}};
 #endif
@@ -662,9 +656,9 @@ void NativeHud::settings(double x, double y, double width) {
     text("TERMINAL PREFERENCES / 终端偏好", left, y + 392, 16, "demibold");
     // 下拉块绘制：标题行整行可点，右侧显示当前值与箭头；展开后在行下列出全部选项。
     // 返回新增高度，由调用方累加进 rowShift，让后续行整体下移。
-    const auto dropdown = [&](const QVector<QPair<QString, QString>> &options, int current, const QString &key,
-                              const QString &prefix, double dropdownY, double dropdownLeft,
-                              double dropdownWidth, const QJsonArray &dropdownInk,
+    const auto dropdown = [&](const QVector<QPair<QString, QString>> &options, int current,
+                              const QString &key, const QString &prefix, double dropdownY,
+                              double dropdownLeft, double dropdownWidth, const QJsonArray &dropdownInk,
                               const QJsonArray &dropdownTint) -> double {
         const bool expanded = expandedPreference == key;
         hit(dropdownLeft, dropdownY, dropdownWidth, 56, "expand:" + key, options.at(current).second);

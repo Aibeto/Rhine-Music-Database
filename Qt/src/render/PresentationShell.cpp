@@ -1032,10 +1032,6 @@ bool PresentationShell::start() {
         m_host->markSceneDirty();
         scheduleNext();
     });
-    connect(m_backend, &Engine::opticalSceneUpdated, this, [this] {
-        m_host->markSceneDirty();
-        scheduleNext();
-    });
     connect(m_backend, &Engine::hudUpdated, this, [this] {
         m_host->markOverlayDirty();
         scheduleNext();

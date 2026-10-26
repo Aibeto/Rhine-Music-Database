@@ -16,8 +16,7 @@ class QRhiTexture;
 ///
 /// 数据只在宿主调用 renderFrame() 之后读取，读到的一定是刚渲染完那一帧的值。
 ///
-/// 实现放在头文件里（inline 变量）：RhiScene.cpp 属于 RhineCore，而 CMake 把 /fg/
-/// 目录排除在 RhineCore 之外，单独出一个 .cpp 会让回归测试链不上符号。
+/// 头文件中的 inline 状态供渲染器与呈现层共享，独立回归也可在不链接呈现后端时测试通道。
 namespace RhineFg {
 
 struct FrameInputs {
@@ -43,33 +42,31 @@ namespace detail {
 inline std::atomic<bool> enabled{false};
 inline FrameInputs inputs;
 inline std::atomic<quint64> serial{0};
-}  // namespace detail
+} // namespace detail
 
 /// 渲染器在每帧末尾调用；tap 未启用时是空操作，开销为一次原子读。
-inline void publish(const FrameInputs &value)
-{
-    if (!detail::enabled.load(std::memory_order_relaxed))
+inline void publish(const FrameInputs &value) {
+    if (!detail::enabled.load(std::memory_order_relaxed)) {
         return;
+    }
     detail::inputs = value;
     detail::inputs.serial = detail::serial.fetch_add(1, std::memory_order_relaxed) + 1;
 }
 
 /// 宿主读取最近一次发布的输入。返回引用，调用方不应保存超过一帧。
-inline const FrameInputs &latest()
-{
+inline const FrameInputs &latest() {
     return detail::inputs;
 }
 
-inline quint64 latestSerial()
-{
+inline quint64 latestSerial() {
     return detail::serial.load(std::memory_order_relaxed);
 }
 
 /// FG 宿主启动时打开、退出时关闭（RAII 封装见 TapScope）。
-inline void setEnabled(bool value)
-{
-    if (value == detail::enabled.load(std::memory_order_relaxed))
+inline void setEnabled(bool value) {
+    if (value == detail::enabled.load(std::memory_order_relaxed)) {
         return;
+    }
     if (!value) {
         // 关闭时清掉纹理指针：它们可能随着渲染目标重建而失效，
         // 留着会让下一次启动读到悬空句柄。
@@ -78,8 +75,7 @@ inline void setEnabled(bool value)
     detail::enabled.store(value, std::memory_order_relaxed);
 }
 
-inline bool isEnabled()
-{
+inline bool isEnabled() {
     return detail::enabled.load(std::memory_order_relaxed);
 }
 
@@ -87,8 +83,9 @@ inline bool isEnabled()
 class TapScope {
   public:
     explicit TapScope(bool on = true) : m_previous(isEnabled()) {
-        if (on)
+        if (on) {
             setEnabled(true);
+        }
     }
     ~TapScope() {
         setEnabled(m_previous);
@@ -100,4 +97,4 @@ class TapScope {
     bool m_previous;
 };
 
-}  // namespace RhineFg
+} // namespace RhineFg
