@@ -10,6 +10,9 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QKeyEvent>
+#include <QInputMethodEvent>
+#include <QQuickItem>
+#include <QQuickPaintedItem>
 #include <QMouseEvent>
 #include <QQuickWindow>
 #include <QThread>
@@ -97,15 +100,8 @@ int runPresentationChecks(PresentationShell &shell, Engine &backend, const QStri
     check(counter(shell, "sceneFrames") > rendered && counter(shell, "overlayFrames") == uiAfter,
           "只更新场景时复用 UI 纹理");
 
-    bool settingsClicked = false;
-    for (const auto &entry : backend.hits()) {
-        const auto hit = entry.toMap();
-        if (hit.value("action") != "settings") {
-            continue;
-        }
-        const qreal scale = shell.window()->height() / 1080.0;
-        const QPointF position((hit.value("x").toDouble() + hit.value("width").toDouble() / 2) * scale,
-                               (hit.value("y").toDouble() + hit.value("height").toDouble() / 2) * scale);
+    // 点击和键盘都投递给真实宿主，避免直接调用业务查询掩盖离屏输入失效。
+    const auto clickAt = [&](QPointF position) {
         for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
             QMouseEvent click(type, position, shell.window()->mapToGlobal(position), Qt::LeftButton,
                               type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton,
@@ -113,13 +109,91 @@ int runPresentationChecks(PresentationShell &shell, Engine &backend, const QStri
             QCoreApplication::sendEvent(shell.window(), &click);
         }
         settle(250);
-        settingsClicked = backend.app->hud.modal == "settings";
-        break;
-    }
-    check(settingsClicked, "高分屏真实坐标点击打开设置");
+    };
+    const auto clickAction = [&](const QString &action) {
+        for (const auto &entry : backend.hits()) {
+            const auto hit = entry.toMap();
+            if (hit.value("action") != action) {
+                continue;
+            }
+            const qreal scale = shell.window()->height() / 1080.0;
+            clickAt(QPointF((hit.value("x").toDouble() + hit.value("width").toDouble() / 2) * scale,
+                            (hit.value("y").toDouble() + hit.value("height").toDouble() / 2) * scale));
+            return true;
+        }
+        return false;
+    };
+    check(clickAction("settings") && backend.app->hud.modal == "settings", "高分屏真实坐标点击打开设置");
     backend.action("close-modal");
     backend.pointer("pointerleave", 0, 0);
     settle(800);
+
+    const auto state = shell.renderState();
+    const qreal dpr = shell.window()->devicePixelRatio();
+    check(qFuzzyCompare(state.value("sceneDpr").toDouble(), dpr) &&
+              qFuzzyCompare(state.value("overlayDpr").toDouble(), dpr) &&
+              shell.inputWindow()->size() == shell.window()->size() &&
+              state.value("targetWidth") == state.value("swapchainWidth") &&
+              state.value("targetHeight") == state.value("swapchainHeight"),
+          "离屏逻辑尺寸、有效 DPR 和物理目标与真实窗口一致");
+    auto *sceneItem = shell.sceneWindow()->contentItem()->findChild<RhiScene *>();
+    check(sceneItem && sceneItem->effectiveColorBufferSize() == shell.grabFrame().size(),
+          "内部 3D 颜色缓冲达到显示分辨率");
+
+    check(clickAction("search") && backend.app->hud.modal == "search", "真实点击打开搜索面板");
+    settle(700);
+    auto *search = shell.inputWindow()->contentItem()->findChild<QQuickItem *>("musicSearchInput");
+    check(search && search->isVisible() && search->width() > 0, "搜索框已显示且有可点击宽度");
+    if (search) {
+        clickAt(search->mapToScene(QPointF(search->width() / 2, search->height() / 2)));
+        check(shell.inputWindow()->activeFocusItem() == search, "真实点击让搜索框获得输入焦点");
+        QInputMethodQueryEvent query(Qt::ImEnabled | Qt::ImCursorRectangle);
+        QCoreApplication::sendEvent(shell.window(), &query);
+        check(query.value(Qt::ImEnabled).toBool() && !query.value(Qt::ImCursorRectangle).toRectF().isEmpty(),
+              "真实窗口向平台输入法返回输入状态和光标位置");
+        QKeyEvent keyPress(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, "a");
+        QCoreApplication::sendEvent(shell.window(), &keyPress);
+        settle(100);
+        check(search->property("text").toString() == "a" && backend.app->hud.query == "a",
+              "真实窗口键盘输入同步到搜索查询");
+        QInputMethodEvent commit;
+        commit.setCommitString(QStringLiteral("测试"));
+        QCoreApplication::sendEvent(shell.window(), &commit);
+        settle(100);
+        check(search->property("text").toString() == QStringLiteral("a测试"), "真实窗口输入法提交送达搜索框");
+        search->setFocus(false);
+        QKeyEvent restoredKey(QEvent::KeyPress, Qt::Key_B, Qt::NoModifier, "b");
+        QCoreApplication::sendEvent(shell.window(), &restoredKey);
+        settle(100);
+        check(shell.inputWindow()->activeFocusItem() == search &&
+                  search->property("text").toString() == QStringLiteral("a测试b"),
+              "焦点丢失后的键盘输入恢复到当前搜索框");
+    }
+    backend.action("close-modal");
+    backend.pointer("pointerleave", 0, 0);
+    settle(800);
+
+    auto *folderDialog = shell.inputWindow()->contentItem()->findChild<QObject *>("localMusicFolderDialog");
+    auto *fileDialog = shell.inputWindow()->contentItem()->findChild<QObject *>("localMusicFileDialog");
+    check(folderDialog && fileDialog, "受控呈现创建文件夹和文件导入对话框");
+    if (folderDialog && fileDialog) {
+        check(folderDialog->property("parentWindow").value<QWindow *>() == shell.window() &&
+                  fileDialog->property("parentWindow").value<QWindow *>() == shell.window(),
+              "导入对话框归属真实宿主窗口");
+        for (auto *dialog : {folderDialog, fileDialog}) {
+            backend.localImportRequested(dialog == folderDialog);
+            settle(200);
+            check(dialog->property("visible").toBool(), "导入请求打开对应原生对话框");
+            QMetaObject::invokeMethod(dialog, "reject", Qt::DirectConnection);
+            settle(200);
+            check(!dialog->property("visible").toBool(), "取消导入对话框且不写入资料库");
+        }
+    }
+#ifdef Q_OS_WIN
+    check(shell.window()->flags().testFlag(Qt::FramelessWindowHint) &&
+              shell.inputWindow()->contentItem()->findChild<QQuickItem *>("windowTitleBar"),
+          "Windows 受控宿主启用无边框和自定义窗口控制");
+#endif
 
     configure("aa-mode", "off");
     configure("render-scale", "50");
@@ -179,9 +253,9 @@ int runPresentationChecks(PresentationShell &shell, Engine &backend, const QStri
     const auto oldSize = shell.window()->size();
     shell.window()->resize(1100, 660);
     settle(500);
-    check(shell.grabFrame().size() == QSize(qRound(1100 * shell.window()->devicePixelRatio()),
-                                            qRound(660 * shell.window()->devicePixelRatio())),
-          "改变窗口尺寸后同步离屏目标与交换链");
+    // 小数 DPR 下平台可能把请求尺寸对齐到设备像素，必须依据真实窗口而非请求值验收。
+    const QSize resizedPixels = shell.window()->size() * shell.window()->devicePixelRatio();
+    check(shell.grabFrame().size() == resizedPixels, "改变窗口尺寸后同步离屏目标与交换链");
     shell.window()->resize(oldSize);
     settle(400);
     shell.window()->hide();

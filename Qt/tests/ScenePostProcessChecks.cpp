@@ -3,6 +3,8 @@
 #include <QJsonArray>
 #include <QMatrix4x4>
 #include <QScopeGuard>
+#include <qfloat16.h>
+#include <cstring>
 
 #ifdef Q_OS_MACOS
 /** 在真实 Metal 设备上验证可移植后处理的模式切换、颜色、历史与资源复用。 */
@@ -107,6 +109,59 @@ bool runScenePostProcessChecks() {
                     steadyResources = post.resources.size();
                 } else if (iteration == 3) {
                     passed &= post.resources.size() == steadyResources;
+                }
+            }
+        }
+        // 纯色无法暴露错误采样坐标；四象限图案可检出 EASU 常量被后续 RCAS 写入覆盖。
+        qputenv("RHINE_AA_MODE", "fsr1");
+        const QSize render = post.renderSize(display);
+        QRhiCommandBuffer *commands = nullptr;
+        if (device->beginOffscreenFrame(&commands) != QRhi::FrameOpSuccess) {
+            return false;
+        }
+        post.prepare(render, display, frame);
+        const QColor quadrants[] = {QColor::fromRgbF(.75, .25, .25), QColor::fromRgbF(.25, .75, .25),
+                                    QColor::fromRgbF(.25, .25, .75), QColor::fromRgbF(.75, .75, .25)};
+        QByteArray pixels(render.width() * render.height() * 8, '\0');
+        for (int y = 0; y < render.height(); ++y) {
+            for (int x = 0; x < render.width(); ++x) {
+                const auto &pixel =
+                    quadrants[(y >= render.height() / 2 ? 2 : 0) + (x >= render.width() / 2 ? 1 : 0)];
+                const qfloat16 channels[] = {qfloat16(float(pixel.redF())), qfloat16(float(pixel.greenF())),
+                                             qfloat16(float(pixel.blueF())), qfloat16(1.f)};
+                std::memcpy(pixels.data() + (y * render.width() + x) * 8, channels, 8);
+            }
+        }
+        auto input = static_cast<QRhiTextureRenderTarget *>(post.inputTarget())
+                         ->description()
+                         .colorAttachmentAt(0)
+                         ->texture();
+        auto upload = device->nextResourceUpdateBatch();
+        upload->uploadTexture(input, QRhiTextureUploadDescription({QRhiTextureUploadEntry(
+                                         0, 0, QRhiTextureSubresourceUploadDescription(pixels))}));
+        commands->resourceUpdate(upload);
+        post.resolve(commands, target, {});
+        QRhiReadbackResult pattern;
+        auto batch = device->nextResourceUpdateBatch();
+        batch->readBackTexture(QRhiReadbackDescription(color), &pattern);
+        commands->resourceUpdate(batch);
+        device->endOffscreenFrame();
+        device->finish();
+        if (pattern.data.size() != display.width() * display.height() * 4) {
+            passed = false;
+        } else {
+            const QImage image(reinterpret_cast<const uchar *>(pattern.data.constData()), display.width(),
+                               display.height(), QImage::Format_RGBA8888);
+            for (int index = 0; index < 4; ++index) {
+                const auto actual = image.pixelColor(display.width() * (index % 2 ? 3 : 1) / 4,
+                                                     display.height() * (index / 2 ? 3 : 1) / 4);
+                const auto expected = quadrants[index];
+                const bool correct = qAbs(actual.red() - expected.red()) <= 2 &&
+                                     qAbs(actual.green() - expected.green()) <= 2 &&
+                                     qAbs(actual.blue() - expected.blue()) <= 2;
+                passed &= correct;
+                if (!correct) {
+                    qCritical() << "FSR1 quadrant sampling regression" << index << actual << expected;
                 }
             }
         }

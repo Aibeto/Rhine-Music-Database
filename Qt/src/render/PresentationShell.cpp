@@ -22,10 +22,7 @@
 #include <QMatrix4x4>
 #include <QQmlContext>
 #include <QQmlEngine>
-#include <QHoverEvent>
-#include <QMouseEvent>
 #include <QQuickItem>
-#include <QWheelEvent>
 #include <QQuickWindow>
 #include <QTimer>
 #include <QWindow>
@@ -891,6 +888,8 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
             scheduleNext();
         }
         break;
+    case QEvent::DevicePixelRatioChange:
+    case QEvent::ScreenChangeInternal:
     case QEvent::Resize:
         m_needRecreate = true;
         m_forcePresent = true;
@@ -915,7 +914,6 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
     // QQuickRenderControl 没有自己的事件来源：可见窗口收到的输入必须原样转发给
     // 离屏的 UI 窗口，否则按钮、滚轮、快捷键全部失效。
     if (QQuickWindow *overlay = m_host ? m_host->overlayWindow() : nullptr) {
-        const qreal inputRatio = m_backendName == "metal" ? 1.0 : m_dpr;
         switch (event->type()) {
         case QEvent::KeyPress:
             // 兜底且是真正的保障：按键到达时离屏窗口若没有焦点项，KeyPress 会被
@@ -931,45 +929,14 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
         case QEvent::MouseButtonPress:
         case QEvent::MouseButtonRelease:
         case QEvent::MouseButtonDblClick:
-        case QEvent::MouseMove: {
-            // 离屏窗口按物理像素、QML 根节点按逻辑像素缩放：Qt 投递的窗口坐标是
-            // 物理空间的，不乘比例的话 QML 收到的点只有真实位置的 1/dpr，点击会错位。
-            auto *me = static_cast<QMouseEvent *>(event);
-            if (qFuzzyCompare(inputRatio, 1.0)) {
-                QCoreApplication::sendEvent(overlay, event);
-            } else {
-                QMouseEvent scaled(me->type(), me->position() * inputRatio, me->scenePosition() * inputRatio,
-                                   me->globalPosition(), me->button(), me->buttons(), me->modifiers(),
-                                   me->pointingDevice());
-                QCoreApplication::sendEvent(overlay, &scaled);
-            }
-            break;
-        }
-        case QEvent::Wheel: {
-            auto *we = static_cast<QWheelEvent *>(event);
-            if (qFuzzyCompare(inputRatio, 1.0)) {
-                QCoreApplication::sendEvent(overlay, event);
-            } else {
-                QWheelEvent scaled(we->position() * inputRatio, we->globalPosition(), we->pixelDelta(),
-                                   we->angleDelta(), we->buttons(), we->modifiers(), we->phase(),
-                                   we->inverted(), we->source(), we->pointingDevice());
-                QCoreApplication::sendEvent(overlay, &scaled);
-            }
-            break;
-        }
+        case QEvent::MouseMove:
+        case QEvent::Wheel:
         case QEvent::HoverEnter:
         case QEvent::HoverLeave:
-        case QEvent::HoverMove: {
-            auto *he = static_cast<QHoverEvent *>(event);
-            if (qFuzzyCompare(inputRatio, 1.0)) {
-                QCoreApplication::sendEvent(overlay, event);
-            } else {
-                QHoverEvent scaled(he->type(), he->position() * inputRatio, he->globalPosition(),
-                                   he->oldPos() * inputRatio, he->modifiers(), he->pointingDevice());
-                QCoreApplication::sendEvent(overlay, &scaled);
-            }
+        case QEvent::HoverMove:
+            // 可见窗口和离屏窗口都使用逻辑坐标；像素密度只作用于渲染目标。
+            QCoreApplication::sendEvent(overlay, event);
             break;
-        }
         case QEvent::TouchBegin:
         case QEvent::TouchUpdate:
         case QEvent::TouchEnd:
@@ -991,6 +958,10 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
         case QEvent::InputMethod:
             QCoreApplication::sendEvent(overlay, event);
             break;
+        case QEvent::InputMethodQuery:
+            // 查询结果直接交还平台输入法，避免普通 QWindow 的默认处理覆盖它。
+            QCoreApplication::sendEvent(overlay, event);
+            return true;
         default:
             break;
         }
@@ -1004,11 +975,15 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
 
 // 同步版：立刻把 QML 焦点补回来（排队恢复会被后续事件搅掉，实测重新聚焦后仍为 null）。
 void PresentationShell::ensureOverlayFocus(QQuickWindow *overlay) {
-    if (!overlay || !m_host || overlay->activeFocusItem()) {
+    if (!overlay || !m_host) {
+        return;
+    }
+    auto *focusItem = overlay->activeFocusItem();
+    if (focusItem && focusItem != overlay->contentItem() && focusItem != m_host->overlayRootItem()) {
         return;
     }
     if (QQuickItem *root = m_host->overlayRootItem()) {
-        QMetaObject::invokeMethod(root, "focusInputLayer", Qt::DirectConnection);
+        QMetaObject::invokeMethod(root, "restoreInputFocus", Qt::DirectConnection);
     }
 }
 
@@ -1144,6 +1119,15 @@ QVariantMap PresentationShell::renderState() const {
 #ifdef Q_OS_MACOS
             {"renderer", m_backend->renderTelemetry.snapshot()},
 #endif
+            {"windowDpr", m_window ? m_window->devicePixelRatio() : 0.0},
+            {"sceneDpr", sceneWindow() ? sceneWindow()->effectiveDevicePixelRatio() : 0.0},
+            {"overlayDpr", inputWindow() ? inputWindow()->effectiveDevicePixelRatio() : 0.0},
+            {"logicalWidth", m_size.width()},
+            {"logicalHeight", m_size.height()},
+            {"targetWidth", m_host ? m_host->pixelSize().width() : 0},
+            {"targetHeight", m_host ? m_host->pixelSize().height() : 0},
+            {"swapchainWidth", m_presenter ? m_presenter->extent().width() : 0},
+            {"swapchainHeight", m_presenter ? m_presenter->extent().height() : 0},
             {"backend", m_backendName}};
 }
 

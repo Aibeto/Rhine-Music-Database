@@ -286,9 +286,7 @@ static void applyRenderScaleSetting() {
  * 建立应用身份、Qt 引擎和原生窗口。
  * 离线测试与正式播放沿用同一入口，资源只从独立应用读取。
  */
-#ifdef Q_OS_MACOS
 int runPresentationChecks(PresentationShell &shell, Engine &backend, const QString &directory);
-#endif
 
 int main(int argc, char **argv) {
 #ifdef Q_OS_WIN
@@ -305,7 +303,8 @@ int main(int argc, char **argv) {
     }
     // Windows GUI 子系统默认可能将 Qt 日志送到调试器；测试必须写入 CTest 的标准错误管道。
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--ui-self-test") == 0) {
+        if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--ui-self-test") == 0 ||
+            std::strcmp(argv[i], "--presentation-check") == 0) {
             qInstallMessageHandler(
                 [](QtMsgType type, const QMessageLogContext &context, const QString &message) {
                     const auto text = qFormatLogMessage(type, context, message).toUtf8();
@@ -475,14 +474,12 @@ int main(int argc, char **argv) {
         }
 #endif
         if (shell->start() && shell->run() == 0) {
-#ifdef Q_OS_MACOS
             if (args.contains("--presentation-check")) {
                 const auto directory = args.value(args.indexOf("--presentation-check") + 1);
                 QTimer::singleShot(2500, shell.get(), [&, raw = shell.get(), directory] {
                     application.exit(runPresentationChecks(*raw, backend, directory));
                 });
             }
-#endif
             // FG 使用独立的 QWindow，也必须保留任务栏控制和关闭后驻留托盘的行为。
 #ifdef Q_OS_WIN
             WindowsTaskbar taskbar(&backend, shell->window());

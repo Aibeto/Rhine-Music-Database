@@ -22,19 +22,25 @@ Item {
     property real stageScale: height > 0 ? height / 1080 : 1
     property real stageWidth: width / stageScale
 
-    // 宿主窗口：WindowChrome 需要它做最小化/最大化/拖拽/边缘缩放。
-    // 默认路径由 Main.qml 注入 Window；FG 路径没有可见的 QQuickWindow，保持 null，
-    // 下面的 Loader 判空后不创建（期二改成 C++ 注入 startSystemMove/startSystemResize）。
-    // 不叫 window 是因为 Item 已有 window 属性（QQuickItem::window()），重名会冲突。
-    property Window hostWindow: null
-    readonly property bool controlledMetalHost: Qt.platform.os === "osx"
-        && typeof rhineHostWindow !== "undefined" && rhineHostWindow !== null
-    property bool frameless: false
+    // 受控呈现使用原生 QWindow；默认路径由 Main.qml 注入 QML Window。
+    readonly property bool controlledHost: typeof rhineHostWindow !== "undefined" && rhineHostWindow !== null
+    property var hostWindow: controlledHost ? rhineHostWindow : null
+    property bool frameless: controlledHost && Qt.platform.os === "windows"
     readonly property bool ios: Qt.platform.os === "ios"
 
     // 原 Main.qml 直接引用组件内部的 id，拆层后改为函数调用，效果等价。
     function focusInputLayer() {
         inputLayer.forceActiveFocus();
+    }
+    // 离屏窗口失去焦点后按当前面板恢复，不能把输入框焦点一律交回快捷键层。
+    function restoreInputFocus() {
+        if (searchInput.visible && searchInput.enabled) {
+            searchInput.forceActiveFocus();
+        } else if (formFields.visible && accountField.enabled) {
+            accountField.forceActiveFocus();
+        } else {
+            inputLayer.forceActiveFocus();
+        }
     }
     function clearCredentials() {
         accountField.text = "";
@@ -48,8 +54,9 @@ Item {
         }
     }
     Loader {
-        active: overlay.controlledMetalHost
+        active: overlay.controlledHost
         sourceComponent: LocalMusicDialogs {
+            hostWindow: overlay.hostWindow
             backend: rhine
         }
     }
@@ -99,7 +106,7 @@ Item {
     // FgShell::eventFilter() 里那种 QCoreApplication::sendEvent(离屏窗口, key) 的
     // 直接投递完全不经过快捷键地图，任何 context 都不会触发——所以 FG 的快捷键
     // 绝不能靠"转发事件"实现，只能靠这里的 context 声明。
-    readonly property int shortcutContext: hostWindow === null ? Qt.ApplicationShortcut : Qt.WindowShortcut
+    readonly property int shortcutContext: controlledHost ? Qt.ApplicationShortcut : Qt.WindowShortcut
     Shortcut {
         sequences: [StandardKey.Quit]
         context: overlay.shortcutContext
@@ -367,10 +374,7 @@ Item {
             color: "#777777"
         }
     }
-    // WindowChrome 依赖真实 Window（visibility/showMinimized/startSystemMove）。
-    // 用 Loader 判空而不是直接实例化：FG 路径没有可见窗口，直接创建会让
-    // window.visibility 变成空引用并每帧刷 TypeError。默认路径下 hostWindow 在
-    // 创建时就已注入，Loader 同步创建，层级与 z:999 和拆分前一致。
+    // 两条呈现路径共用真实宿主的窗口按钮、拖动与边缘缩放。
     Loader {
         id: chromeLoader
         anchors.fill: parent

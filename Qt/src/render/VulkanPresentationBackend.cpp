@@ -36,7 +36,14 @@ class VulkanPresentationBackend final : public PresentationBackend {
         // 那样 surfaceForWindow() 永远返回 VK_NULL_HANDLE。
         m_window->setSurfaceType(QSurface::VulkanSurface);
         m_window->setVulkanInstance(m_instance.get());
-        m_window->setTitle(QStringLiteral("Rhine Music Database"));
+        m_window->setTitle(QStringLiteral("RHINE MUSIC DATABASE"));
+        m_window->setMinimumSize(QSize(960, 540));
+#ifdef Q_OS_WIN
+        // 必须在创建 HWND 和 Vulkan surface 前确定无边框属性。
+        m_window->setFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowTitleHint |
+                           Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint |
+                           Qt::WindowCloseButtonHint | Qt::WindowFullscreenButtonHint);
+#endif
         m_window->resize(logicalSize);
         m_window->create();
         if (!m_window->handle()) {
@@ -76,7 +83,7 @@ class VulkanPresentationBackend final : public PresentationBackend {
 
         m_size = m_window->size();
         m_presenter = std::make_unique<VulkanPresenter>();
-        if (!m_presenter->init(m_rhi.get(), surface, m_size, vsync)) {
+        if (!m_presenter->init(m_rhi.get(), surface, m_size * m_window->devicePixelRatio(), vsync)) {
             m_error = QStringLiteral("交换链创建失败：%1").arg(m_presenter->lastError());
             return false;
         }

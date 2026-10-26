@@ -226,6 +226,7 @@ target_link_libraries(
     PUBLIC Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Multimedia
     PRIVATE Qt6::MultimediaPrivate tag)
 add_subdirectory(Qt)
+target_sources(RhineMusicDatabase PRIVATE Qt/tests/PresentationChecks.cpp)
 target_link_libraries(RhineMusicDatabase PRIVATE RhineCore)
 # FSR 只挂在应用目标上：设置页要按编译期能力置灰，所以把可用性也传成宏。 FSR1 是纯着色器（EASU+RCAS），任何后端都能用；FSR3 需要 Vulkan 或 D3D12。
 if(TARGET FidelityFX::SDK)
@@ -340,10 +341,8 @@ if(IOS)
     target_compile_options(RhineCore PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     include(Qt/IOS.cmake)
 elseif(APPLE)
-    target_sources(
-        RhineMusicDatabase
-        PRIVATE Qt/src/render/MetalFxBackend.mm Qt/src/render/MetalFxBackend.h Qt/src/render/FrameGenerator.h
-                Qt/src/render/SceneResources.h Qt/tests/PresentationChecks.cpp)
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/render/MetalFxBackend.mm Qt/src/render/MetalFxBackend.h
+                                              Qt/src/render/FrameGenerator.h Qt/src/render/SceneResources.h)
     target_link_libraries(RhineMusicDatabase PRIVATE "-weak_framework MetalFX" "-framework Metal")
     target_compile_options(RhineMusicDatabase PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     target_sources(RhineCore PRIVATE Qt/src/Platform.mm)

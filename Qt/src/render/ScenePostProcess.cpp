@@ -100,7 +100,10 @@ void ScenePostProcess::prepare(QSize render, QSize display, const QJsonObject &f
         m_displaySize = display;
         if (active()) {
             m_globals = create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 544)));
-            m_constants =
+            // 同一帧的动态缓冲写入会合并；EASU 和 RCAS 必须各持一份常量，不能相互覆盖。
+            m_easuConstants =
+                create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Fsr1Con))));
+            m_rcasConstants =
                 create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Fsr1Con))));
             m_sampler =
                 create(own(rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
@@ -148,7 +151,7 @@ void ScenePostProcess::prepare(QSize render, QSize display, const QJsonObject &f
 }
 
 void ScenePostProcess::quad(QRhiCommandBuffer *commands, const QString &kind, QRhiRenderTarget *destination,
-                            const QList<QRhiTexture *> &textures) {
+                            const QList<QRhiTexture *> &textures, QRhiBuffer *constants) {
     QString bindingKey = kind;
     for (auto texture : textures) {
         bindingKey += '/' + QString::number(quintptr(texture));
@@ -161,7 +164,7 @@ void ScenePostProcess::quad(QRhiCommandBuffer *commands, const QString &kind, QR
             QRhiShaderResourceBinding::uniformBuffer(0, stages, m_globals)};
         if (kind.startsWith("fsr1_")) {
             values.append(QRhiShaderResourceBinding::uniformBuffer(
-                1, QRhiShaderResourceBinding::FragmentStage, m_constants));
+                1, QRhiShaderResourceBinding::FragmentStage, constants));
         }
         for (int index = 0; index < textures.size(); ++index) {
             values.append(QRhiShaderResourceBinding::sampledTexture(
@@ -192,11 +195,12 @@ void ScenePostProcess::quad(QRhiCommandBuffer *commands, const QString &kind, QR
     commands->endPass();
 }
 void ScenePostProcess::fsrQuad(QRhiCommandBuffer *commands, const QString &kind,
-                               QRhiRenderTarget *destination, QRhiTexture *source, const Fsr1Con &constants) {
+                               QRhiRenderTarget *destination, QRhiTexture *source, QRhiBuffer *buffer,
+                               const Fsr1Con &constants) {
     auto batch = rhi->nextResourceUpdateBatch();
-    batch->updateDynamicBuffer(m_constants, 0, sizeof(constants), &constants);
+    batch->updateDynamicBuffer(buffer, 0, sizeof(constants), &constants);
     commands->resourceUpdate(batch);
-    quad(commands, kind, destination, {source});
+    quad(commands, kind, destination, {source}, buffer);
 }
 
 /** 对新场景的最终颜色执行互斥 AA/FSR；计算派发失败时仍输出有效场景。 */
@@ -236,11 +240,11 @@ void ScenePostProcess::resolve(QRhiCommandBuffer *commands, QRhiRenderTarget *de
         if (resolved) {
             quad(commands, "copyColor", destination, {m_output.texture});
         } else {
-            fsrQuad(commands, "fsr1_easu", m_output.target, m_input.texture,
+            fsrQuad(commands, "fsr1_easu", m_output.target, m_input.texture, m_easuConstants,
                     Fsr1Constants::easu(m_renderSize, m_displaySize));
             const int effective =
                 RhineFsr::effectiveSharpnessPercent(sharpness(), m_renderSize, m_displaySize);
-            fsrQuad(commands, "fsr1_rcas", destination, m_output.texture,
+            fsrQuad(commands, "fsr1_rcas", destination, m_output.texture, m_rcasConstants,
                     Fsr1Constants::rcas(m_displaySize, float(100 - effective) / 100.f * 2.f));
         }
     }

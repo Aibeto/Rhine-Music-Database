@@ -4,7 +4,7 @@ import QtQuick.Window
 // Windows 无边框模式
 Item {
     id: chrome
-    required property Window window
+    required property var window
     property bool dark: false
     readonly property color ink: dark ? "#ebebeb" : "#141613"
     readonly property bool maximized: window.visibility === Window.Maximized
