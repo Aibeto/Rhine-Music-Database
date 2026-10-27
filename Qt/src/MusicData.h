@@ -10,6 +10,7 @@ QJsonObject parse(const QJsonObject &raw, const QString &kind);
 QJsonArray unique(const QJsonArray &existing, const QJsonArray &values);
 QJsonArray ordered(const QJsonArray &ids, const QJsonArray &songs);
 QJsonArray slice(const QJsonArray &values, qsizetype start, qsizetype count);
+QVector<int> sortOrder(const QJsonArray &values, const QString &field);
 int cursor(const QJsonArray &songs, const QJsonArray &ids);
 int indexOf(const QJsonArray &values, const QJsonValue &value);
 int indexOfId(const QJsonArray &values, const QString &id);

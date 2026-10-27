@@ -12,6 +12,7 @@ namespace {
 QJsonObject directoryState(const MusicDirectory &folder) {
     return {{"item", folder.item},
             {"songs", folder.songs},
+            {"sortField", folder.sortField},
             {"ids", folder.ids},
             {"albums", folder.albums},
             {"cursor", folder.cursor},
@@ -117,6 +118,10 @@ bool MusicLibrary::restoreSessionState(const QJsonObject &saved) {
         folder->parent = directory;
         folder->item = value["item"].toObject();
         folder->songs = value["songs"].toArray();
+        const auto sortField = value["sortField"].toString("none");
+        if (QStringList{"none", "title", "album", "artist"}.contains(sortField)) {
+            folder->sortField = sortField;
+        }
         folder->ids = value["ids"].toArray();
         folder->albums = value["albums"].toArray();
         folder->cursor = std::clamp(value["cursor"].toInt(), 0, int(folder->ids.size()));

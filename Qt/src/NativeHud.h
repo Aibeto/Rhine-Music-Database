@@ -68,6 +68,7 @@ class NativeHud : public QObject {
     QString formKind;
     QString formPID;
     QString confirmTitle;
+    QString detailSort = "none";
     QString groupBy = "none";
     QString activeGroup;
     QString artistTab = "songs";
@@ -124,6 +125,17 @@ class NativeHud : public QObject {
         double emphasis = 0;
         double opacity = 1;
     };
+    struct SortRequest {
+        QString provider;
+        quint64 account;
+        quint64 generation;
+        QString key;
+        std::shared_ptr<MusicDirectory> directory;
+        int progress = -1;
+    };
+    void beginSort();
+    void continueSort();
+    std::optional<SortRequest> m_sortRequest;
     struct Page {
         QString modal;
         int lane;
@@ -142,6 +154,11 @@ class NativeHud : public QObject {
     std::function<void()> m_confirm;
     QCache<QString, QString> m_fitCache{512};
     std::map<QString, UiMotion::RollingLabel> m_rolling;
+    QString m_sortNotice;
+    QString m_sortContainerKey;
+    QJsonArray m_sortTracks;
+    QString m_sortField;
+    QVector<int> m_trackOrder;
     QString m_rowsKey;
     QVector<Row> m_rows;
     QString m_resultSignature;

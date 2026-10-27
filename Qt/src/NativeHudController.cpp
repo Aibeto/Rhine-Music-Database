@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QPointer>
 #include <QUrl>
+#include <QTimer>
 #include <algorithm>
 #include <cmath>
 
@@ -49,9 +50,12 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
         m_music->status = "发现新版本 " + m_host->updater.latestVersion() + "，可在设置中前往发布页面更新";
     });
     connect(music, &MusicLibrary::invalidated, this, &NativeHud::finishPage);
+    connect(music, &MusicLibrary::invalidated, this,
+            [this] { QTimer::singleShot(0, this, &NativeHud::continueSort); });
 }
 
 void NativeHud::openModal(QString kind) {
+    m_sortRequest.reset();
     if (m_music->isLocal() &&
         QStringList{"login", "quality", "playlist-picker", "playlist-form"}.contains(kind)) {
         return;
@@ -91,6 +95,7 @@ void NativeHud::openModal(QString kind) {
 }
 
 void NativeHud::closeModal() {
+    m_sortRequest.reset();
     ++m_searchGeneration;
     if (modal == "login") {
         m_music->cancelLogin();
@@ -813,4 +818,53 @@ bool NativeHud::animating(double time) const {
     }
     return std::any_of(m_rolling.cbegin(), m_rolling.cend(),
                        [time](const auto &entry) { return entry.second.active(time); });
+}
+
+/** 排序只使用显示索引，分页仍使用上游游标；关闭页面或切换账号后停止补页。 */
+void NativeHud::beginSort() {
+    m_sortRequest.reset();
+    m_sortNotice.clear();
+    if (detailSort == "none") {
+        return;
+    }
+    const auto &music = *m_music;
+    m_sortRequest = SortRequest{music.provider, music.accountGeneration(), m_searchGeneration,
+                                music.current["key"].toString(), music.directory};
+    QTimer::singleShot(0, this, &NativeHud::continueSort);
+}
+
+void NativeHud::continueSort() {
+    if (!m_sortRequest) {
+        return;
+    }
+    auto &music = *m_music;
+    auto &request = *m_sortRequest;
+    const bool samePage = modal.isEmpty() && (frame["mode"] == "detail" || frame["mode"] == "archive") &&
+                          music.directory == request.directory &&
+                          (music.directory || music.current["key"] == request.key);
+    if (closing || !samePage || music.provider != request.provider ||
+        music.accountGeneration() != request.account || m_searchGeneration != request.generation) {
+        m_sortRequest.reset();
+        return;
+    }
+    if (music.sourceLoading() || music.directoryLoading || music.detailLoading || music.trackLoad) {
+        return;
+    }
+    const auto progress = music.directory ? music.directory->cursor : music.trackCursor;
+    const bool more = progress < (music.directory ? music.directory->ids.size() : music.trackIDs.size());
+    if (!more || progress == request.progress) {
+        if (more) {
+            m_sortNotice = QStringLiteral("未能补齐曲目，当前仅排序已载入内容，可加载更多后重试");
+            music.status += " · " + m_sortNotice;
+        }
+        m_sortRequest.reset();
+        music.changed();
+        return;
+    }
+    request.progress = progress;
+    if (music.directory) {
+        music.loadDirectoryPage();
+    } else {
+        music.loadTrackPage(music.tracks.size());
+    }
 }

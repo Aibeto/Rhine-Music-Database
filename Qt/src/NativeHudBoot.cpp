@@ -280,4 +280,8 @@ void NativeHud::trimMemory() {
     hits = {};
     frame = {};
     m_fitCache.clear();
+    m_sortTracks = {};
+    m_sortField.clear();
+    m_trackOrder.clear();
+    m_sortRequest.reset();
 }

@@ -1,6 +1,9 @@
 #include "NativeHud.h"
 #include "MusicData.h"
 #include "MusicDiscover.h"
+#include <QCoreApplication>
+#include <QElapsedTimer>
+#include <QThread>
 #include <QDebug>
 #include <QGuiApplication>
 #include <QJsonDocument>
@@ -85,10 +88,173 @@ MusicLibrary *createTestMusicLibrary(Host *host, const QString &provider, const 
  *
  * 验证关键交互逻辑和状态管理，不依赖像素对比。
  */
+namespace {
+/** 固定分页输入验证全量排序、恢复原序与点击映射，不访问真实音乐服务。 */
+bool checkSorting(const QString &root, Glyphs &glyphs, const QJsonObject &content) {
+    Host host(root, true);
+    MusicLibrary music(&host, content);
+    music.provider = "qq";
+    music.api.provider = "qq";
+    music.uid = "42";
+    const auto track = [](int id, QString title, QString album, QString artist) {
+        auto value = song(id);
+        value["title"] = title;
+        value["album"] = album;
+        value["artist"] = artist;
+        return value;
+    };
+    const QJsonArray original{track(1, "Z", "B", "C"), track(2, "A10", "A", "B"), track(3, "A2", "A", "A"),
+                              track(4, "A2", "", "A")};
+    if (MusicData::sortOrder(original, "title") != QVector<int>{2, 3, 1, 0} ||
+        MusicData::sortOrder(original, "album") != QVector<int>{1, 2, 0, 3} ||
+        MusicData::sortOrder(original, "artist") != QVector<int>{2, 3, 1, 0}) {
+        qCritical() << "Stable natural sorting or missing-name placement failed";
+        return false;
+    }
+    int pages = 0;
+    bool failed = false;
+    host.fixture = [&](QString route, QJsonObject parameters) {
+        QJsonValue value;
+        if (route.endsWith("/songs")) {
+            ++pages;
+            if (failed) {
+                return QJsonObject{{"body", QJsonObject{{"code", 500}, {"message", "测试补页失败"}}}};
+            }
+            QJsonArray values;
+            for (const auto &id : parameters["args"].toArray().at(0).toArray()) {
+                const auto index = id.toString().toInt() - 1;
+                if (index >= 0 && index < original.size()) {
+                    values.append(original.at(index));
+                }
+            }
+            value = values;
+        }
+        return QJsonObject{{"body", QJsonObject{{"code", 200}, {"value", value}}}};
+    };
+    HudSceneActions scene;
+    scene.mode = [](QString) {};
+    NativeHud hud(&host, &glyphs, &music, scene);
+    hud.reduced = true;
+    QJsonObject frame{{"mode", "detail"}, {"selected", 0}, {"detail", 1}};
+    const auto settle = [&] {
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (hud.state()["sortLoading"].toBool() && elapsed.elapsed() < 3000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(1);
+        }
+        return !hud.state()["sortLoading"].toBool();
+    };
+    music.directory = std::make_shared<MusicDirectory>();
+    music.directory->item = MusicData::item("playlist", "8", "排序测试");
+    music.directory->songs = QJsonArray{original.first()};
+    music.directory->ids = QJsonArray{"1", "missing", "2", "3", "4"};
+    music.directory->cursor = 1;
+    music.current = music.directory->item;
+    music.directoryInfo = true;
+    frame["mode"] = "detail";
+    hud.draw(frame, 1920, 50);
+    const auto playButton = getHit(hud.hits, "music:play-loaded");
+    const auto sortButton = getHit(hud.hits, "music:sort-menu");
+    if (sortButton.isEmpty() || sortButton["y"] != playButton["y"] ||
+        sortButton["height"] != playButton["height"] ||
+        sortButton["x"].toDouble() <= playButton["x"].toDouble() + playButton["width"].toDouble() ||
+        hasAction(hud.hits, "music:sort:detail:album")) {
+        qCritical() << "Playlist sorting button is not collapsed or aligned with play-all";
+        return false;
+    }
+    hud.action("music:sort-menu");
+    hud.draw(frame, 1920, 51);
+    for (const auto &field : {"none", "title", "album", "artist"}) {
+        if (!hasAction(hud.hits, "music:sort:detail:" + QString(field))) {
+            qCritical() << "Sorting menu is missing an option" << field;
+            return false;
+        }
+    }
+    hud.action("music:sort:detail:album");
+    if (!hud.modal.isEmpty()) {
+        qCritical() << "Sorting selection did not dismiss the menu";
+        return false;
+    }
+    if (!settle() || music.directory->songs != original) {
+        qCritical() << "Playlist sorting did not finish pagination";
+        return false;
+    }
+    hud.draw(frame, 1920, 51);
+    const auto sorted = QJsonArray{original.at(1), original.at(2), original.at(0), original.at(3)};
+    if (music.libraryItems() != sorted || MusicData::slice(music.directoryQueue(), 0, 4) != sorted ||
+        music.directoryQueue().last().toObject()["id"] != "missing" || music.directory->index != 2 ||
+        music.directory->cursor != 5) {
+        qCritical() << "Library, selection, queue or pagination did not follow detail sorting";
+        return false;
+    }
+    const auto saved = music.sessionState();
+    if (!music.restoreSessionState(saved) || music.libraryItems() != sorted ||
+        music.directory->sortField != "album") {
+        qCritical() << "Session restore lost playlist sorting";
+        return false;
+    }
+    const auto first = getHit(hud.hits, "music:track:0");
+    const auto last = getHit(hud.hits, "music:track:3");
+    if (first.isEmpty() || last.isEmpty() || first["y"].toDouble() >= last["y"].toDouble()) {
+        qCritical() << "Playlist sorted hits lost their canonical indices";
+        return false;
+    }
+    hud.action("music:track:0");
+    if (music.current["id"] != "2") {
+        qCritical() << "Sorted playlist selected the wrong song";
+        return false;
+    }
+    music.returnToDirectory();
+    frame["mode"] = "archive";
+    hud.draw(frame, 1920, 52);
+    if (music.libraryItems() != sorted || hasAction(hud.hits, "music:sort-menu")) {
+        qCritical() << "Archive did not retain sorted songs or exposed a sorting control";
+        return false;
+    }
+    music.navigateDirectory(1);
+    if (music.current["id"] != "3") {
+        qCritical() << "Archive navigation did not follow sorted order";
+        return false;
+    }
+    music.showDirectoryInfo();
+    frame["mode"] = "detail";
+    hud.draw(frame, 1920, 53);
+    hud.action("music:sort-menu");
+    hud.action("music:sort:detail:none");
+    if (music.libraryItems() != original || music.directory->index != 2) {
+        qCritical() << "Default order did not preserve the selected song";
+        return false;
+    }
+    // 补页失败须停止重试，关闭页面须取消尚未发出的请求。
+    music.directory->ids.append("5");
+    failed = true;
+    const auto beforeFailure = pages;
+    hud.action("music:sort-menu");
+    hud.action("music:sort:detail:artist");
+    if (!settle() || pages != beforeFailure + 1 || !music.status.contains("未能补齐")) {
+        qCritical() << "Sorting pagination did not stop after failure";
+        return false;
+    }
+    const auto beforeClose = pages;
+    hud.action("music:sort-menu");
+    hud.action("music:sort:detail:album");
+    hud.openModal("saved");
+    hud.draw(frame, 1920, 54);
+    QCoreApplication::processEvents();
+    if (hud.state()["sortLoading"].toBool() || pages != beforeClose ||
+        hasAction(hud.hits, "music:sort-menu") || hasAction(hud.hits, "music:sort:library:title")) {
+        qCritical() << "Library exposed sorting controls or kept loading a closed detail page";
+        return false;
+    }
+    return true;
+}
+}
+
 bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
     Host host(root, true);
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
-    bool ok = true;
+    bool ok = checkSorting(root, glyphs, content);
     int testCount = 0;
 
     // 测试所有平台和主题组合

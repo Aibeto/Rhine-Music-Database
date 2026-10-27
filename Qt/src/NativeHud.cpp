@@ -133,6 +133,10 @@ void NativeHud::art(QString key, double x, double y, double size, int count, dou
 }
 
 QRectF NativeHud::modalBounds(double width) const {
+    if (modal == "detail-sort") {
+        const auto layout = containerLayout(width);
+        return {layout.x + 195, 391, 240, 184};
+    }
     if (modal == "lyrics-source") {
         // 来源菜单
         return {width * 0.56 + 156, 674, 232, 232};
@@ -192,6 +196,8 @@ QJsonObject NativeHud::state() const {
             {"reduced", reduced},
             {"archiveMaskStrength", archiveMaskStrength},
             {"trackListMode", trackListMode},
+            {"detailSort", detailSort},
+            {"sortLoading", m_sortRequest.has_value()},
             {"mode", frame["mode"]},
             {"viewer", frame["viewer"]},
             {"status", m_music->status}};

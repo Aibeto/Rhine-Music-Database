@@ -49,7 +49,7 @@ void MusicLibrary::refreshLocal() {
             }
         }
         if (directory && directory->item["key"] != "playback:queue") {
-            directory->songs = local->tracks(directory->item);
+            directory->updateSongs(local->tracks(directory->item), directory->sortField);
             directory->ids = {};
             for (const auto &entry : directory->songs) {
                 directory->ids.append(entry.toObject()["id"]);

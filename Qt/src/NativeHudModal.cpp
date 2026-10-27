@@ -118,6 +118,26 @@ void NativeHud::modalDraw(double width) {
         restore();
         return;
     }
+    if (modal == "detail-sort") {
+        const auto bounds = modalBounds(width);
+        translate(0, motion.offset);
+        hits = {};
+        m_modalControls = true;
+        // 菜单之外的点击只负责收起，避免穿透到下方曲目。
+        hit(0, -motion.offset, width, 1080, "close-modal", "关闭排序菜单");
+        fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(),
+             dark ? QJsonArray{0.15, 0.15, 0.15, 1} : QJsonArray{0.929, 0.922, 0.894, 1});
+        const QStringList fields{"none", "title", "album", "artist"};
+        const QStringList labels{"默认排序", "按歌曲名排序", "按专辑名排序", "按歌手名排序"};
+        for (int index = 0; index < fields.size(); ++index) {
+            const auto label = (detailSort == fields[index] ? QString("✓ ") : QString()) + labels[index];
+            button(label, bounds.x() + 8, bounds.y() + 8 + index * 42, bounds.width() - 16, 42,
+                   "music:sort:detail:" + fields[index], 14);
+        }
+        m_modalControls = false;
+        restore();
+        return;
+    }
     if (modal == "lyrics-source") {
         const auto bounds = modalBounds(width);
         translate(0, motion.offset);

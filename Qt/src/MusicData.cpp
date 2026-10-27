@@ -1,5 +1,7 @@
 #include "MusicData.h"
+#include <QCollator>
 #include <QDateTime>
+#include <QLocale>
 #include <QRegularExpression>
 #include <QSet>
 #include <algorithm>
@@ -154,4 +156,29 @@ QString time(const QJsonObject &track) {
     }
     return pad(int(duration / 60000)) + ":" + pad(int(duration / 1000) % 60);
 }
+}
+
+/** 返回稳定的显示索引；空名称排在末尾，相同名称保留接口原序，不改写原始曲目。 */
+QVector<int> MusicData::sortOrder(const QJsonArray &values, const QString &field) {
+    QVector<int> indices;
+    for (int index = 0; index < values.size(); ++index) {
+        indices.append(index);
+    }
+    if (!QStringList{"title", "album", "artist"}.contains(field)) {
+        return indices;
+    }
+    QCollator collator(QLocale("zh_CN"));
+    collator.setCaseSensitivity(Qt::CaseInsensitive);
+    collator.setNumericMode(true);
+    QStringList names;
+    for (const auto &value : values) {
+        names.append(value.toObject()[field].toString().trimmed());
+    }
+    std::stable_sort(indices.begin(), indices.end(), [&names, &collator](int left, int right) {
+        if (names[left].isEmpty() != names[right].isEmpty()) {
+            return !names[left].isEmpty();
+        }
+        return collator.compare(names[left], names[right]) < 0;
+    });
+    return indices;
 }

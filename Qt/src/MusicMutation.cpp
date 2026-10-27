@@ -319,8 +319,9 @@ void MusicLibrary::playlistTrack(QString id, QJsonObject value, bool remove, Com
                 return;
             }
             const auto contained = MusicData::indexOfId(directory->songs, value["id"].toString()) >= 0;
-            directory->songs = remove ? without(directory->songs, "id", value["id"])
+            const auto songs = remove ? without(directory->songs, "id", value["id"])
                                       : MusicData::unique(directory->songs, {value});
+            directory->updateSongs(songs, directory->sortField);
             if (remove) {
                 const auto old = MusicData::indexOf(directory->ids, value["id"]);
                 if (old >= 0 && old < directory->cursor) {
