@@ -371,6 +371,11 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             const QStringList requiredSettings{
                 "theme",   "motion",        "startup-animation",  "detail-autoplay", "single-play-mode",
                 "quality", "disc-rotation", "performance:toggle", "update:check",    "replay"};
+            QStringList reachableSettings = requiredSettings;
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+            // 关闭行为只在持有托盘入口的桌面平台出现。
+            reachableSettings.append("close-behavior");
+#endif
             QSet<QString> visibleSettings;
             for (double offset = 0;; offset += 400) {
                 hud.settingsScroll = std::min(offset, hud.settingsScrollMaximum());
@@ -382,7 +387,7 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                     break;
                 }
             }
-            for (const auto &setting : requiredSettings) {
+            for (const auto &setting : reachableSettings) {
                 if (!visibleSettings.contains(setting)) {
                     qCritical() << "Missing reachable setting:" << setting << provider << dark;
                     ok = false;

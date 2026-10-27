@@ -483,6 +483,13 @@ void NativeHud::settings(double x, double y, double width) {
         {"REDUCED MOTION / 动态效果", reduced ? "减少动态效果" : "完整动效", "motion"},
         {"STARTUP ANIMATION / 初始化动画", startupAnimation ? "开启" : "关闭", "startup-animation"},
         {"AUDIO QUALITY / 音质", qualities.value(music.player.quality), "quality"}};
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    // 只有这两个平台持有托盘入口，关闭行为才有两种可选结果。
+    rows.insert(1, {"CLOSE WINDOW / 点击关闭窗口",
+                    m_host->preference("close-behavior") == "tray" ? QStringLiteral("最小化到系统托盘")
+                                                                   : QStringLiteral("退出播放器"),
+                    "close-behavior"});
+#endif
     if (music.provider == "netease") {
         rows.append({"ALTERNATE SOURCE / 替代音源",
                      music.player.alternative ? "开启（音质由来源决定）" : "关闭", "alternative"});
@@ -728,6 +735,8 @@ void NativeHud::settings(double x, double y, double width) {
             // 显卡下拉块：选中即收起（收起与写配置都在 NativeHud::action 的 gpu-index: 分支）。
             rowShift += dropdown(gpuOptions, gpuOptionIndex, QStringLiteral("gpu-index"),
                                  QStringLiteral("gpu-index:"), rowY, left, usable, rowInk, tint);
+        } else if (row.at(2) == "close-behavior") {
+            button(row.at(1), left + usable - 280, rowY + 6, 264, 44, "close-behavior", 16);
         } else if (row.at(2) == "aa-mode") {
             // 抗锯齿下拉块：选中即收起（收起逻辑在 NativeHud::action 的 aa-mode: 分支里）。
             rowShift += dropdown(aaOptions, aaIndex, QStringLiteral("aa-mode"), QStringLiteral("aa-mode:"),
@@ -822,8 +831,8 @@ void NativeHud::settings(double x, double y, double width) {
     text("PERFORMANCE MODE / 性能模式", left + 16, y + performanceTop + 270, 18, "demibold");
     button(performanceMode ? "开启 / 点击关闭" : "关闭 / 点击开启", left + usable - 280,
            y + performanceTop + 258, 264, 44, "performance-mode", 16);
-    text("默认开启；关闭或最小化时只显示静态画面并释放界面资源，重启后生效。", left, y + performanceTop + 324,
-         15);
+    text("默认开启；最小化或关闭到托盘时只显示静态画面并释放界面资源，重启后生效。", left,
+         y + performanceTop + 324, 15);
     rule(left, y + updateTop - 20, usable, 0.2);
     text("SOFTWARE UPDATE / 软件更新", left, y + updateTop, 16, "demibold");
     const auto &updater = m_host->updater;

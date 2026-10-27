@@ -150,9 +150,15 @@ bool PlaybackSessionWindow::eventFilter(QObject *watched, QEvent *event) {
         requestRestoration();
     }
     if (watched == m_window && event->type() == QEvent::Close && !m_explicitExit) {
-        m_window->hide();
-        requestSuspension();
+        if (closesToTray()) {
+            m_window->hide();
+            requestSuspension();
+            event->ignore();
+            return true;
+        }
+        // 关闭即退出播放器：窗口保持不变，退出流程会通知后台服务停止播放。
         event->ignore();
+        QCoreApplication::quit();
         return true;
     }
     return QObject::eventFilter(watched, event);
@@ -292,6 +298,11 @@ void PlaybackSessionWindow::saveInterfaceState() {
     settings.setValue("interface/geometry", m_normalGeometry);
     settings.setValue("interface/states", int(m_savedStates));
     settings.sync();
+}
+
+/** 读取关闭行为：未保存过时按退出播放器处理，只有显式选择托盘才隐藏窗口。 */
+bool PlaybackSessionWindow::closesToTray() const {
+    return AppStorage::settings().value("panel/close-behavior").toString() == QLatin1String("tray");
 }
 
 /**

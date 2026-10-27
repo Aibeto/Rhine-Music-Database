@@ -632,6 +632,10 @@ void NativeHud::action(QString value) {
         // 后台服务在启动时接管界面，开关只写配置，重启后生效。
         const bool enabled = m_host->preference("performance-mode") != "off";
         m_host->setPreference("performance-mode", enabled ? "off" : "on");
+    } else if (value == "close-behavior") {
+        // 关闭行为在点击窗口关闭按钮时读取
+        const bool toTray = m_host->preference("close-behavior") == "tray";
+        m_host->setPreference("close-behavior", toTray ? "quit" : "tray");
     } else if (value == "graphics-backend") {
         // 后端切换需要重启生效：仅写入配置，由下次启动的 selectGraphicsBackend 应用。
         // 顺序：默认（自动探测）→ Vulkan → OpenGL → 默认

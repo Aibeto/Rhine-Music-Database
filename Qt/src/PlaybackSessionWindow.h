@@ -18,8 +18,8 @@ bool connectPlaybackService(PlaybackConnection &connection, const QString &root,
 
 /**
  * 性能模式下界面窗口与服务之间的生命周期控制。
- * 关闭到菜单栏、最小化或自动遮挡时把呈现层切到静态页并销毁业务引擎；
- * 恢复时在同一窗口重建。窗口、原生句柄和 Space 归属始终不变。
+ * 最小化或自动遮挡时把呈现层切到静态页并销毁业务引擎；关闭窗口按设置选择隐藏到托盘
+ * 或退出播放器。恢复时在同一窗口重建。窗口、原生句柄和 Space 归属始终不变。
  */
 class PlaybackSessionWindow : public QObject {
     Q_OBJECT
@@ -43,6 +43,7 @@ class PlaybackSessionWindow : public QObject {
     void restoreRendering(bool activate);
     void notifyScreen();
     void saveInterfaceState();
+    bool closesToTray() const;
 
     DeferredWindowTransition m_transition;
     Intent m_intent = Intent::None;
