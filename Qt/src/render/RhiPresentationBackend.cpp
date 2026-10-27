@@ -1,4 +1,5 @@
 #include "PresentationBackend.h"
+#include "PresentationWindow.h"
 #ifdef Q_OS_MACOS
 #include "../InterfaceWindowMac.h"
 #endif
@@ -30,7 +31,7 @@ class RhiPresentationBackend final : public PresentationBackend {
 
     bool initialize(QSize logicalSize, bool vsync) override {
 #if defined(Q_OS_MACOS) && QT_CONFIG(metal)
-        m_window = std::make_unique<QWindow>();
+        m_window = std::make_unique<PresentationWindow>();
         m_window->setSurfaceType(QSurface::MetalSurface);
         m_window->setTitle(QStringLiteral("RHINE MUSIC DATABASE"));
         m_window->setMinimumSize(QSize(960, 540));

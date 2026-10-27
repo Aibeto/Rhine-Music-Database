@@ -198,6 +198,8 @@ set(RHINE_APP_SOURCES
     Qt/src/fsr/Fsr3Backend.h
     Qt/src/render/SceneLayerHost.cpp
     Qt/src/render/SceneLayerHost.h
+    Qt/src/render/PresentationWindow.cpp
+    Qt/src/render/PresentationWindow.h
     Qt/src/fg/FgBackend.cpp
     Qt/src/fg/FgBackend.h
     Qt/src/fg/FgConfig.h
@@ -476,9 +478,9 @@ elseif(APPLE)
                    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Qt/Info.plist.in")
 elseif(WIN32)
     target_sources(
-        RhineMusicDatabase PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp
-                                   Qt/src/render/WindowsStaticImage.cpp Qt/src/render/WindowsStaticImage.h
-                                   Qt/tests/WindowsWindowChecks.cpp)
+        RhineMusicDatabase
+        PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp Qt/src/render/WindowsStaticImage.cpp
+                Qt/src/render/WindowsStaticImage.h Qt/tests/WindowsWindowChecks.cpp)
     target_link_libraries(RhineMusicDatabase PRIVATE dxgi ole32 uuid gdi32 dwmapi)
     if(RHINE_ENABLE_D3D12_BACKEND)
         target_link_libraries(RhineMusicDatabase PRIVATE d3d12)
@@ -608,6 +610,17 @@ endif()
 add_test(NAME qt_platform_regression COMMAND RhinePlatformRegression
                                              "${CMAKE_CURRENT_BINARY_DIR}/platform-regression")
 set_tests_properties(qt_platform_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+qt_add_executable(RhineInputMethodRegression Qt/tests/InputMethodChecks.cpp
+                  Qt/src/render/PresentationWindow.cpp Qt/src/render/PresentationWindow.h)
+# 测试在内存中创建 QML；动态 Qt kit 直接加载插件，无需递归扫描仓库和部署产物。
+set_target_properties(RhineInputMethodRegression PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+target_include_directories(RhineInputMethodRegression PRIVATE Qt/src)
+target_link_libraries(RhineInputMethodRegression PRIVATE Qt6::Quick)
+if(MSVC)
+    target_compile_options(RhineInputMethodRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_input_method_regression COMMAND RhineInputMethodRegression)
+set_tests_properties(qt_input_method_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 qt_add_executable(RhineAudioPlaybackRegression Qt/tests/AudioPlaybackChecks.cpp)
 target_link_libraries(RhineAudioPlaybackRegression PRIVATE Qt6::Core Qt6::Multimedia)
 if(MSVC)

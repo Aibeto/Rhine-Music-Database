@@ -1,4 +1,5 @@
 #include "PresentationBackend.h"
+#include "PresentationWindow.h"
 #include "../fg/VulkanPresenter.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -35,7 +36,7 @@ class VulkanPresentationBackend final : public PresentationBackend {
             return false;
         }
 
-        m_window = std::make_unique<QWindow>();
+        m_window = std::make_unique<PresentationWindow>();
         // 必须声明成 Vulkan surface：平台窗口默认按 raster/OpenGL 建，
         // 那样 surfaceForWindow() 永远返回 VK_NULL_HANDLE。
         m_window->setSurfaceType(QSurface::VulkanSurface);

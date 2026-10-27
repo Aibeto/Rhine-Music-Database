@@ -8,6 +8,7 @@
 #include "../fg/FgCapability.h"
 #include "../fg/FgConfig.h"
 #include "../fg/FgFrameTap.h"
+#include "PresentationWindow.h"
 #include "SceneLayerHost.h"
 
 #include "../Engine.h"
@@ -222,6 +223,10 @@ bool PresentationShell::initializeLayers() {
                           << "activeFocusItem:"
                           << (focusItem ? focusItem->metaObject()->className() : "null");
     }
+    // 把平台输入法接到离屏输入项上
+    if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
+        inputWindow->setInputWindow(m_host->overlayWindow());
+    }
     // 只在这里打开每帧输入通道：RhiScene 的渲染器只在 tap 打开时才发布。
 #ifdef Q_OS_MACOS
     // Main.qml 未加载时仍需接上原窗口的资源统计清理，否则隐藏后会残留旧计数。
@@ -279,6 +284,10 @@ void PresentationShell::disconnectBackend() {
 
 /** 释放当前离屏宿主；静态层与正常层共用这一条路径。 */
 void PresentationShell::releaseHost() {
+    // 离屏 UI 窗口即将销毁，先解除输入法对它的引用，避免平台上下文留下悬空焦点对象
+    if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
+        inputWindow->setInputWindow(nullptr);
+    }
     if (m_sceneInvalidated) {
         QObject::disconnect(m_sceneInvalidated);
         m_sceneInvalidated = {};
@@ -376,6 +385,10 @@ bool PresentationShell::suspendToStatic() {
     }
     host->resize(m_size);
     host->setPixelRatio(m_dpr);
+    // 真实 UI 的离屏窗口马上被替换掉，先断开输入法焦点
+    if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
+        inputWindow->setInputWindow(nullptr);
+    }
     m_host = std::move(host);
     m_suspended = true;
     m_staticFramePresented = false;
@@ -1191,13 +1204,8 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
             // 焦点由"可见窗口"这唯一真实来源决定：启动时建立一次，按键到达时兜底。
             break;
         case QEvent::ShortcutOverride:
-        case QEvent::InputMethod:
             QCoreApplication::sendEvent(overlay, event);
             break;
-        case QEvent::InputMethodQuery:
-            // 查询结果直接交还平台输入法，避免普通 QWindow 的默认处理覆盖它。
-            QCoreApplication::sendEvent(overlay, event);
-            return true;
         default:
             break;
         }
