@@ -15,7 +15,7 @@ int main(int argc, char **argv) {
     const auto root = application.arguments().value(1);
     Glyphs glyphs(root);
     bool passed = true;
-    const auto check = [&](bool valid, const char *name) {
+    const auto check = [&](bool valid, const QString &name) {
         qInfo() << "Glyph check:" << name << valid;
         passed &= valid;
     };
@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
         const auto &text = samples[row];
         const auto bounds = glyphs.bounds(text, 32);
         check(bounds["width"].toDouble() > 0 && bounds["height"].toDouble() > 0,
-              "multilingual text has visible outlines");
+              QStringLiteral("multilingual text has visible outlines: %1").arg(text));
         const double advance = glyphs.width(text, 32);
         check(std::isfinite(advance) && advance > 0 && advance < 1000,
               "multilingual advance is finite and bounded");

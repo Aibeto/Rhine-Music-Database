@@ -156,11 +156,19 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
     QProcess panel;
     launchGui(panel, {});
     QByteArray panelLog;
-    check(panel.waitForStarted() && waitFor([&] {
-              panelLog += panel.readAll();
-              return panelLog.contains("PLAYBACK_GUI_READY");
-          }),
-          "real persistent GUI starts");
+    const bool panelReady =
+        panel.waitForStarted() && waitFor([&] {
+            panelLog += panel.readAll();
+            return panelLog.contains("PLAYBACK_GUI_READY") || panel.state() == QProcess::NotRunning;
+        }) &&
+        panelLog.contains("PLAYBACK_GUI_READY");
+    check(panelReady, "real persistent GUI starts");
+    if (!panelReady) {
+        panelLog += panel.readAll();
+        qCritical() << "GUI process state:" << panel.state() << "exit status:" << panel.exitStatus()
+                    << "exit code:" << panel.exitCode() << "error:" << panel.errorString();
+        qCritical().noquote() << panelLog;
+    }
     check(waitFor([&] {
               connection->call("hello");
               return connection->snapshot()["interfaceConnected"].toBool() &&

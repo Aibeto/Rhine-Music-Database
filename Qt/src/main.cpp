@@ -311,7 +311,7 @@ int main(int argc, char **argv) {
     }
     // Windows GUI 子系统默认可能将 Qt 日志送到调试器；测试必须写入 CTest 的标准错误管道。
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--self-test") == 0) {
+        if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--playback-gui-test") == 0) {
             qInstallMessageHandler(
                 [](QtMsgType type, const QMessageLogContext &context, const QString &message) {
                     const auto text = qFormatLogMessage(type, context, message).toUtf8();

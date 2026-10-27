@@ -180,7 +180,10 @@ jobs:
           # 探测后端，缺头文件会静默跳过 FSR3 的 Vulkan 实现。
           sudo apt-get install --yes --no-install-recommends \
             cmake ninja-build file libgl1-mesa-dev libxkbcommon-dev \
-            libxkbcommon-x11-0 libxcb-cursor0 libvulkan-dev
+            libxkbcommon-x11-0 libxcb-cursor0 libvulkan-dev fontconfig fonts-noto-cjk
+          # 裁剪的 MiSans 不含韩文字形，歌词通过 Qt 的系统字体回退绘制。
+          # --no-install-recommends 不会自动带上 CJK 字体，需显式安装并刷新缓存。
+          fc-cache -f
           # 构建脚本用 --appimage-extract-and-run 打包与冒烟测试，不依赖 FUSE；
           # 这里只为兼容手动验证，noble 已按 t64 改名，缺失不算失败。
           sudo apt-get install --yes --no-install-recommends libfuse2t64 || \
