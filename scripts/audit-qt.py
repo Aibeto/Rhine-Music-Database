@@ -142,7 +142,7 @@ elif linux:
             if "=> /" not in line:
                 continue
             name, target = line.split("=>", 1)[0].strip(), line.split("=>")[1].split(" (")[0].strip()
-            if name.startswith("libQt6") and pathlib.Path(target).parent != bundled.resolve():
+            if name.startswith("libQt6") and pathlib.Path(target).resolve().parent != bundled.resolve():
                 outside.append(name)
         return missing, outside
 
@@ -151,7 +151,7 @@ elif linux:
         ["ldd", str(service)], text=True, capture_output=True, env=probe
     ).stdout
     assert "libQt6Quick" not in service_libraries and "libQt6Qml" not in service_libraries
-    missing, outside = check_dependencies(service)
+    missing, outside = resolve(service)
     assert not missing and not outside, "Undeployed playback dependency: " + str(missing + outside)
     assert "libQt6Core" in libraries and "libQt6Quick" in libraries, "Missing Qt runtime"
     assert "not found" not in libraries, "Undeployed library dependency"
