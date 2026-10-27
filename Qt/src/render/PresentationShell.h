@@ -3,6 +3,7 @@
 #include "../fg/FgStats.h"
 #include "../fg/FgFrameTap.h"
 #include "PresentationBackend.h"
+#include "PresentationStartupProbe.h"
 #include "../DeferredWindowTransition.h"
 #include "FrameGenerator.h"
 
@@ -107,6 +108,10 @@ class PresentationShell : public QObject {
     QQuickWindow *inputWindow() const;
     QQuickWindow *sceneWindow() const;
 
+  signals:
+    /// iOS 在原生事件循环内完成首帧自检，失败后由应用切回默认窗口。
+    void startupFailed();
+
   protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -192,6 +197,7 @@ class PresentationShell : public QObject {
 
     QTimer *m_timer = nullptr;
     QTimer *m_releaseTimer = nullptr;
+    RhineRender::PresentationStartupProbe m_startupProbe;
     QElapsedTimer m_frameClock;
     // QRhi 建的设备句柄：发自己的屏障时要用设备级函数表。
     QSize m_size;

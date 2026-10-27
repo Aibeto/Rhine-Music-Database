@@ -548,6 +548,30 @@ int main(int argc, char **argv) {
         if (shell->start() && shell->run() == 0) {
 #ifdef Q_OS_IOS
             configureIOSWindow(shell->window(), backend);
+            // 自检在 UIKit 完成启动后运行；排队回退，确保退出呈现回调后才释放 GPU 资源。
+            QObject::connect(
+                shell.get(), &PresentationShell::startupFailed, &application,
+                [&, raw = shell.get()] {
+                    const auto error = raw->lastError();
+                    qWarning().noquote() << "FG: 呈现层启动失败，回退默认路径：" << error;
+                    raw->shutdown();
+                    raw->window()->hide();
+                    RhineFg::publishInactive(error);
+                    engine.loadFromModule("RhineMusic", "Main");
+                    if (engine.rootObjects().isEmpty()) {
+                        application.exit(1);
+                        return;
+                    }
+                    auto *fallbackWindow = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+                    backend->setWindow(fallbackWindow);
+                    fallbackWindow->installEventFilter(backend);
+                    configureIOSWindow(fallbackWindow, backend);
+                    profiler->attach(fallbackWindow);
+                    QObject::connect(
+                        fallbackWindow, &QQuickWindow::sceneGraphInvalidated, backend,
+                        [backend] { backend->recordResourceRelease(); }, Qt::DirectConnection);
+                },
+                Qt::QueuedConnection);
 #endif
             // 性能模式下窗口与服务共享生命周期：关窗只隐藏，恢复与遮挡由服务驱动。
 #ifndef Q_OS_IOS

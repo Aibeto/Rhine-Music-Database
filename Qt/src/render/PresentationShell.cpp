@@ -1129,6 +1129,7 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
             m_forcePresent = true;
             scheduleNext();
         } else {
+            m_startupProbe.reset();
             if (m_timer) {
                 m_timer->stop();
             }
@@ -1315,6 +1316,8 @@ bool PresentationShell::startInternal() {
                     m_forcePresent = true;
                     scheduleNext();
                 } else {
+                    // 后台可能立即冻结定时器；不能等下一次自检回调才暂停计时。
+                    m_startupProbe.reset();
                     m_timer->stop();
                     // 同步释放，不能依赖进入后台后可能不再执行的定时器。
                     releaseBackgroundGraphics();
@@ -1330,6 +1333,7 @@ bool PresentationShell::startInternal() {
     //   · 按适配器要求检查连续呈现；预检结束后恢复按需调度。
     // 判死后由 main.cpp 干净回退到默认 QQuickWindow 路径。这比
     // vkGetPhysicalDeviceSurfaceSupportKHR 靠谱：后者对这类设备仍返回支持。
+#ifndef Q_OS_IOS
     {
         QElapsedTimer probeClock;
         probeClock.start();
@@ -1351,6 +1355,7 @@ bool PresentationShell::startInternal() {
             return false;
         }
     }
+#endif
 
     // 排障：RHINE_FG_DIAG=1 时每秒打一行真实计数。presented 只在每 300 帧打印，
     // 现场判断"到底是在跑还是在空转"时等不起，这个小计时器直接给答案。
@@ -1395,7 +1400,49 @@ int PresentationShell::run() {
     if (!m_started) {
         return 1;
     }
-    m_timer->start(0);
+#ifdef Q_OS_IOS
+    // UIKit 必须先从 Qt 的主事件循环取得执行权，才能完成启动、激活和窗口暴露。
+    // processEvents 的同步轮询无法替代这一过程，不能在 start() 中等待首帧。
+    auto *probeTimer = new QTimer(this);
+    probeTimer->setInterval(16);
+    QElapsedTimer clock;
+    clock.start();
+    connect(probeTimer, &QTimer::timeout, this, [this, probeTimer, clock] {
+        if (m_stopped) {
+            probeTimer->stop();
+            return;
+        }
+        const bool ready = QGuiApplication::applicationState() == Qt::ApplicationActive &&
+                           m_window->isVisible() && m_window->isExposed() &&
+                           m_window->visibility() != QWindow::Minimized;
+        const auto result = m_startupProbe.update(clock.elapsed(), ready, m_presentedFrames,
+                                                  m_failed || m_outOfDateCount > 200);
+        using Result = RhineRender::PresentationStartupProbe::Result;
+        if (result == Result::Passed || result == Result::Failed) {
+            probeTimer->stop();
+            probeTimer->deleteLater();
+            if (result == Result::Failed) {
+                m_failed = true;
+                m_error = QStringLiteral("呈现层自检失败：前台窗口就绪后只上屏 %1 帧"
+                                         "（acquire 超时 %2 次、OutOfDate %3 次、重建 %4 次）")
+                              .arg(m_presentedFrames)
+                              .arg(m_acquireTimeoutCount)
+                              .arg(m_outOfDateCount)
+                              .arg(m_recreateStreak);
+                emit startupFailed();
+            } else {
+                qInfo() << "FG: iOS 呈现层首帧自检通过";
+            }
+            return;
+        }
+        if (result == Result::Running) {
+            m_forcePresent = true;
+            scheduleNext();
+        }
+    });
+    probeTimer->start();
+#endif
+    scheduleNext();
     return 0;
 }
 

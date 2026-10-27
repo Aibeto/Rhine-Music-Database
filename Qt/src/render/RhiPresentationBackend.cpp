@@ -44,11 +44,13 @@ class RhiPresentationBackend final : public PresentationBackend {
 #else
         m_window->show();
 #endif
+#ifndef Q_OS_IOS
         QElapsedTimer clock;
         clock.start();
         while (!m_window->isExposed() && clock.elapsed() < 2000) {
             QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
         }
+#endif
         m_vsync = vsync;
         return resumeDevice();
 #else
