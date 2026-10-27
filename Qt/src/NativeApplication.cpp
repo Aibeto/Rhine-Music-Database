@@ -47,7 +47,9 @@ void NativeApplication::initialize() {
     const auto saved = m_host->preference("volume");
     bool valid = false;
     const auto volume = saved.toDouble(&valid);
-    music.player.volume(valid && std::isfinite(volume) ? volume : 0.7);
+    if (!m_host->playbackConnection()) {
+        music.player.volume(valid && std::isfinite(volume) ? volume : 0.7);
+    }
     if (!m_host->offline) {
         QFile file(AppStorage::dataDirectory() + "/session.json");
         if (file.open(QIODevice::ReadOnly) && file.size() <= 64 * 1024 * 1024) {

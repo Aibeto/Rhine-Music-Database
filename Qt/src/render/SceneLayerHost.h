@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QColor>
 #include <QSize>
 #include <QString>
 #include <QUrl>
@@ -46,6 +47,16 @@ class SceneLayerHost {
     /// "No QVulkanInstance set for QQuickWindow, cannot initialize"。
     bool start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
                QVulkanInstance *vulkanInstance = nullptr, QWindow *visibleWindow = nullptr);
+
+    /**
+     * 只建立 UI 层并载入一张静态页（性能模式挂起时使用）。
+     * 3D 层不创建、不渲染，sceneTexture() 返回空；overlayTexture() 即静态画面。
+     */
+    bool startStatic(QQmlEngine &engine, const QUrl &url, QRhi *rhi, QVulkanInstance *vulkanInstance = nullptr);
+
+    bool isStaticOnly() const {
+        return m_staticOnly;
+    }
 
     /** 两个场景各走一遍 polishItems → beginFrame → sync → render → endFrame。 */
     bool renderFrame();
@@ -125,6 +136,11 @@ class SceneLayerHost {
     bool fail(const QString &message);
     bool startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
                        QVulkanInstance *vulkanInstance);
+    bool startStaticInternal(QQmlEngine &engine, const QUrl &url, QRhi *rhi, QVulkanInstance *vulkanInstance);
+    /// 建立一层离屏窗口并接上 Qt 的更新信号；两层与静态模式共用。
+    bool createLayerWindow(Layer &layer, QRhi *rhi, QVulkanInstance *vulkanInstance, const QColor &clear,
+                           const char *name);
+    bool initializeLayer(Layer &layer, const char *name);
     bool createLayerTargets(Layer &layer, const char *name);
     void releaseLayerTargets(Layer &layer);
     bool loadLayer(Layer &layer, QQmlEngine &engine, const QUrl &url, const char *name);
@@ -134,6 +150,8 @@ class SceneLayerHost {
 
     Layer m_scene;
     Layer m_overlay;
+    /// 静态模式只有 UI 层；resize / 资源释放 / 渲染都必须跳过未建立的 3D 层。
+    bool m_staticOnly = false;
     QRhi *m_rhi = nullptr;
     QSize m_size;
     qreal m_ratio = 1.0;

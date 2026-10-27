@@ -628,7 +628,7 @@ void NativeHud::settings(double x, double y, double width) {
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;
     const auto performanceTop = preferenceTop + rows.size() * rowStep + 76 + dropdownExtra;
-    const auto updateTop = performanceTop + 310;
+    const auto updateTop = performanceTop + 410;
     const auto projectTop = updateTop + 310;
     settingsContentBottom = projectTop + 278;
     const auto viewport =
@@ -794,6 +794,15 @@ void NativeHud::settings(double x, double y, double width) {
     button(discRotation ? "开启 / 点击关闭" : "关闭 / 点击了解风险", left + usable - 280,
            y + performanceTop + 166, 264, 44, "disc-rotation", 16);
     text("默认关闭；开启会增加持续渲染、耗电和发热。", left, y + performanceTop + 232, 15);
+    // 性能模式：关窗/最小化只保留静态欢迎帧并释放界面资源，音频由后台服务继续播放。
+    // 后台服务需要在新进程启动时接管，所以开关只写配置、重启后生效。
+    const bool performanceMode = m_host->preference("performance-mode") != "off";
+    fill(left, y + performanceTop + 252, usable, 56, tint);
+    text("PERFORMANCE MODE / 性能模式", left + 16, y + performanceTop + 270, 18, "demibold");
+    button(performanceMode ? "开启 / 点击关闭" : "关闭 / 点击开启", left + usable - 280,
+           y + performanceTop + 258, 264, 44, "performance-mode", 16);
+    text("默认开启；关闭或最小化时只显示静态画面并释放界面资源，重启后生效。", left,
+         y + performanceTop + 324, 15);
     rule(left, y + updateTop - 20, usable, 0.2);
     text("SOFTWARE UPDATE / 软件更新", left, y + updateTop, 16, "demibold");
     const auto &updater = m_host->updater;

@@ -327,7 +327,7 @@ void NativeHud::playerAction(const QStringList &parts) {
     } else if (name == "volume" || name == "volume-fraction") {
         player.volume(name == "volume" ? value / 10 : value);
     } else if (name == "mode") {
-        player.mode = cycle({"off", "all", "one", "shuffle"}, player.mode);
+        player.setMode(cycle({"off", "all", "one", "shuffle"}, player.mode));
     } else if (name == "queue") {
         if (index >= 0 && index < player.queue.size()) {
             player.play(player.queue.at(index).toObject(), std::nullopt, index);
@@ -580,8 +580,7 @@ void NativeHud::action(QString value) {
         }
         m_scene.mode("boot");
     } else if (value == "alternative") {
-        music.player.alternative = !music.player.alternative;
-        m_host->setPreference("alternate-source", music.player.alternative ? "on" : "off");
+        music.player.setAlternative(!music.player.alternative);
     } else if (value == "quality") {
         QStringList qualities;
         for (const auto &option : MusicPlayer::qualityOptions(music.provider)) {
@@ -620,6 +619,10 @@ void NativeHud::action(QString value) {
     } else if (value == "detail-autoplay") {
         const bool enabled = m_host->preference("detail-autoplay") == "on";
         m_host->setPreference("detail-autoplay", enabled ? "off" : "on");
+    } else if (value == "performance-mode") {
+        // 后台服务在启动时接管界面，开关只写配置，重启后生效。
+        const bool enabled = m_host->preference("performance-mode") != "off";
+        m_host->setPreference("performance-mode", enabled ? "off" : "on");
     } else if (value == "graphics-backend") {
         // 后端切换需要重启生效：仅写入配置，由下次启动的 selectGraphicsBackend 应用。
         // 顺序：默认（自动探测）→ Vulkan → OpenGL → 默认

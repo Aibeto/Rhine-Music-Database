@@ -9,6 +9,7 @@
 #include <QNetworkAccessManager>
 #include <QObject>
 #include "BridgeProcess.h"
+#include "PlaybackConnection.h"
 #include <QQueue>
 #include <QTemporaryDir>
 #include <QTimer>
@@ -20,7 +21,8 @@ class Host : public QObject {
   public:
     using JsonReply = std::function<void(QJsonObject, QString)>;
     using TextReply = std::function<void(QString)>;
-    explicit Host(QString root, bool offline = false, QObject *parent = nullptr);
+    explicit Host(QString root, bool offline = false, QObject *parent = nullptr, bool playbackOnly = false,
+                  PlaybackConnection *connection = nullptr);
     ~Host() override;
     void requestJson(QString route, QJsonObject params, JsonReply callback);
     void schedule(int ms, std::function<void()> callback);
@@ -76,6 +78,9 @@ class Host : public QObject {
     static int lifetime(const QString &route);
     static QString cacheKey(QString scope, QString route, QJsonObject params);
     void shutdown();
+    PlaybackConnection *playbackConnection() const {
+        return remote;
+    }
     void trimMemory(const QStringList &retainedImages);
     void restoreMemoryBudget() {
         images.setMaxCost(32 * 1024);
@@ -87,6 +92,7 @@ class Host : public QObject {
 #endif
     void mediaAction(QString action);
     void mediaChanged();
+    void playbackDiagnostic(QString event, QJsonObject values);
     void invalidated();
 
   private:
@@ -132,8 +138,12 @@ class Host : public QObject {
     QString active;
     bool stopped = false;
     bool audioDiagnosticsEnabled = false;
+    PlaybackConnection *remote = nullptr;
+    mutable QHash<QString, QString> remotePreferences;
+    bool playbackOnly = false;
     int diagnosticRequestSerial = 0;
     void pump();
+    void recordPlaybackDiagnostic(const QString &event, const QJsonObject &values);
     void send(QString key);
     void finish(QString key, QJsonObject response, QString error = {});
     void respond(const Waiter &waiter, QJsonObject response, QString error);
@@ -149,3 +159,8 @@ void platformSetActivates(bool value);
 
 void platformMediaCommands(std::function<void(QString)> callback);
 void platformMediaInfo(QString title, QString artist, QString album, QVariantMap state);
+#ifdef Q_OS_MACOS
+void platformInterfaceMediaCommands(std::function<void(QString)> callback);
+void platformInterfaceMediaInfo(bool hasTrack);
+QJsonObject platformBackgroundIdentity();
+#endif

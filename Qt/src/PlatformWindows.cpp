@@ -84,6 +84,7 @@ using namespace winrt::Windows::Media;
 SystemMediaTransportControls transport{nullptr};
 winrt::event_token transportToken{};
 bool transportApartment = false;
+HWND transportWindow = nullptr;
 std::mutex transportMutex;
 std::function<void(QString)> transportAction;
 }
@@ -101,24 +102,34 @@ void platformMediaCommands(std::function<void(QString)> callback) {
         winrt::uninit_apartment();
         transportApartment = false;
     }
+    if (!transportAction && transportWindow) {
+        DestroyWindow(transportWindow);
+        transportWindow = nullptr;
+    }
 }
 void platformMediaInfo(QString title, QString artist, QString album, QVariantMap state) {
-    // 使用桌面窗口互操作接口，不依赖 UWP 应用身份或另一个播放器。
+    // SMTC 要求本进程的顶层 HWND；后台使用不显示的原生窗口，不创建 Qt 场景或交换链。
     try {
         if (!transport) {
-            if (title.isEmpty() || QGuiApplication::topLevelWindows().isEmpty()) {
+            if (title.isEmpty()) {
                 return;
             }
             if (!transportApartment) {
                 winrt::init_apartment(winrt::apartment_type::single_threaded);
                 transportApartment = true;
             }
-            auto window = QGuiApplication::topLevelWindows().first();
+            if (!transportWindow) {
+                transportWindow =
+                    CreateWindowExW(WS_EX_TOOLWINDOW, L"STATIC", L"RhinePlaybackMedia", WS_POPUP, 0, 0, 0, 0,
+                                    nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+            }
+            if (!transportWindow) {
+                return;
+            }
             auto factory = winrt::get_activation_factory<SystemMediaTransportControls,
                                                          ISystemMediaTransportControlsInterop>();
-            winrt::check_hresult(factory->GetForWindow(reinterpret_cast<HWND>(window->winId()),
-                                                       winrt::guid_of<SystemMediaTransportControls>(),
-                                                       winrt::put_abi(transport)));
+            winrt::check_hresult(factory->GetForWindow(
+                transportWindow, winrt::guid_of<SystemMediaTransportControls>(), winrt::put_abi(transport)));
             transport.IsPlayEnabled(true);
             transport.IsPauseEnabled(true);
             transport.IsNextEnabled(true);

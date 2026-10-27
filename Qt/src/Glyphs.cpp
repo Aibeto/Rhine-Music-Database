@@ -28,11 +28,26 @@ static QColor color(const QJsonValue &value) {
     };
     return QColor::fromRgbF(channel(0), channel(1), channel(2), a.size() > 3 ? a[3].toDouble() : 1);
 }
+/** 直接映射字体源，避免每次重建字体时把四份大型字体文件复制到堆中。 */
+QRawFont Glyphs::loadFont(const QString &filename) {
+    auto file = std::make_unique<QFile>(filename);
+    if (file->open(QIODevice::ReadOnly)) {
+        const auto size = file->size();
+        if (const auto address = file->map(0, size)) {
+            const auto bytes = QByteArray::fromRawData(reinterpret_cast<const char *>(address), size);
+            const QRawFont font(bytes, 1000, QFont::PreferNoHinting);
+            mappedFonts.push_back(std::move(file));
+            return font;
+        }
+    }
+    return QRawFont(filename, 1000, QFont::PreferNoHinting);
+}
+
 Glyphs::Glyphs(const QString &root) {
     for (auto weight : {"light", "regular", "demibold", "bold"}) {
-        fonts[weight] = QRawFont(root + "/RhineMiSans-" + weight + ".otf", 1000, QFont::PreferNoHinting);
+        fonts[weight] = loadFont(root + "/RhineMiSans-" + weight + ".otf");
     }
-    fonts["symbols"] = QRawFont(root + "/NotoSansSymbols2-Regular.ttf", 1000, QFont::PreferNoHinting);
+    fonts["symbols"] = loadFont(root + "/NotoSansSymbols2-Regular.ttf");
     const auto data = load(root + "/misans-glyphs.json");
     for (auto font = data.begin(); font != data.end(); ++font) {
         auto entries = font.value().toObject()["glyphs"].toObject();

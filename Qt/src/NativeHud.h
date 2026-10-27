@@ -42,6 +42,7 @@ class NativeHud : public QObject {
     NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneActions scene,
               QObject *parent = nullptr);
     void draw(QJsonObject frame, double width, double time);
+    void trimMemory();
     QJsonObject state() const;
     void action(QString action);
     void key(QString key, bool command);

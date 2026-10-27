@@ -1,6 +1,9 @@
 #pragma once
 #include <QCache>
 #include <QHash>
+#include <QFile>
+#include <memory>
+#include <vector>
 #include <QImage>
 #include <QJsonArray>
 #include <QMutex>
@@ -32,6 +35,9 @@ class Glyphs : public QObject {
     QImage label(const QJsonObject &item);
 
   private:
+    // 字体只读映射必须晚于 QRawFont 析构，避免后端仍引用输入字节。
+    std::vector<std::unique_ptr<QFile>> mappedFonts;
+    QRawFont loadFont(const QString &filename);
     QRecursiveMutex mutex;
     QHash<QString, Glyph> glyphs;
     QHash<QString, QList<Glyph>> lettering;

@@ -123,6 +123,8 @@ set(RHINE_APP_SOURCES
     Qt/tests/SessionChecks.cpp
     Qt/src/Icon.cpp
     Qt/src/main.cpp
+    Qt/src/PlaybackConnection.cpp
+    Qt/src/PlaybackConnection.h
     Qt/src/Host.cpp
     Qt/src/Host.h
     Qt/src/MusicApi.cpp
@@ -212,6 +214,36 @@ set(RHINE_CORE_SOURCES ${RHINE_APP_SOURCES})
 list(FILTER RHINE_CORE_SOURCES EXCLUDE REGEX
      "/(main|Engine|Icon|RhiScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/|/fsr/|/fg/|/render/")
 list(REMOVE_ITEM RHINE_APP_SOURCES ${RHINE_CORE_SOURCES})
+# 桌面后台只链接播放源码；场景、字形、资料库与 HUD 不进入服务二进制。
+set(RHINE_SYSTEM_CORE RhineCore)
+if(NOT IOS)
+    set(RHINE_PLAYBACK_SOURCES ${RHINE_CORE_SOURCES})
+    list(
+        FILTER
+        RHINE_PLAYBACK_SOURCES
+        INCLUDE
+        REGEX
+        "/(AppUpdater|AppStorage|AudioPlayer|HttpAudioStream|PlaybackDiagnostics|PlaybackConnection|Host|MusicApi|MusicPlayer|LyricsController|Platform)\\.(cpp|h)$|/qrcodegen\\.cpp$"
+    )
+    list(REMOVE_ITEM RHINE_CORE_SOURCES ${RHINE_PLAYBACK_SOURCES})
+    add_library(RhinePlaybackCore STATIC ${RHINE_PLAYBACK_SOURCES})
+    target_include_directories(
+        RhinePlaybackCore
+        PUBLIC Qt/src
+        PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" vendor/qrcodegen)
+    target_compile_definitions(
+        RhinePlaybackCore
+        PUBLIC RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}" RHINE_VERSION="${PROJECT_VERSION}"
+               RHINE_RELEASE_BUILD=$<BOOL:${RHINE_RELEASE_BUILD}>)
+    target_link_libraries(
+        RhinePlaybackCore
+        PUBLIC Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Multimedia
+        PRIVATE Qt6::MultimediaPrivate)
+    if(MSVC)
+        target_compile_options(RhinePlaybackCore PRIVATE /utf-8)
+    endif()
+    set(RHINE_SYSTEM_CORE RhinePlaybackCore)
+endif()
 add_library(RhineCore STATIC ${RHINE_CORE_SOURCES})
 target_include_directories(
     RhineCore
@@ -225,6 +257,9 @@ target_link_libraries(
     RhineCore
     PUBLIC Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Multimedia
     PRIVATE Qt6::MultimediaPrivate tag)
+if(NOT IOS)
+    target_link_libraries(RhineCore PUBLIC RhinePlaybackCore)
+endif()
 add_subdirectory(Qt)
 target_sources(RhineMusicDatabase PRIVATE Qt/tests/PresentationChecks.cpp)
 target_link_libraries(RhineMusicDatabase PRIVATE RhineCore)
@@ -331,9 +366,87 @@ target_link_libraries(
             Qt6::Concurrent
             Qt6::Multimedia)
 # 平台分支只处理原生能力、部署身份及链接依赖。
-if(WIN32 OR (APPLE AND NOT IOS))
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/DesktopTray.cpp Qt/src/DesktopTray.h)
-    target_link_libraries(RhineMusicDatabase PRIVATE Qt6::Widgets)
+if(NOT IOS)
+    find_package(Qt6 6.12 REQUIRED COMPONENTS Widgets)
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/EngineHolder.cpp Qt/src/EngineHolder.h
+                                              Qt/src/PlaybackSessionWindow.cpp
+                                              Qt/src/PlaybackSessionWindow.h
+                                              Qt/tests/PlaybackServiceChecks.cpp)
+    if(WIN32 OR (APPLE AND NOT IOS))
+        target_sources(RhineMusicDatabase PRIVATE Qt/src/DesktopTray.cpp Qt/src/DesktopTray.h)
+        target_link_libraries(RhineMusicDatabase PRIVATE Qt6::Widgets)
+    endif()
+    # 后台可执行文件不链接 Qt Quick、QML 或任何渲染资源。
+    qt_add_executable(
+        RhinePlaybackService
+        WIN32
+        Qt/src/playback_main.cpp
+        Qt/src/PlaybackService.cpp
+        Qt/src/PlaybackService.h
+        Qt/src/InterfaceSession.cpp
+        Qt/src/InterfaceSession.h
+        Qt/src/DesktopPresence.cpp
+        Qt/src/DesktopPresence.h
+        Qt/src/DesktopVisibility.h)
+    target_link_libraries(RhinePlaybackService PRIVATE RhinePlaybackCore Qt6::Widgets)
+    target_include_directories(RhinePlaybackService PRIVATE Qt/src)
+    if(APPLE)
+        add_executable(RhineDesktopFixture MACOSX_BUNDLE Qt/tests/DesktopWindowFixture.mm)
+        target_compile_options(RhineDesktopFixture PRIVATE -fobjc-arc)
+        target_link_libraries(RhineDesktopFixture PRIVATE "-framework AppKit")
+        set_target_properties(
+            RhineDesktopFixture
+            PROPERTIES AUTOMOC OFF
+                       AUTOUIC OFF
+                       AUTORCC OFF
+                       MACOSX_BUNDLE_GUI_IDENTIFIER "${RHINE_APPLICATION_ID}.desktop-fixture"
+                       MACOSX_BUNDLE_BUNDLE_NAME "Rhine Desktop Fixture")
+        add_dependencies(RhineMusicDatabase RhineDesktopFixture)
+        target_sources(RhineMusicDatabase PRIVATE Qt/src/InterfaceWindowMac.mm)
+        target_link_libraries(RhineMusicDatabase PRIVATE "-framework QuartzCore")
+        target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityMac.mm Qt/src/ServiceTray.cpp
+                                                    Qt/src/ServiceTray.h)
+        target_compile_options(RhinePlaybackService PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+        target_link_libraries(RhinePlaybackService PRIVATE "-framework AppKit" "-framework CoreGraphics" proc)
+    elseif(WIN32)
+        add_executable(RhineDesktopFixture Qt/tests/DesktopWindowFixtureWindows.cpp)
+        target_link_libraries(RhineDesktopFixture PRIVATE user32)
+        set_target_properties(
+            RhineDesktopFixture
+            PROPERTIES AUTOMOC OFF
+                       AUTOUIC OFF
+                       AUTORCC OFF)
+        add_dependencies(RhineMusicDatabase RhineDesktopFixture)
+        target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityWindows.cpp Qt/src/ServiceTray.cpp
+                                                    Qt/src/ServiceTray.h)
+        target_link_libraries(RhinePlaybackService PRIVATE dwmapi)
+    elseif(UNIX)
+        target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityX11.cpp)
+    endif()
+    qt_add_resources(
+        RhinePlaybackService
+        "service_icons"
+        PREFIX
+        "/icons"
+        BASE
+        "Assets/icons"
+        FILES
+        Assets/icons/icon-256.png)
+    if(MSVC)
+        target_compile_options(RhinePlaybackService PRIVATE /utf-8)
+    endif()
+    if(APPLE)
+        # helper 跟随主包一起签名和部署；主目标的打包钩子执行前必须已完成构建。
+        set_target_properties(
+            RhinePlaybackService
+            PROPERTIES MACOSX_BUNDLE TRUE
+                       MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Qt/PlaybackServiceInfo.plist.in"
+                       RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:RhineMusicDatabase>/../Helpers")
+    elseif(UNIX)
+        set_target_properties(RhinePlaybackService PROPERTIES INSTALL_RPATH "\$ORIGIN/../lib")
+        install(TARGETS RhinePlaybackService RUNTIME DESTINATION bin)
+    endif()
+    add_dependencies(RhineMusicDatabase RhinePlaybackService)
 endif()
 if(IOS)
     target_sources(RhineCore PRIVATE Qt/src/PlatformIOS.mm Qt/src/BridgeProcessIOS.cpp Qt/src/BridgeProcess.h)
@@ -346,10 +459,10 @@ elseif(APPLE)
                                               Qt/src/render/FrameGenerator.h Qt/src/render/SceneResources.h)
     target_link_libraries(RhineMusicDatabase PRIVATE "-weak_framework MetalFX" "-framework Metal")
     target_compile_options(RhineMusicDatabase PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
-    target_sources(RhineCore PRIVATE Qt/src/Platform.mm)
-    target_link_libraries(RhineCore PRIVATE "-framework Security" "-framework AppKit"
-                                            "-framework MediaPlayer")
-    target_compile_options(RhineCore PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_sources(${RHINE_SYSTEM_CORE} PRIVATE Qt/src/Platform.mm)
+    target_link_libraries(${RHINE_SYSTEM_CORE} PRIVATE "-framework Security" "-framework AppKit"
+                                                       "-framework MediaPlayer")
+    target_compile_options(${RHINE_SYSTEM_CORE} PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     set_target_properties(
         RhineMusicDatabase
         PROPERTIES MACOSX_BUNDLE_GUI_IDENTIFIER ${RHINE_APPLICATION_ID}
@@ -371,14 +484,14 @@ elseif(WIN32)
     configure_file(Qt/WindowsIcon.rc.in "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc" @ONLY)
     target_sources(RhineMusicDatabase PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc")
     target_link_libraries(RhineCore PRIVATE psapi)
-    target_sources(RhineCore PRIVATE Qt/src/PlatformWindows.cpp)
-    target_link_libraries(RhineCore PRIVATE crypt32 shell32 user32 windowsapp runtimeobject
-                                            Qt6::MultimediaPrivate)
+    target_sources(${RHINE_SYSTEM_CORE} PRIVATE Qt/src/PlatformWindows.cpp)
+    target_link_libraries(${RHINE_SYSTEM_CORE} PRIVATE crypt32 shell32 user32 windowsapp runtimeobject
+                                                       Qt6::MultimediaPrivate)
     target_compile_options(RhineMusicDatabase PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
     target_compile_options(RhineCore PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 elseif(UNIX)
     # Linux 复用同一份原生场景实现；凭据、协议交付和媒体集成由本平台文件补齐。
-    target_sources(RhineCore PRIVATE Qt/src/PlatformLinux.cpp)
+    target_sources(${RHINE_SYSTEM_CORE} PRIVATE Qt/src/PlatformLinux.cpp)
     # 显卡选择：Windows 那条直路是 DXGI + QT_D3D_ADAPTER_INDEX，Linux 只能把序号翻译成 驱动认识的环境变量，且必须在 QGuiApplication
     # 之前完成，所以单独成文件、只挂主程序。
     target_sources(RhineMusicDatabase PRIVATE Qt/src/LinuxGraphics.cpp)

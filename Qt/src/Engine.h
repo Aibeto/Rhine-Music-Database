@@ -19,7 +19,8 @@ class Engine : public QObject {
     Q_PROPERTY(QVariantList hits READ hits NOTIFY hitsChanged)
     Q_PROPERTY(QVariantMap performance READ performance NOTIFY stateChanged)
   public:
-    Engine(QString root, bool offline = false, QObject *parent = nullptr);
+    Engine(QString root, bool offline = false, QObject *parent = nullptr,
+           PlaybackConnection *connection = nullptr);
     ~Engine() override;
     QVariantMap state() const {
         return m_state;

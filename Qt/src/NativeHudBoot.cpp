@@ -269,3 +269,11 @@ void NativeHud::scan(const QJsonObject &boot) {
         tracking);
     restore();
 }
+
+/** 丢弃上一帧的绘制命令、命中区和排版缓存；恢复时由 step 重新生成。 */
+void NativeHud::trimMemory() {
+    commands = {};
+    hits = {};
+    frame = {};
+    m_fitCache.clear();
+}

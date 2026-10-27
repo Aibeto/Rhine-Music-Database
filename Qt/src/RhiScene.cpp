@@ -109,6 +109,8 @@ struct Target {
 };
 class Renderer {
   public:
+    // 映射的烘焙输入随渲染器释放，避免大块只读图集进入进程堆缓存。
+    std::vector<std::unique_ptr<QFile>> mappedAtlases;
     QRhi *rhi;
 #ifdef Q_OS_MACOS
     RhineRender::Settings settings;
@@ -210,6 +212,20 @@ class Renderer {
                          bool resize = false) {
         return create(own(rhi->newTexture(format, s, 1, flags), resize));
     }
+    QByteArray mapAtlas(const QString &name) {
+        auto file = std::make_unique<QFile>(root + "/" + name);
+        if (file->open(QIODevice::ReadOnly)) {
+            const auto size = file->size();
+            if (const auto address = file->map(0, size)) {
+                const auto bytes = QByteArray::fromRawData(reinterpret_cast<const char *>(address), size);
+                mappedAtlases.push_back(std::move(file));
+                return bytes;
+            }
+        }
+        // 不支持文件映射的平台仍沿用原读取路径，上传字节和格式保持一致。
+        return read(root, name);
+    }
+
     void upload(QRhiTexture *t, QByteArray bytes) {
         QRhiTextureSubresourceUploadDescription data(bytes);
         updates->uploadTexture(t, QRhiTextureUploadDescription({QRhiTextureUploadEntry(0, 0, data)}));
@@ -258,11 +274,11 @@ class Renderer {
         // 曲目标签与封面由 CPU 逐层上传 mip 链，采样需要三线性。
         mipSampler = sampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::ClampToEdge);
         surfaceAtlas = texture({2304, 768}, QRhiTexture::RGBA16F);
-        upload(surfaceAtlas, read(root, "archive-baked-surface.bin"));
+        upload(surfaceAtlas, mapAtlas("archive-baked-surface.bin"));
         lightAtlas = texture({768, 1024}, QRhiTexture::RGBA16F);
-        upload(lightAtlas, read(root, "archive-baked-light.bin"));
+        upload(lightAtlas, mapAtlas("archive-baked-light.bin"));
         normalAtlas = texture({128, 256}, QRhiTexture::RGBA16F);
-        upload(normalAtlas, read(root, "archive-baked-normal.bin"));
+        upload(normalAtlas, mapAtlas("archive-baked-normal.bin"));
         white = texture({1, 1}, QRhiTexture::RGBA8);
         upload(white, QByteArray(4, char(255)));
         floor = plane(-100, -100, 100, 100, 0, 0, 0, 0, 0);

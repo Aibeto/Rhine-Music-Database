@@ -1,4 +1,8 @@
 #include "PresentationBackend.h"
+#ifdef Q_OS_MACOS
+#include "../InterfaceWindowMac.h"
+#endif
+#include <QByteArray>
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -25,7 +29,7 @@ class RhiPresentationBackend final : public PresentationBackend {
     }
 
     bool initialize(QSize logicalSize, bool vsync) override {
-#if QT_CONFIG(metal)
+#if defined(Q_OS_MACOS) && QT_CONFIG(metal)
         m_window = std::make_unique<QWindow>();
         m_window->setSurfaceType(QSurface::MetalSurface);
         m_window->setTitle(QStringLiteral("RHINE MUSIC DATABASE"));
@@ -37,6 +41,44 @@ class RhiPresentationBackend final : public PresentationBackend {
         while (!m_window->isExposed() && clock.elapsed() < 2000) {
             QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
         }
+        m_vsync = vsync;
+        return resumeDevice();
+#else
+        Q_UNUSED(logicalSize);
+        Q_UNUSED(vsync);
+        m_error = QStringLiteral("此构建没有 Metal 后端");
+        return false;
+#endif
+    }
+
+    bool supportsStaticImage() const override {
+#ifdef Q_OS_MACOS
+        return true;
+#else
+        return false;
+#endif
+    }
+
+    bool suspendToImage(const QByteArray &image) override {
+#ifdef Q_OS_MACOS
+        release();
+        m_pass.reset();
+        m_swapchain.reset();
+        m_rhi.reset();
+        if (!showInterfaceStaticImage(m_window.get(), image)) {
+            m_error = QStringLiteral("静态图片解码失败");
+            resumeDevice();
+            return false;
+        }
+        return true;
+#else
+        Q_UNUSED(image);
+        return false;
+#endif
+    }
+
+    bool resumeDevice() override {
+#if defined(Q_OS_MACOS) && QT_CONFIG(metal)
         QRhiMetalInitParams parameters;
         m_rhi.reset(QRhi::create(QRhi::Metal, &parameters));
         if (!m_rhi) {
@@ -45,17 +87,15 @@ class RhiPresentationBackend final : public PresentationBackend {
         }
         m_swapchain.reset(m_rhi->newSwapChain());
         m_swapchain->setWindow(m_window.get());
-        if (!vsync) {
+        if (!m_vsync) {
             m_swapchain->setFlags(QRhiSwapChain::NoVSync);
         }
         m_pass.reset(m_swapchain->newCompatibleRenderPassDescriptor());
         m_swapchain->setRenderPassDescriptor(m_pass.get());
-        m_vsync = vsync;
-        return resize({}, true);
+        clearInterfaceStaticImage(m_window.get());
+        // 隐藏窗口可先重建设备，交换链等第一次 expose 再建立。
+        return !m_window->isExposed() || resize({}, true);
 #else
-        Q_UNUSED(logicalSize);
-        Q_UNUSED(vsync);
-        m_error = QStringLiteral("此构建没有 Metal 后端");
         return false;
 #endif
     }

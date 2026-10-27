@@ -41,18 +41,30 @@ static QString routeProvider(const QString &route) {
     }
     return "netease";
 }
-Host::Host(QString path, bool test, QObject *parent)
-    : QObject(parent), updater(test), root(path), offline(test) {
+Host::Host(QString path, bool test, QObject *parent, bool service, PlaybackConnection *connection)
+    : QObject(parent), updater(test), root(path), offline(test), remote(test ? nullptr : connection),
+      playbackOnly(service) {
     connect(&updater, &AppUpdater::changed, this, &Host::invalidate);
+    if (remote) {
+        connect(remote, &PlaybackConnection::diagnosticEvent, this,
+                [this](QString event, QJsonObject values) { playbackDiagnostics.record(event, values); });
+#ifdef Q_OS_MACOS
+        platformInterfaceMediaCommands([this](QString action) { emit mediaAction(action); });
+        connect(
+            remote, &PlaybackConnection::snapshotChanged, this,
+            [this] { platformInterfaceMediaInfo(!remote->snapshot()["current"].toObject().isEmpty()); },
+            Qt::QueuedConnection);
+#endif
+    }
     if (preference("kugou-edition") == "lite") {
         kugouEdition = "lite";
     }
-    if (!offline) {
+    if (!offline && !remote) {
         cookies = QJsonDocument::fromJson(platformCredential()).object();
     } else {
         interval = 0;
     }
-    if (!offline) {
+    if (!offline && !remote) {
         platformMediaCommands([this](QString action) {
             QMetaObject::invokeMethod(
                 this, [this, action] { emit mediaAction(action); }, Qt::QueuedConnection);
@@ -180,6 +192,16 @@ QString Host::diskPath(QString key) const {
  * 记录当前账号代数，异步结果只能交付给仍有效的请求。
  */
 void Host::requestJson(QString route, QJsonObject values, JsonReply callback) {
+    if (remote) {
+        QPointer<Host> owner(this);
+        remote->request("host.request", {{"route", route}, {"values", values}},
+                        [owner, callback = std::move(callback)](QJsonObject result, QString error) {
+                            if (owner && !owner->stopped) {
+                                callback(result, error);
+                            }
+                        });
+        return;
+    }
     if (stopped) {
         return;
     }
@@ -203,7 +225,7 @@ void Host::requestJson(QString route, QJsonObject values, JsonReply callback) {
         }
         const int requestProvider = int(std::max<qsizetype>(
             0, QStringList{"other", "netease", "qq", "kugou", "local"}.indexOf(routeProvider(route))));
-        playbackDiagnostics.record(
+        recordPlaybackDiagnostic(
             "request-start",
             {{"requestSerial", serial}, {"operation", operationCode}, {"provider", requestProvider}});
         const int diagnosticSession = playbackDiagnostics.session();
@@ -226,13 +248,13 @@ void Host::requestJson(QString route, QJsonObject values, JsonReply callback) {
                 }
             }
             if (diagnosticSession == playbackDiagnostics.session()) {
-                playbackDiagnostics.record("request-finish", values);
+                recordPlaybackDiagnostic("request-finish", values);
             }
             for (const auto &entry : response["_playbackDiagnostics"].toArray()) {
                 auto upstream = PlaybackDiagnostics::numericFields(entry.toObject());
                 upstream["requestSerial"] = serial;
                 if (diagnosticSession == playbackDiagnostics.session()) {
-                    playbackDiagnostics.record("upstream", upstream);
+                    recordPlaybackDiagnostic("upstream", upstream);
                 }
             }
             response.remove("_playbackDiagnostics");
@@ -474,6 +496,11 @@ void Host::respond(const Waiter &waiter, QJsonObject response, QString error) {
  * 只接受当前账号代数对应的 Cookie，避免过期请求覆盖新登录。
  */
 void Host::acceptCookies(QString json, int responseEpoch, QString credentialKey) {
+    if (remote) {
+        remote->call("host.acceptCookies",
+                     {{"json", json}, {"epoch", responseEpoch}, {"credentialKey", credentialKey}});
+        return;
+    }
     if (responseEpoch != epoch || stopped) {
         return;
     }
@@ -509,6 +536,9 @@ bool Host::authenticated() const {
     return hasCredential(provider);
 }
 bool Host::hasCredential(QString value) const {
+    if (remote) {
+        return remote->snapshot()["credentials"].toObject()[value].toBool();
+    }
     if (value != "qq" && value != "netease" && value != "kugou") {
         return false;
     }
@@ -524,6 +554,9 @@ bool Host::hasCredential(QString value) const {
 void Host::setProvider(QString value) {
     if (value != "qq" && value != "netease" && value != "kugou" && value != "local") {
         return;
+    }
+    if (remote) {
+        remote->call("host.setProvider", {{"provider", value}});
     }
     if (provider == value) {
         return;
@@ -544,6 +577,9 @@ void Host::setKugouEdition(QString edition) {
     if (!QStringList{"standard", "lite"}.contains(edition) || edition == kugouEdition) {
         return;
     }
+    if (remote) {
+        remote->call("host.setEdition", {{"edition", edition}});
+    }
     kugouEdition = edition;
     setPreference("kugou-edition", edition);
     ++epoch;
@@ -558,6 +594,9 @@ void Host::setKugouEdition(QString edition) {
     }
 }
 QString Host::saveCredential() {
+    if (remote) {
+        return remote->call("host.saveCredential")["value"].toString();
+    }
     return offline ? QString()
                    : platformSaveCredential(QJsonDocument(cookies).toJson(QJsonDocument::Compact));
 }
@@ -565,6 +604,14 @@ QString Host::saveCredential() {
  * 作废当前来源的请求并清理凭据，另一来源的账号保持独立。
  */
 void Host::logout() {
+    if (remote) {
+        remote->call("host.logout");
+        ++epoch;
+        cache.clear();
+        images.clear();
+        coverFlights.clear();
+        return;
+    }
     mediaControl("stop");
     if (provider == "qq") {
         cookies.remove("qqmusic_session");
@@ -631,9 +678,15 @@ QString Host::fromLink(QString input) const {
     return kind + ":" + id;
 }
 void Host::loadCover(QString input, TextReply callback) {
+    // 后台仅保留封面地址；像素解码与纹理由可退出的 GUI 独占。
+    if (playbackOnly) {
+        schedule(0, [input, callback] { callback(input); });
+        return;
+    }
     const QUrl local(input);
     if (local.isLocalFile()) {
-        if (provider != "local" && !offline) {
+        if (provider != "local" && !offline &&
+            !(remote && remote->snapshot()["current"].toObject()["provider"] == "local")) {
             return;
         }
         const auto key = input;
@@ -853,23 +906,35 @@ void Host::playOfficial(QString id, TextReply callback) {
     });
 }
 bool Host::mediaLoad(QString url, bool alternative, double position, bool paused) {
+    if (remote) {
+        return remote
+            ->call("host.mediaLoad", {{"url", url},
+                                      {"alternative", alternative},
+                                      {"position", position},
+                                      {"paused", paused}})["value"]
+            .toBool();
+    }
     if (!audio) {
         audio = std::make_unique<AudioPlayer>([this] { emit mediaChanged(); });
         audio->diagnosticEvent = [this](const QString &event, const QJsonObject &values) {
-            playbackDiagnostics.record(event, values);
+            recordPlaybackDiagnostic(event, values);
         };
         audio->enableDiagnostics(audioDiagnosticsEnabled);
     }
     return audio->load(url, offline, alternative, provider, position, paused);
 }
 void Host::mediaControl(QString action, double value) {
+    if (remote) {
+        remote->call("host.mediaControl", {{"action", action}, {"value", value}});
+        return;
+    }
     if (action == "volume" && !PlatformFeatures::ApplicationVolume) {
         value = 1.0;
     }
     if (!audio && action == "volume") {
         audio = std::make_unique<AudioPlayer>([this] { emit mediaChanged(); });
         audio->diagnosticEvent = [this](const QString &event, const QJsonObject &values) {
-            playbackDiagnostics.record(event, values);
+            recordPlaybackDiagnostic(event, values);
         };
         audio->enableDiagnostics(audioDiagnosticsEnabled);
     }
@@ -885,6 +950,9 @@ void Host::mediaMetadata(QString title, QString artist, QString album) {
     lastMediaUpdate = 0;
 }
 QVariantMap Host::mediaState() const {
+    if (remote) {
+        return remote->snapshot()["state"].toObject().toVariantMap();
+    }
     auto state = audio ? audio->state() : QVariantMap();
     auto now = QDateTime::currentMSecsSinceEpoch();
     if (!offline && now - lastMediaUpdate >= 1000) {
@@ -905,6 +973,10 @@ bool Host::systemDark() const {
     return QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark;
 }
 void Host::invalidateMetadata() {
+    if (remote) {
+        remote->call("host.invalidateMetadata");
+        return;
+    }
     ++metadataRevision;
     cache.clear();
     if (offline) {
@@ -926,7 +998,8 @@ const QStringList &preferenceKeys() {
         // Linux 显卡选择：存的是 /sys/class/drm 里 cardN 的序号（0 基），不是型号。
         // 换卡后序号可能指向另一张卡或不存在，启动时由 initializeLinuxGraphics 校验并回退。
         "gpu-index", "vsync", "supersample", "render-scale", "aa-mode", "aa-scale", "msaa", "fsr-quality",
-        "fsr-sharpness", "fg", "auto-update", "volume", "quality", "alternate-source", "provider",
+        "fsr-sharpness", "fg", "performance-mode", "auto-update", "volume", "quality", "alternate-source",
+        "provider",
         "lyrics-cache", "lyrics-global-offset-ms", "welcome-name-netease", "welcome-name-qq",
         "welcome-name-kugou", "account-id-netease", "account-id-qq", "account-id-kugou", "kugou-edition",
         "welcome-name-kugou-standard", "welcome-name-kugou-lite", "account-id-kugou-standard",
@@ -935,12 +1008,27 @@ const QStringList &preferenceKeys() {
 }
 } // namespace
 QString Host::preference(QString key) const {
+    if (remote) {
+        if (!remotePreferences.contains(key)) {
+            const auto value = remote->call("host.preference", {{"key", key}})["value"].toString();
+            if (remote->error().isEmpty()) {
+                remotePreferences.insert(key, value);
+            }
+            return value;
+        }
+        return remotePreferences.value(key);
+    }
     if (offline || !preferenceKeys().contains(key)) {
         return {};
     }
     return AppStorage::settings().value("panel/" + key).toString();
 }
 void Host::setPreference(QString key, QString value) {
+    if (remote) {
+        remote->call("host.setPreference", {{"key", key}, {"value", value}});
+        remotePreferences.remove(key);
+        return;
+    }
     if (!offline && value.size() < 262144 && preferenceKeys().contains(key)) {
         AppStorage::settings().setValue("panel/" + key, value);
         // 帧生成开关是唯一"不必重启也能生效"的偏好：呈现层每帧解析 RHINE_FG，
@@ -976,6 +1064,13 @@ QString Host::read(QString name) const {
  * 停止桥接子进程并释放等待请求，避免退出后仍有回调。
  */
 void Host::shutdown() {
+    if (remote) {
+#ifdef Q_OS_MACOS
+        platformInterfaceMediaCommands({});
+#endif
+        stopped = true;
+        return;
+    }
     if (stopped) {
         return;
     }
@@ -1003,6 +1098,10 @@ void Host::shutdown() {
 
 /** 性能面板按需开启解码统计，网络只读取系统公开的枚举状态，不枚举地址或网络名称。 */
 void Host::enablePlaybackDiagnostics(bool enabled) {
+    if (remote) {
+        remote->call("host.diagnostics", {{"enabled", enabled}});
+        return;
+    }
     audioDiagnosticsEnabled = enabled;
     if (enabled && !QNetworkInformation::instance()) {
         QNetworkInformation::loadDefaultBackend();
@@ -1013,6 +1112,9 @@ void Host::enablePlaybackDiagnostics(bool enabled) {
 }
 
 QJsonObject Host::playbackSnapshot() const {
+    if (remote) {
+        return remote->snapshot()["diagnostics"].toObject();
+    }
     auto values = audio ? audio->diagnosticState() : QJsonObject();
     values["bridgeState"] = int(child.state());
     values["bridgeError"] = int(child.error());
@@ -1032,4 +1134,10 @@ QJsonObject Host::playbackSnapshot() const {
         }
     }
     return PlaybackDiagnostics::numericFields(values);
+}
+
+void Host::recordPlaybackDiagnostic(const QString &event, const QJsonObject &values) {
+    const auto safe = PlaybackDiagnostics::numericFields(values);
+    playbackDiagnostics.record(event, safe);
+    emit playbackDiagnostic(event, safe);
 }
