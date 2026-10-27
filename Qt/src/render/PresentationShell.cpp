@@ -39,6 +39,11 @@ namespace {
 // 合成通道的 uniform：clipSpaceCorrMatrix（64）+ params vec4（16）。
 constexpr int kFgUniformSize = 64 + 16;
 
+// 看门狗：连续跳过这么多步就强制两层重渲一次。按 60Hz 约半秒。
+// 场景里出现"没人标脏但画面该变"的路径（新加的 QML 自驱更新、Qt 信号时序变化）时，
+// 缺了它会永久冻住画面，而 CPU 很低、日志写着"正常跳过"，看起来像优化成功。
+constexpr int kSkipWatchdogSteps = 30;
+
 QShader loadShader(const QString &name) {
     QFile f(":/shaders/" + name + ".qsb");
     if (!f.open(QIODevice::ReadOnly)) {
@@ -691,18 +696,29 @@ void PresentationShell::step() {
         return;
     }
 
-    // 引擎计时推进不等于画面改变。两层都无更新且没有待呈现帧时让事件循环休眠。
+    // 引擎每走一拍就放行一次渲染。这条**不能删**：模型/纹理是异步加载的，加载完成
+    // 不一定伴随 sceneUpdated，一旦只看脏标记，3D 房间几何会永远不出现（实测如此）。
+    // 用 steps 的意义就是"引擎前进了"，代价是没变也要重渲——这是正确性的前提。
     const auto engineSteps = m_backend->performance().value(QStringLiteral("steps")).toULongLong();
     const bool engineAdvanced = m_backendName == "vulkan" && engineSteps != m_lastEngineSteps;
     if (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent && !m_pendingRealFrame) {
         ++m_skippedSteps;
         publishStats(false);
         if (m_backendName == "vulkan") {
+            // 看门狗：连续跳过太久说明可能有人漏标脏，强制补渲一次把画面拉回来。
+            if (++m_consecutiveSkips >= kSkipWatchdogSteps) {
+                m_consecutiveSkips = 0;
+                m_host->markSceneDirty();
+                m_host->markOverlayDirty();
+            }
+            // 兜底轮询而已，主通路是 watch() 接上的 renderRequested/sceneChanged。
+            // 固定 4ms：不由屏幕刷新率推导，出帧上限只由每帧工作量决定。
             scheduleNext(idle ? 100 : 4);
         }
         return;
     }
     m_lastEngineSteps = engineSteps;
+    m_consecutiveSkips = 0;
 
     // 上一步留下的真实帧还没上屏：这一步只做它的呈现。
     // 插值帧与真实帧因此拆进相邻的两个调度步——一步一次 present，事件循环在两者
@@ -762,6 +778,8 @@ void PresentationShell::step() {
             qWarning().noquote() << "FG: acquire 超时（窗口不可见/合成器未取图），累计"
                                  << m_acquireTimeoutCount;
         }
+        // 立即重试：出帧优先。acquire 超时通常意味着窗口不可见或合成器未取图，
+        // 这里不做节流，避免把上限压在人为延迟上。
         scheduleNext();
         return;
     }
@@ -800,6 +818,10 @@ void PresentationShell::step() {
     reportStats();
     // 新更新和待呈现的真实帧继续排队；其余情况等待下一次内容更新。
     if (m_backendName == "vulkan") {
+        // 尾部立刻自续：关掉 vsync 时这个应用要的是"能跑多快跑多快"，限速会把帧率
+        // 钉死在刷新率上，与设计意图相反。
+        // 空转（同一画面反复提交）不再靠限速解决，而是靠 SceneLayerHost 的脏帧剔除：
+        // 没有新内容时这里会自动落进上面的跳过分支，不会再重复渲染。
         scheduleNext(idle ? 100 : 0);
     } else if (m_pendingRealFrame || m_host->contentDirty()) {
         scheduleNext();
@@ -840,6 +862,11 @@ void PresentationShell::scheduleNext(int delayMs) {
     // 单次定时器串起来而不是固定间隔：FIFO present 自带节流，让事件循环在两次
     // 呈现之间拿到执行权（输入、窗口事件），比追着刷新率跑更稳。
     if (!m_timer || m_stopped || m_failed) {
+        return;
+    }
+    if (delayMs == 0 && m_timer->isActive()) {
+        // 已经排着一步：不重启定时器，只记下这次唤醒，等当前步跑完再补。
+        m_wakePending = true;
         return;
     }
     if (m_stepClock.isValid()) {
@@ -1002,7 +1029,15 @@ bool PresentationShell::start() {
 
     m_timer = new QTimer(this);
     m_timer->setTimerType(Qt::PreciseTimer);
-    connect(m_timer, &QTimer::timeout, this, &PresentationShell::step);
+    // 跑完一步后，如果期间又有唤醒被压住，立刻补一步：丢唤醒会让出帧数直接减半
+    // （实测 tick 22/s 只出 10.6 帧，正是这里把相邻两次唤醒合并掉了）。
+    connect(m_timer, &QTimer::timeout, this, [this] {
+        step();
+        if (m_wakePending) {
+            m_wakePending = false;
+            scheduleNext(0);
+        }
+    });
     connect(m_backend, &Engine::sceneUpdated, this, [this] {
         m_host->markSceneDirty();
         scheduleNext();
@@ -1069,7 +1104,14 @@ bool PresentationShell::start() {
                                  << m_renderedFrames << "skipped" << m_skippedSteps << "acqTimeout"
                                  << m_acquireTimeoutCount << "outOfDate" << m_outOfDateCount << "visible"
                                  << (m_window && m_window->isVisible()) << "pendingReal" << m_pendingRealFrame
-                                 << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1);
+                                 << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1)
+                                 << "| 3D层" << QString::number(m_host->sceneLayerMs(), 'f', 1) << "ms"
+                                 << "(打磨" << QString::number(m_host->scenePolishMs(), 'f', 1)
+                                 << "起帧" << QString::number(m_host->sceneBeginMs(), 'f', 1)
+                                 << "同步" << QString::number(m_host->sceneSyncMs(), 'f', 1)
+                                 << "录制" << QString::number(m_host->sceneRecordMs(), 'f', 1)
+                                 << "提交等待" << QString::number(m_host->sceneSubmitMs(), 'f', 1) << ")"
+                                 << "UI层" << QString::number(m_host->overlayLayerMs(), 'f', 1) << "ms";
         });
         diag->start();
     }

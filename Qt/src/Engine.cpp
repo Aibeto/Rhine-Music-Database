@@ -376,9 +376,11 @@ void Engine::tick() {
     m_paceStepMax = qMax(m_paceStepMax, stepNs);
     ++m_paceTicks;
     // 动态帧间隔：不设固定周期常数，帧率上限完全交给呈现侧（垂直同步/缓冲回收）。
-    // 用本帧实测的「呈现阻塞时长」决定要不要让出时间：
-    //   · 阻塞 > 2ms：呈现自己就在限速，连轴转（0ms），不额外加延迟；
-    //   · 阻塞 ≤ 2ms：说明呈现不阻塞，继续连轴转只会空转烧 CPU，让出 1ms。
+    // 注意 blockedNs 的口径：它只覆盖 tick() 内部、step() 之外的微秒级开销（指针 flush、
+    // 滚轮衰减、energyIdle），**测不到呈现阻塞**——呈现工作在 PresentationShell 的另一个
+    // 定时器回调里，根本不在 tick() 的调用栈内。所以这里恒走 interval=1：渲染期间 GUI
+    // 线程被占，定时器本来就投递不进来；渲染结束后的 1ms 是留给事件处理的余量，不是限速。
+    // 若以后真要让引擎节拍感知呈现成本，必须由呈现层回传实测帧时长，不能靠这里算。
     // RHINE_TICK_MS 仍可作为排障时人为压帧的覆盖值（>0 时生效）。
     const qint64 frameNs = clock.nsecsElapsed() - enterNs;
     const qint64 blockedNs = frameNs - stepNs;

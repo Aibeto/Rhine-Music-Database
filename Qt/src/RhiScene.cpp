@@ -1060,6 +1060,7 @@ class Renderer {
             cb->setGraphicsPipeline(pipeline("surface", draw.bindings, color.rp, false,
                                              data["side"].toInt() == 2, depthWrite, blend));
             cb->setShaderResources(draw.bindings);
+            // 视口是动态状态，必须在 setGraphicsPipeline 之后设置，不能提到循环外。
             cb->setViewport({0, 0, float(size.width()), float(size.height())});
             const QRhiCommandBuffer::VertexInput inputs[] = {{draw.vertices, 0}, {draw.instances, 0}};
             cb->setVertexInput(0, 2, inputs, draw.indices, 0, QRhiCommandBuffer::IndexUInt32);
@@ -1188,9 +1189,13 @@ class Renderer {
             updates = rhi->nextResourceUpdateBatch();
         }
         resize(dimensions, !finalTarget);
+        QElapsedTimer dbgPre;
+        dbgPre.start();
 #ifndef Q_OS_MACOS
         postProcess->prepare(size, viewSize, frame);
 #endif
+        const double dbgPostMs = double(dbgPre.nsecsElapsed()) / 1e6;
+        dbgPre.restart();
         auto g = globals(frame);
         updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
         ++generation;
@@ -1206,10 +1211,19 @@ class Renderer {
             }
         }
         updateMusic(item, cover);
+        const double dbgTexMs = double(dbgPre.nsecsElapsed()) / 1e6;
+        dbgPre.restart();
         detailMode = frame["mode"].toString() == "detail" || frame["viewer"].toBool();
         auto draws = musicDraws(frame);
         // 保留可见与归位唱片资源，复用材质绑定和实例缓冲。
         auto data = prepare(draws, frame["mode"].toString() == "detail");
+        const double dbgListMs = double(dbgPre.nsecsElapsed()) / 1e6;
+        // 排障计时：把"构建 draw 列表"与"命令录制"分开量，只统计不改行为。
+        static QElapsedTimer dbgClock;
+        static double dbgBuild = 0, dbgRecord = 0;
+        static double dbgPostSum = 0, dbgTexSum = 0, dbgListSum = 0;
+        static int dbgFrames = 0;
+        dbgClock.start();
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
             for (const auto &draw : data) {
                 std::fprintf(
@@ -1250,9 +1264,30 @@ class Renderer {
             }
         }
         const auto sort = [](auto &draws) {
-            std::stable_sort(draws.begin(), draws.end(), [](const auto &first, const auto &second) {
-                return first.data["order"].toInt() < second.data["order"].toInt();
+            if (draws.size() < 2) {
+                return;
+            }
+            // order 预取：原实现把 QJsonObject 查找放进比较器，每次比较做两次哈希查找，
+            // n log n 次比较就是几千次/帧。这里每个 draw 只查一次，再按索引稳定排序。
+            QList<int> keys;
+            keys.reserve(draws.size());
+            for (const auto &draw : draws) {
+                keys.append(draw.data["order"].toInt());
+            }
+            QList<int> order;
+            order.resize(draws.size());
+            for (int i = 0; i < order.size(); ++i) {
+                order[i] = i;
+            }
+            std::stable_sort(order.begin(), order.end(), [&keys](int first, int second) {
+                return keys[first] < keys[second];
             });
+            QList<Draw> sorted;
+            sorted.reserve(draws.size());
+            for (int index : order) {
+                sorted.append(draws[index]);
+            }
+            draws = sorted;
         };
         sort(opaque);
         sort(transparent);
@@ -1271,8 +1306,24 @@ class Renderer {
         updates = nullptr;
         const auto background = vector(frame["background"]);
         cb->beginPass(color.rt, QColor::fromRgbF(background.x(), background.y(), background.z()), {1, 0});
+        const double dbgBuildMs = double(dbgClock.nsecsElapsed()) / 1e6;
+        QElapsedTimer dbgRecordClock;
+        dbgRecordClock.start();
         geometry(cb, opaque);
         geometry(cb, transparent);
+        dbgPostSum += dbgPostMs;
+        dbgTexSum += dbgTexMs;
+        dbgListSum += dbgListMs;
+        dbgBuild += dbgBuildMs;
+        dbgRecord += double(dbgRecordClock.nsecsElapsed()) / 1e6;
+        if (++dbgFrames >= 20 && qEnvironmentVariableIsSet("RHINE_FG_DIAG")) {
+            qWarning("3D内部: 后处理 %.1f  纹理 %.1f  draw列表 %.1f  构建 %.1f  录制 %.1f ms (%d 帧均值)",
+                     dbgPostSum / dbgFrames, dbgTexSum / dbgFrames, dbgListSum / dbgFrames,
+                     dbgBuild / dbgFrames, dbgRecord / dbgFrames, dbgFrames);
+            dbgBuild = dbgRecord = 0;
+            dbgPostSum = dbgTexSum = dbgListSum = 0;
+            dbgFrames = 0;
+        }
         cb->endPass();
         velocityPass(cb, data, frame);
         composite(cb, finalTarget ? finalTarget : target.rt);

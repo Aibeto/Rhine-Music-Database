@@ -109,12 +109,43 @@ class SceneLayerHost {
     quint64 overlayRenderCount() const {
         return m_overlayRenders;
     }
+    /// 各层最近一次渲染的耗时（指数滑动平均，ms）。排障用：判断 17ms 的单帧
+    /// 到底花在 3D 层还是 UI 层，只有分开量才知道该优化哪一侧。
+    double sceneLayerMs() const {
+        return m_sceneLayerMs;
+    }
+    double overlayLayerMs() const {
+        return m_overlayLayerMs;
+    }
+    /// 3D 层三段分解（ms）：sync=同步场景图(CPU)、record=录制命令(CPU)、submit=提交并等 GPU。
+    double scenePolishMs() const {
+        return m_scene.polishMs;
+    }
+    double sceneBeginMs() const {
+        return m_scene.beginMs;
+    }
+    double sceneSyncMs() const {
+        return m_scene.syncMs;
+    }
+    double sceneRecordMs() const {
+        return m_scene.recordMs;
+    }
+    double sceneSubmitMs() const {
+        return m_scene.submitMs;
+    }
 
   private:
     struct Layer {
         std::unique_ptr<QQuickRenderControl> control;
         std::unique_ptr<QQuickWindow> window;
         bool dirty = true;
+        /// 单层渲染的三段耗时（指数滑动平均，ms）：sync 同步场景图（CPU）、
+        /// record 录制命令（CPU）、submit 提交并等 GPU（endFrame，含等待）。
+        double polishMs = 0.0;
+        double beginMs = 0.0;
+        double syncMs = 0.0;
+        double recordMs = 0.0;
+        double submitMs = 0.0;
         QQuickItem *rootItem = nullptr; // 由 window->contentItem() 持有，这里只观察
         QRhiTexture *texture = nullptr;
         QRhiRenderBuffer *depthStencil = nullptr;
@@ -141,6 +172,8 @@ class SceneLayerHost {
     QWindow *m_visibleWindow = nullptr;
     quint64 m_sceneRenders = 0;
     quint64 m_overlayRenders = 0;
+    double m_sceneLayerMs = 0.0;
+    double m_overlayLayerMs = 0.0;
     bool m_valid = false;
     bool m_suspended = false;
     QString m_lastError;

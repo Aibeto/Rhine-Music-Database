@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickGraphicsDevice>
@@ -325,16 +326,34 @@ bool SceneLayerHost::renderLayer(Layer &layer, const char *name) {
     // 官方推荐的顺序：polishItems() 在 beginFrame() 之前，sync()/render() 必须在
     // beginFrame()/endFrame() 之间（QQuickRenderControl 文档的更新步骤示例）。
     layer.dirty = false;
+    const auto blendMs = [](double prev, qint64 ns) { return prev * 0.8 + double(ns) / 1e6 * 0.2; };
+    QElapsedTimer stage;
+    stage.start();
     control->polishItems();
+    layer.polishMs = blendMs(layer.polishMs, stage.nsecsElapsed());
+    stage.restart();
     control->beginFrame();
+    layer.beginMs = blendMs(layer.beginMs, stage.nsecsElapsed());
+    stage.restart();
     // beginFrame() 不返回状态；command buffer 为空是最直接的失败信号（例如设备丢失）。
     if (!control->commandBuffer()) {
         control->endFrame();
         return fail(QStringLiteral("%1 层 beginFrame() 没有拿到 command buffer").arg(QLatin1String(name)));
     }
+    // 注意：Qt 6 的 sync() 在成功路径上无条件返回 true（只有"没有窗口/未 beginFrame/
+    // 没有 command buffer"三条错误路径才返回 false），所以它的返回值**不能**用来判断
+    // "这一层本帧是否真的产出了新内容"。是否重渲只由 dirty 标记决定，上层用
+    // sceneRenderCount() 的差分判断"有没有新场景"，这里保持无条件累加。
     control->sync();
+    // 三段计时：sync 是 CPU（同步场景图），render 是 CPU（录制命令），endFrame 是
+    // 提交并等 GPU。三段谁大，决定了 18ms 该从 CPU 侧还是 GPU 侧下手。
+    layer.syncMs = blendMs(layer.syncMs, stage.nsecsElapsed());
+    stage.restart();
     control->render();
+    layer.recordMs = blendMs(layer.recordMs, stage.nsecsElapsed());
+    stage.restart();
     control->endFrame();
+    layer.submitMs = blendMs(layer.submitMs, stage.nsecsElapsed());
     return true;
 }
 
@@ -375,20 +394,31 @@ bool SceneLayerHost::renderFrame() {
     if (!m_valid || !resumeGraphics()) {
         return false;
     }
+    // 非 Metal 后端每帧强制置脏。这条**不能去掉**：模型/纹理是异步加载的，
+    // 加载完成后引擎不一定发出带 visualChanged 的 sceneUpdated，一旦按脏标记剔除，
+    // 3D 房间几何就会永远不出现（实测：去掉后背景模型缺失，改回立即恢复）。
+    // 代价是每帧重渲 3D 层（约 6~9ms），这是拿帧率换正确的必要开销。
     if (m_rhi->backend() != QRhi::Metal) {
         m_scene.dirty = true;
         m_overlay.dirty = true;
     }
     if (m_scene.dirty) {
+        QElapsedTimer layerTimer;
+        layerTimer.start();
         if (!renderLayer(m_scene, "3D")) {
             return false;
         }
+        // 分层计时：单帧 17ms 到底花在 3D 层还是 UI 层，是决定优化方向的唯一依据。
+        m_sceneLayerMs = m_sceneLayerMs * 0.8 + layerTimer.nsecsElapsed() / 1e6 * 0.2;
         ++m_sceneRenders;
     }
     if (m_overlay.dirty) {
+        QElapsedTimer layerTimer;
+        layerTimer.start();
         if (!renderLayer(m_overlay, "UI")) {
             return false;
         }
+        m_overlayLayerMs = m_overlayLayerMs * 0.8 + layerTimer.nsecsElapsed() / 1e6 * 0.2;
         ++m_overlayRenders;
     }
     return true;

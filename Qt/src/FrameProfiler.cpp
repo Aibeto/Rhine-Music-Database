@@ -352,7 +352,10 @@ void FrameProfiler::sample() {
     m_metrics.insert("fgDisplaySize", fg.displaySize);
     if (fg.layerActive) {
         // 呈现层接管时，屏幕上真正发生的事只有它知道：用它的间隔与计数覆盖。
-        m_metrics.insert("qtFps", fgPresentedFps);
+        // 标题上的帧率必须是"真实新帧/秒"：呈现计数含插值帧与重复帧，用它当帧率
+        // 会让人误判 Vulkan 比 OpenGL 快，而动画推进其实更慢。呈现/渲染两个数在
+        // 帧生成详情块里都能看到，这里只保证标题诚实。
+        m_metrics.insert("qtFps", m_metrics.value("sceneFps"));
         m_metrics.insert("presentCount", qulonglong(fg.presented));
         m_metrics.insert("gapSamples", fg.sampleCount);
         m_metrics.insert("gapP50Ms", fg.gapP50Ms);
