@@ -30,13 +30,20 @@ class RhiPresentationBackend final : public PresentationBackend {
     }
 
     bool initialize(QSize logicalSize, bool vsync) override {
-#if defined(Q_OS_MACOS) && QT_CONFIG(metal)
+#if defined(Q_OS_DARWIN) && QT_CONFIG(metal)
         m_window = std::make_unique<PresentationWindow>();
         m_window->setSurfaceType(QSurface::MetalSurface);
         m_window->setTitle(QStringLiteral("RHINE MUSIC DATABASE"));
+#ifndef Q_OS_IOS
         m_window->setMinimumSize(QSize(960, 540));
+#endif
         m_window->resize(logicalSize);
+#ifdef Q_OS_IOS
+        m_window->reportContentOrientationChange(Qt::LandscapeOrientation);
+        m_window->showFullScreen();
+#else
         m_window->show();
+#endif
         QElapsedTimer clock;
         clock.start();
         while (!m_window->isExposed() && clock.elapsed() < 2000) {
@@ -79,7 +86,7 @@ class RhiPresentationBackend final : public PresentationBackend {
     }
 
     bool resumeDevice() override {
-#if defined(Q_OS_MACOS) && QT_CONFIG(metal)
+#if defined(Q_OS_DARWIN) && QT_CONFIG(metal)
         QRhiMetalInitParams parameters;
         m_rhi.reset(QRhi::create(QRhi::Metal, &parameters));
         if (!m_rhi) {
@@ -93,7 +100,9 @@ class RhiPresentationBackend final : public PresentationBackend {
         }
         m_pass.reset(m_swapchain->newCompatibleRenderPassDescriptor());
         m_swapchain->setRenderPassDescriptor(m_pass.get());
+#ifdef Q_OS_MACOS
         clearInterfaceStaticImage(m_window.get());
+#endif
         // 隐藏窗口可先重建设备，交换链等第一次 expose 再建立。
         return !m_window->isExposed() || resize({}, true);
 #else

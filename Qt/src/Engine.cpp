@@ -43,7 +43,7 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
     app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
     connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
     connect(&app->hud, &NativeHud::localImportRequested, this, &Engine::localImportRequested);
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     renderConfiguration.initialize([this](const QString &key) { return host.preference(key); });
     connect(&host, &Host::preferenceChanged, this, [this](const QString &key, const QString &value) {
         if (renderConfiguration.applyPreference(key, value)) {
@@ -284,7 +284,7 @@ void Engine::setVisible(bool value) {
         m_sleeping = true;
     } else {
         host.restoreMemoryBudget();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         if (renderConfiguration.snapshot().temporal()) {
             resetTemporalState();
         }
@@ -643,7 +643,7 @@ void Engine::step(double time) {
     // 相位只在真正产生帧的 step 里推进，按 8 帧循环。
     // 但时间性抗锯齿（FSR3/TAA）本身就是靠相位差累积历史，没有抖动它们只会反复混合
     // 同一张图、等于白做，所以这两者开启时无条件打开。AA 模式每帧读环境变量，切换免重启。
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     const bool metalFxTemporal = m_frame.value("mode") != "boot" && renderConfiguration.snapshot().temporal();
     if (!metalFxTemporal) {
         m_temporalFramesRemaining = 0;
@@ -783,7 +783,7 @@ void Engine::snapshot(QString path) {
     }
     QDir().mkpath(path);
     const QSize size(1920, 1080);
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     const auto settings = renderConfiguration.snapshot();
     auto metal =
         renderReference(root(), m_frame, m_current, cover(), size, scene.drawBuffers, nullptr, &settings);

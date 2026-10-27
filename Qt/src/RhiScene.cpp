@@ -1,5 +1,5 @@
 #include "RhiScene.h"
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
 #include "render/MetalFxBackend.h"
 #endif
 #include "render/MotionPass.h"
@@ -112,7 +112,7 @@ class Renderer {
     // 映射的烘焙输入随渲染器释放，避免大块只读图集进入进程堆缓存。
     std::vector<std::unique_ptr<QFile>> mappedAtlases;
     QRhi *rhi;
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     RhineRender::Settings settings;
     QJsonObject temporalFrame;
     RhineFg::FrameInputs *frameInputs = nullptr;
@@ -121,7 +121,7 @@ class Renderer {
     QRhiTexture *postColor = nullptr;
 #endif
     std::unique_ptr<RhineRender::MotionPass> motion;
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
     std::unique_ptr<RhineRender::ScenePostProcess> postProcess;
     RhineFg::FrameInputs motionInputs;
 #endif
@@ -250,7 +250,7 @@ class Renderer {
         updates->uploadTexture(target, description);
     }
     Renderer(QString path, QRhi *device) : rhi(device), root(path) {
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         postProcess = std::make_unique<RhineRender::ScenePostProcess>(rhi);
 #endif
         updates = rhi->nextResourceUpdateBatch();
@@ -410,13 +410,13 @@ class Renderer {
             retire(binding);
         }
         postBindings.clear();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         postColor = nullptr;
 #endif
     }
     /** 仅分配颜色和深度；烘焙增强不创建实时透射、阴影、AO、景深或光晕目标。 */
     void resize(QSize value, bool needsReadbackTarget) {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         const auto nextSize = settings.renderSize(value);
         if (viewSize == value && size == nextSize) {
             return;
@@ -455,7 +455,7 @@ class Renderer {
     Globals globals(QJsonObject f) {
         auto projection = matrix(f["projection"].toArray());
         const auto jitter = f["jitter"].toArray();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         const bool temporal = settings.temporal();
 #else
         const bool temporal = postProcess->temporal();
@@ -1088,13 +1088,13 @@ class Renderer {
         }
     }
     void composite(QRhiCommandBuffer *cb, QRhiRenderTarget *destination) {
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         auto finalDestination = destination;
         if (postProcess->active()) {
             destination = postProcess->inputTarget();
         }
 #endif
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         QRhiTexture *sceneColor = color.texture;
         implementation = QStringLiteral("off");
         if (settings.temporal()) {
@@ -1118,7 +1118,7 @@ class Renderer {
             postColor = sceneColor;
         }
 #endif
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         auto &binding = postBindings["final/" + QString::number(quintptr(sceneColor))];
 #else
         auto &binding = postBindings["final"];
@@ -1129,7 +1129,7 @@ class Renderer {
             binding = bindings(
                 {QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer),
                  QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
                                                            sceneColor,
 #else
                                                            color.texture,
@@ -1144,7 +1144,7 @@ class Renderer {
         cb->draw(3);
         ++drawCalls;
         cb->endPass();
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         if (postProcess->active()) {
             postProcess->resolve(cb, finalDestination, motionInputs);
         }
@@ -1152,7 +1152,7 @@ class Renderer {
     }
     /** 同一份几何生成深度和运动矢量，供时域处理与呈现层使用。 */
     void velocityPass(QRhiCommandBuffer *cb, const QList<Draw> &draws, const QJsonObject &frame) {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         const bool required =
             settings.temporal() || (settings.interpolation && RhineFg::capability().interpolationAvailable);
 #else
@@ -1182,7 +1182,7 @@ class Renderer {
                            draw.count, data["count"].toInt(), data["side"].toInt() == 2});
         }
         motion->render(cb, size, frame, inputs, frameInputs, viewSize);
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         RhineFg::publish(motionInputs);
 #endif
     }
@@ -1193,7 +1193,7 @@ class Renderer {
     void render(QRhiCommandBuffer *cb, QJsonObject frame, QSize dimensions, QJsonObject item, QImage cover,
                 QRhiRenderTarget *finalTarget = nullptr, const Engine::MusicTextures &musicTextures = {}) {
         transient.clear();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         temporalFrame = frame;
 #endif
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
@@ -1204,7 +1204,7 @@ class Renderer {
             updates = rhi->nextResourceUpdateBatch();
         }
         resize(dimensions, !finalTarget);
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         postProcess->prepare(size, viewSize, frame);
 #endif
         auto g = globals(frame);
@@ -1296,6 +1296,10 @@ class Renderer {
 };
 class ItemRenderer : public QQuickRhiItemRenderer {
     Engine *backend = nullptr;
+#ifdef Q_OS_DARWIN
+    QRhi *capabilityDevice = nullptr;
+    Engine *capabilityEngine = nullptr;
+#endif
     std::unique_ptr<Renderer> renderer;
     QJsonObject frame, item;
     SceneDrawBuffers buffers;
@@ -1314,6 +1318,15 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         auto engine = scene->engine();
         backend = engine;
         if (engine) {
+#ifdef Q_OS_DARWIN
+            if (rhi() && (capabilityDevice != rhi() || capabilityEngine != engine)) {
+                const bool temporalAvailable = RhineRender::MetalFxTemporal::supported(rhi());
+                engine->renderConfiguration.setNativeTemporalAvailable(temporalAvailable);
+                RhineFg::capabilityMutable().temporalAvailable = temporalAvailable;
+                capabilityDevice = rhi();
+                capabilityEngine = engine;
+            }
+#endif
             frame = engine->frame();
             frame["opticalLightEnabled"] = scene->lightingEnabled();
             frame["geometryRevision"] = double(engine->geometryRevision());
@@ -1347,7 +1360,7 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         if (!renderer) {
             renderer = std::make_unique<Renderer>(root, rhi());
         }
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         renderer->settings = backend->renderConfiguration.snapshot();
         renderer->frameInputs = &backend->metalFxInputs;
 #endif
@@ -1355,12 +1368,12 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         const auto previousBindings = renderer->bindingCreations;
         const auto previousUploads = renderer->coverUploads;
         const auto previousDrawCalls = renderer->drawCalls;
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         const auto previousPostBindings = renderer->postProcess->bindingCreations;
         const auto previousPostDraws = renderer->postProcess->drawCalls;
 #endif
         renderer->render(cb, frame, renderTarget()->pixelSize(), item, cover, renderTarget(), musicTextures);
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         backend->renderTelemetry.publish(renderer->size, renderer->viewSize, 1, renderer->implementation,
                                          true);
 #endif
@@ -1372,7 +1385,7 @@ class ItemRenderer : public QQuickRhiItemRenderer {
             if (renderer->motion) {
                 resources += renderer->motion->resources.size();
             }
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
             resources += renderer->postProcess->resources.size();
             bindings += renderer->postProcess->bindingCreations - previousPostBindings;
             draws += renderer->postProcess->drawCalls - previousPostDraws;
@@ -1485,7 +1498,7 @@ QImage renderReference(const QString &root, const QJsonObject &frame, const QJso
     }
     RhineRendering::Renderer renderer(root, rhi.get());
     renderer.nativeBuffers = buffers;
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     if (settings) {
         renderer.settings = *settings;
     }

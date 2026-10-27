@@ -151,6 +151,7 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 | -------- | ------ | ----------- | ------ | ----- |
 | Windows  | ✅     | 已停用      | ✅     | -     |
 | macOS    | -      | -           | -      | ✅    |
+| iOS / iPadOS | - | - | - | ✅ |
 | Linux    | ✅     | -           | ✅     | -     |
 
 | API         | FXAA   | SSAA   | MSAA   | TAA     | Upscaling        | Frame Generation |

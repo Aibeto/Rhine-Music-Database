@@ -1,7 +1,6 @@
 #include "PresentationShell.h"
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
 #include "MetalFxBackend.h"
-#include "../InterfaceWindowMac.h"
 #endif
 
 #include "../fg/FgBackend.h"
@@ -86,7 +85,7 @@ void PresentationShell::shutdown() {
         m_releaseTimer->stop();
     }
     RhineFg::setEnabled(false);
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     if (m_backend) {
         m_backend->metalFxInputs = {};
     }
@@ -122,7 +121,7 @@ PresentationShell::~PresentationShell() {
 }
 
 bool PresentationShell::compiledIn() {
-#if defined(Q_OS_MACOS) && __has_include(<MetalFX/MTLFXFrameInterpolator.h>)
+#if defined(Q_OS_DARWIN) && __has_include(<MetalFX/MTLFXFrameInterpolator.h>)
     return true;
 #elif defined(RHINE_FSR3_VULKAN) && RHINE_FSR3_VULKAN
     return FgBackend::compiledIn();
@@ -149,7 +148,7 @@ bool PresentationShell::requested() const {
     if (!m_backend || m_suspended) {
         return false;
     }
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     return m_backend->renderConfiguration.snapshot().interpolation;
 #else
     return FgConfig::fromEnvironment().enabled;
@@ -228,7 +227,7 @@ bool PresentationShell::initializeLayers() {
         inputWindow->setInputWindow(m_host->overlayWindow());
     }
     // 只在这里打开每帧输入通道：RhiScene 的渲染器只在 tap 打开时才发布。
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     // Main.qml 未加载时仍需接上原窗口的资源统计清理，否则隐藏后会残留旧计数。
     if (m_backend) {
         m_sceneInvalidated = QObject::connect(
@@ -246,7 +245,7 @@ bool PresentationShell::initializeLayers() {
         m_fg = std::make_unique<FgBackend>();
     }
 #endif
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     RhineFg::setEnabled(false);
     if (m_backend) {
         m_backend->metalFxInputs = {};
@@ -307,7 +306,7 @@ void PresentationShell::setBackend(Engine *backend) {
     m_backend->setWindow(m_window);
     m_window->installEventFilter(m_backend);
     connectBackend();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     if (m_rhi) {
         m_backend->renderConfiguration.setNativeTemporalAvailable(
             RhineRender::MetalFxTemporal::supported(m_rhi));
@@ -332,7 +331,7 @@ bool PresentationShell::suspendToStatic() {
     if (m_fg) {
         m_fg->release();
     }
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     if (m_backend) {
         m_backend->metalFxInputs = {};
     }
@@ -399,9 +398,9 @@ bool PresentationShell::suspendToStatic() {
 }
 
 bool PresentationShell::resumeFromStatic() {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     bool restored = false;
-    drainInterfaceResources([this, &restored] { restored = resumeInternal(); });
+    RhineRender::drainMetalResources([this, &restored] { restored = resumeInternal(); });
     return restored;
 #else
     return resumeInternal();
@@ -619,7 +618,7 @@ void PresentationShell::syncSizes() {
 }
 
 const RhineFg::FrameInputs &PresentationShell::currentFrameInputs() const {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     static const RhineFg::FrameInputs emptyInputs;
     return m_backend ? m_backend->metalFxInputs : emptyInputs;
 #else
@@ -767,7 +766,7 @@ void PresentationShell::publishStats(bool interpolatedThisStep) {
     m_stats.interpolated = m_interpolatedFrames;
     m_stats.rendered = m_renderedFrames;
     m_stats.renderSize = inputs.renderSize;
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     if (m_stats.renderSize.isEmpty() && m_backend) {
         const auto telemetry = m_backend->renderTelemetry.snapshot();
         m_stats.renderSize = {telemetry.value("renderWidth").toInt(),
@@ -884,15 +883,20 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
 }
 
 void PresentationShell::step() {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     // 自管 QRhi 绕过 Qt Quick 渲染线程，必须自行为每帧排空 Metal 临时对象。
-    drainInterfaceResources([this] { stepFrame(); });
+    RhineRender::drainMetalResources([this] { stepFrame(); });
 #else
     stepFrame();
 #endif
 }
 
 void PresentationShell::stepFrame() {
+#ifdef Q_OS_IOS
+    if (QGuiApplication::applicationState() != Qt::ApplicationActive) {
+        return;
+    }
+#endif
     if (m_stopped || m_failed || !m_window || !m_host) {
         return;
     }
@@ -1088,6 +1092,11 @@ void PresentationShell::reportStats() {
 void PresentationShell::scheduleNext(int delayMs) {
     // 单次定时器串起来而不是固定间隔：FIFO present 自带节流，让事件循环在两次
     // 呈现之间拿到执行权（输入、窗口事件），比追着刷新率跑更稳。
+#ifdef Q_OS_IOS
+    if (QGuiApplication::applicationState() != Qt::ApplicationActive) {
+        return;
+    }
+#endif
     if (!m_timer || m_stopped || m_failed || (m_suspended && !m_rhi)) {
         return;
     }
@@ -1103,7 +1112,11 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
         return QObject::eventFilter(watched, event);
     }
 
-    const bool visible = m_window->isVisible() && m_window->visibility() != QWindow::Minimized;
+    const bool visible = m_window->isVisible() && m_window->visibility() != QWindow::Minimized
+#ifdef Q_OS_IOS
+                         && QGuiApplication::applicationState() == Qt::ApplicationActive
+#endif
+        ;
     if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
         event->type() == QEvent::WindowStateChange || event->type() == QEvent::Expose) {
         if (m_backend) {
@@ -1189,6 +1202,7 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
         case QEvent::TouchBegin:
         case QEvent::TouchUpdate:
         case QEvent::TouchEnd:
+        case QEvent::TouchCancel:
             QCoreApplication::sendEvent(overlay, event);
             break;
         case QEvent::FocusOut:
@@ -1232,9 +1246,9 @@ void PresentationShell::ensureOverlayFocus(QQuickWindow *overlay) {
 }
 
 bool PresentationShell::start() {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     bool started = false;
-    drainInterfaceResources([this, &started] { started = startInternal(); });
+    RhineRender::drainMetalResources([this, &started] { started = startInternal(); });
     return started;
 #else
     return startInternal();
@@ -1259,11 +1273,15 @@ bool PresentationShell::startInternal() {
     connect(m_timer, &QTimer::timeout, this, &PresentationShell::step);
     connectBackend();
 
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     m_releaseTimer = new QTimer(this);
     m_releaseTimer->setSingleShot(true);
-    connect(m_releaseTimer, &QTimer::timeout, this, [this] {
-        if (m_rhi && (!m_window->isVisible() || m_window->visibility() == QWindow::Minimized)) {
+    const auto releaseBackgroundGraphics = [this] {
+        if (m_rhi && (!m_window->isVisible() || m_window->visibility() == QWindow::Minimized
+#ifdef Q_OS_IOS
+                      || QGuiApplication::applicationState() != Qt::ApplicationActive
+#endif
+                      )) {
             if (m_backend) {
                 m_backend->metalFxInputs = {};
             }
@@ -1279,7 +1297,29 @@ bool PresentationShell::startInternal() {
                 m_backend->trimMemory();
             }
         }
-    });
+    };
+    connect(m_releaseTimer, &QTimer::timeout, this, releaseBackgroundGraphics);
+#endif
+#ifdef Q_OS_IOS
+    // iOS 切后台时窗口可以仍是 visible；必须按应用状态停掉 GPU 提交并释放离屏资源。
+    connect(qGuiApp, &QGuiApplication::applicationStateChanged, this,
+            [this, releaseBackgroundGraphics](Qt::ApplicationState state) {
+                const bool active = state == Qt::ApplicationActive;
+                if (m_backend) {
+                    m_backend->setVisible(active);
+                }
+                m_pendingRealFrame = false;
+                if (active) {
+                    m_releaseTimer->stop();
+                    m_needRecreate = true;
+                    m_forcePresent = true;
+                    scheduleNext();
+                } else {
+                    m_timer->stop();
+                    // 同步释放，不能依赖进入后台后可能不再执行的定时器。
+                    releaseBackgroundGraphics();
+                }
+            });
 #endif
     // 预检：有些设备能建出交换链，却撑不住持续上屏（典型是"没有直连显示输出"的独显
     // ——surface 由跑在集显上的合成器管理）。实测独显上会先成功呈现 4 帧，随后
@@ -1375,7 +1415,7 @@ QVariantMap PresentationShell::renderState() const {
             {"timerActive", m_timer && m_timer->isActive()},
             {"graphicsDevice", m_rhi != nullptr},
             {"nativeStaticImage", m_suspended && !m_rhi},
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
             {"renderer", m_backend ? m_backend->renderTelemetry.snapshot() : QVariantMap{}},
 #endif
             {"windowDpr", m_window ? m_window->devicePixelRatio() : 0.0},

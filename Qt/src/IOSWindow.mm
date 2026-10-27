@@ -2,9 +2,10 @@
 #include "Engine.h"
 #include <QGuiApplication>
 #include <QQuickWindow>
+#include <QWindow>
 
 /** iOS 只允许横屏；允许后台释放图形资源 */
-void configureIOSWindow(QQuickWindow *window, Engine *backend) {
+void configureIOSWindow(QWindow *window, Engine *backend) {
     window->reportContentOrientationChange(Qt::LandscapeOrientation);
     window->showFullScreen();
     QObject::connect(qGuiApp, &QGuiApplication::applicationStateChanged, backend,
@@ -13,7 +14,9 @@ void configureIOSWindow(QQuickWindow *window, Engine *backend) {
                          backend->setVisible(active);
                          if (!active) {
                              backend->trimMemory();
-                             window->releaseResources();
+                             if (auto *quick = qobject_cast<QQuickWindow *>(window)) {
+                                 quick->releaseResources();
+                             }
                          }
                      });
 }

@@ -1,11 +1,23 @@
 #include "MetalFxBackend.h"
 
 #import <Metal/Metal.h>
+#if __has_include(<MetalFX/MetalFX.h>)
 #import <MetalFX/MetalFX.h>
+#define RHINE_HAS_METALFX 1
+#else
+#define RHINE_HAS_METALFX 0
+#endif
 #include <rhi/qrhi_platform.h>
 #include <cmath>
 
 namespace RhineRender {
+void drainMetalResources(const std::function<void()> &work) {
+    @autoreleasepool {
+        work();
+    }
+}
+
+#if RHINE_HAS_METALFX
 namespace {
 id<MTLDevice> device(QRhi *rhi) {
     return (id<MTLDevice>)static_cast<const QRhiMetalNativeHandles *>(rhi->nativeHandles())->dev;
@@ -53,7 +65,7 @@ MetalFxTemporal::MetalFxTemporal(QRhi *rhi) : d(std::make_unique<Private>(rhi)) 
 }
 MetalFxTemporal::~MetalFxTemporal() = default;
 bool MetalFxTemporal::supported(QRhi *rhi) {
-    if (@available(macOS 13.0, *)) {
+    if (@available(macOS 13.0, iOS 16.0, *)) {
         return rhi && rhi->backend() == QRhi::Metal &&
                [MTLFXTemporalScalerDescriptor supportsDevice:device(rhi)];
     }
@@ -67,7 +79,7 @@ bool MetalFxTemporal::active() const {
 QRhiTexture *MetalFxTemporal::resolve(QRhiCommandBuffer *commands, QRhiTexture *color, QRhiTexture *depth,
                                       QRhiTexture *motion, QSize displaySize, QPointF jitter, bool reset) {
     d->encoded = false;
-    if (@available(macOS 13.0, *)) {
+    if (@available(macOS 13.0, iOS 16.0, *)) {
         if (!supported(d->rhi) || !color || !depth || !motion ||
             color->pixelSize().width() > displaySize.width() ||
             color->pixelSize().height() > displaySize.height()) {
@@ -141,7 +153,7 @@ QRhiTexture *MetalFxTemporal::resolve(QRhiCommandBuffer *commands, QRhiTexture *
 }
 
 #if __has_include(<MetalFX/MTLFXFrameInterpolator.h>)
-class MetalFxFrameGenerator : public FrameGenerator {
+class API_AVAILABLE(macos(26.0), ios(26.0)) MetalFxFrameGenerator : public FrameGenerator {
   public:
     MetalFxFrameGenerator();
     ~MetalFxFrameGenerator() override;
@@ -182,7 +194,7 @@ MetalFxFrameGenerator::~MetalFxFrameGenerator() {
     release();
 }
 bool MetalFxFrameGenerator::supported(QRhi *rhi) {
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         return rhi && rhi->backend() == QRhi::Metal &&
                [MTLFXFrameInterpolatorDescriptor supportsDevice:device(rhi)];
     }
@@ -200,10 +212,10 @@ void MetalFxFrameGenerator::release() {
     d->reset = true;
 }
 
-/** 帧外重建原生插帧上下文；macOS 26 的接口要求调用者保留上一张无 UI 颜色。 */
+/** 帧外重建原生插帧上下文；MetalFX 的接口要求调用者保留上一张无 UI 颜色。 */
 bool MetalFxFrameGenerator::resize(QRhi *rhi, QSize renderSize, QSize displaySize,
                                    QRhiTexture::Format format) {
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         if (!supported(rhi)) {
             d->error = QStringLiteral("当前系统或设备不支持 MetalFX 帧生成");
             return false;
@@ -245,7 +257,7 @@ bool MetalFxFrameGenerator::resize(QRhi *rhi, QSize renderSize, QSize displaySiz
     return false;
 }
 void MetalFxFrameGenerator::setCamera(float nearPlane, float farPlane, float fovYRadians, float frameTimeMs) {
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         d->interpolator.nearPlane = nearPlane;
         d->interpolator.farPlane = farPlane;
         d->interpolator.fieldOfView = fovYRadians * 180.f / float(M_PI);
@@ -254,7 +266,7 @@ void MetalFxFrameGenerator::setCamera(float nearPlane, float farPlane, float fov
     }
 }
 void MetalFxFrameGenerator::setJitter(float x, float y) {
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         d->interpolator.jitterOffsetX = x;
         d->interpolator.jitterOffsetY = y;
     }
@@ -264,7 +276,7 @@ void MetalFxFrameGenerator::requestReset() {
 }
 bool MetalFxFrameGenerator::prepare(QRhi *, QRhiCommandBuffer *, QRhiTexture *color, QRhiTexture *depth,
                                     QRhiTexture *motion) {
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         auto effect = d->interpolator;
         if (!effect || !hasUsage(texture(d->output), effect.outputTextureUsage) ||
             !hasUsage(texture(color), effect.colorTextureUsage) ||
@@ -288,7 +300,7 @@ bool MetalFxFrameGenerator::prepare(QRhi *, QRhiCommandBuffer *, QRhiTexture *co
 }
 bool MetalFxFrameGenerator::dispatch(QRhi *, QRhiCommandBuffer *commands, QRhiTexture *color, QRhiTexture *,
                                      QRhiTexture *) {
-    if (@available(macOS 26.0, *)) {
+    if (@available(macOS 26.0, iOS 26.0, *)) {
         auto buffer = commandBuffer(commands);
         if (!available() || !buffer) {
             return false;
@@ -327,13 +339,36 @@ QString MetalFxFrameGenerator::lastError() const {
 
 std::unique_ptr<FrameGenerator> createMetalFxFrameGenerator(QRhi *rhi) {
 #if __has_include(<MetalFX/MTLFXFrameInterpolator.h>)
-    if (MetalFxFrameGenerator::supported(rhi)) {
-        return std::make_unique<MetalFxFrameGenerator>();
+    if (@available(macOS 26.0, iOS 26.0, *)) {
+        if (MetalFxFrameGenerator::supported(rhi)) {
+            return std::make_unique<MetalFxFrameGenerator>();
+        }
     }
 #else
     Q_UNUSED(rhi);
 #endif
     return {};
 }
+
+#else
+// iOS 模拟器 SDK 不提供 MetalFX；保持同一呈现/配置接口，能力检测明确返回不可用。
+struct MetalFxTemporal::Private {};
+MetalFxTemporal::MetalFxTemporal(QRhi *) : d(std::make_unique<Private>()) {
+}
+MetalFxTemporal::~MetalFxTemporal() = default;
+bool MetalFxTemporal::supported(QRhi *) {
+    return false;
+}
+bool MetalFxTemporal::active() const {
+    return false;
+}
+QRhiTexture *MetalFxTemporal::resolve(QRhiCommandBuffer *, QRhiTexture *color, QRhiTexture *, QRhiTexture *,
+                                      QSize, QPointF, bool) {
+    return color;
+}
+std::unique_ptr<FrameGenerator> createMetalFxFrameGenerator(QRhi *) {
+    return {};
+}
+#endif
 
 } // namespace RhineRender

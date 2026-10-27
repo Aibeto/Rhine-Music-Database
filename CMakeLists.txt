@@ -433,6 +433,17 @@ if(NOT IOS)
     endif()
     add_dependencies(RhineMusicDatabase RhinePlaybackService)
 endif()
+if(APPLE)
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/render/MetalFxBackend.mm Qt/src/render/MetalFxBackend.h
+                                              Qt/src/render/FrameGenerator.h Qt/src/render/SceneResources.h)
+    target_link_libraries(RhineMusicDatabase PRIVATE "-framework Metal")
+    # iOS 模拟器 SDK 不带 MetalFX，仍构建共用呈现层并报告原生效果不可用。
+    find_library(RHINE_METALFX_FRAMEWORK MetalFX)
+    if(RHINE_METALFX_FRAMEWORK)
+        target_link_libraries(RhineMusicDatabase PRIVATE "-weak_framework MetalFX")
+    endif()
+    target_compile_options(RhineMusicDatabase PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+endif()
 if(IOS)
     target_sources(RhineCore PRIVATE Qt/src/PlatformIOS.mm Qt/src/BridgeProcessIOS.cpp Qt/src/BridgeProcess.h)
     target_link_libraries(RhineCore PRIVATE "-framework Security" "-framework UIKit" "-framework AVFAudio"
@@ -440,10 +451,6 @@ if(IOS)
     target_compile_options(RhineCore PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     include(Qt/IOS.cmake)
 elseif(APPLE)
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/render/MetalFxBackend.mm Qt/src/render/MetalFxBackend.h
-                                              Qt/src/render/FrameGenerator.h Qt/src/render/SceneResources.h)
-    target_link_libraries(RhineMusicDatabase PRIVATE "-weak_framework MetalFX" "-framework Metal")
-    target_compile_options(RhineMusicDatabase PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     target_sources(${RHINE_SYSTEM_CORE} PRIVATE Qt/src/Platform.mm)
     target_link_libraries(${RHINE_SYSTEM_CORE} PRIVATE "-framework Security" "-framework AppKit"
                                                        "-framework MediaPlayer")

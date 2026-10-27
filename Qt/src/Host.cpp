@@ -1042,7 +1042,7 @@ void Host::setPreference(QString key, QString value) {
         if (key == QLatin1String("fg")) {
             RhineFg::applyInterpolationPreference(value);
         }
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         emit preferenceChanged(key, value);
 #endif
     }

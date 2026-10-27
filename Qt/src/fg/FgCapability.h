@@ -29,7 +29,7 @@ struct CapabilitySnapshot {
     bool interpolationAvailable = false;
     /// 不可用时给用户看的原因；可用时为空。
     QString reason;
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     bool temporalAvailable = false;
 #endif
 };

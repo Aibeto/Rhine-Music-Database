@@ -89,7 +89,7 @@ class Host : public QObject {
     }
 
   signals:
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     void preferenceChanged(QString key, QString value);
 #endif
     void mediaAction(QString action);

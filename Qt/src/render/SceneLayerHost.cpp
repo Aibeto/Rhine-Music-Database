@@ -12,7 +12,7 @@
 #include <rhi/qrhi.h>
 
 // Qt 的 Vulkan 类型同时受构建特性和 SDK 头文件可用性约束。
-#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_MACOS)
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_DARWIN)
 #include <QVulkanInstance>
 #define RHINE_HAVE_VULKAN_TYPES 1
 #else

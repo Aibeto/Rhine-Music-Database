@@ -388,10 +388,10 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                     ok = false;
                 }
             }
-#ifdef Q_OS_MACOS
-            // macOS 的呈现节奏由系统合成器固定：状态恒为关闭，设置页也不再暴露该行。
+#ifdef Q_OS_DARWIN
+            // Apple 平台的呈现节奏由系统合成器固定：状态恒为关闭，设置页也不再暴露该行。
             if (hud.vsync || visibleSettings.contains("vsync")) {
-                qCritical() << "macOS should hide the vsync setting" << provider << dark;
+                qCritical() << "Apple platforms should hide the vsync setting" << provider << dark;
                 ok = false;
             }
 #endif

@@ -2,7 +2,7 @@
 #include "Glyphs.h"
 #include "Host.h"
 #include "NativeApplication.h"
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
 #include "render/RenderConfiguration.h"
 #include "fg/FgFrameTap.h"
 #endif
@@ -90,7 +90,7 @@ class Engine : public QObject {
         return m_musicTextures;
     }
     void trimMemory();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     RhineRender::RenderConfiguration renderConfiguration;
     RhineRender::RenderTelemetry renderTelemetry;
     RhineFg::FrameInputs metalFxInputs;

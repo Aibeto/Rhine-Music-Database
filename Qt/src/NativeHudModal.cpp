@@ -424,8 +424,8 @@ namespace {
  * Qt 的 GL RHI 没有计算着色器，OpenGL 回退时必须关闭此能力。
  */
 bool backendRunsFsr3(const Host *host) {
-#if defined(Q_OS_MACOS)
-    // macOS 只有 Metal，而 FSR3 后端只实现 Vulkan/D3D12。
+#if defined(Q_OS_DARWIN)
+    // Apple 平台使用 Metal，而 FSR3 后端只实现 Vulkan/D3D12。
     Q_UNUSED(host);
     return false;
 #elif !defined(RHINE_FSR3_VULKAN) && !defined(RHINE_FSR3_DX12)
@@ -457,7 +457,7 @@ RhineFg::FrameGenerationUi frameGenerationUi(const Host *host, bool preferenceOn
     const auto active = RhineGraphics::activeBackend();
     const bool backendCapable = active.isEmpty() ? host->preference("graphics-backend") != "opengl"
                                                  : active == QLatin1String("vulkan")
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
                                                        || active == QLatin1String("metal")
 #endif
         ;
@@ -556,7 +556,7 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"GPU / 显卡 · 重启生效", gpuLabel, "gpu-index"});
     }
 #endif
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
     // 垂直同步关闭后允许帧率超过屏幕刷新率，由交换链的呈现模式决定，重启生效。
     rows.append({"V-SYNC / 垂直同步 · 重启生效", vsync ? "开启" : "关闭", "vsync"});
 #endif
@@ -569,7 +569,7 @@ void NativeHud::settings(double x, double y, double width) {
     const auto aaScale = m_host->preference("aa-scale").toInt();
     const auto fgUi = frameGenerationUi(m_host, m_host->preference("fg") == "on");
     // 这一栏同时包含抗锯齿与超分（FSR），所以标题不能只写"抗锯齿"。
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     rows.append({"METALFX / 时域抗锯齿与超分辨率",
                  RhineFg::capability().temporalAvailable ? "" : "系统或设备不支持",
                  RhineFg::capability().temporalAvailable ? "aa-mode" : "aa-mode:unavailable"});
@@ -583,7 +583,7 @@ void NativeHud::settings(double x, double y, double width) {
     QVector<QPair<QString, QString>> aaOptions{
         {"off", QStringLiteral("关闭")},  {"fxaa", QStringLiteral("FXAA")}, {"ssaa", QStringLiteral("SSAA")},
         {"msaa", QStringLiteral("MSAA")}, {"taa", QStringLiteral("TAA")},   {"fsr", QStringLiteral("FSR")}};
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     aaOptions = {{"off", QStringLiteral("关闭")}, {"metalfx", QStringLiteral("MetalFX Temporal")}};
 #endif
     // 旧版本保存过 fsr1 / fsr3，统一按合并后的 fsr 显示，避免升级后显示成"关闭"。
@@ -628,7 +628,7 @@ void NativeHud::settings(double x, double y, double width) {
     // FSR1/FSR3 有档位与锐化，off/fxaa/taa 没有子设置。不适用的行直接不出现，
     // 避免调了没有任何效果。
 
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
     if (aaMode == "ssaa") {
         rows.append({"AA SCALE / 抗锯齿倍率", "", "aa-scale"});
     } else if (aaMode == "msaa") {
@@ -640,7 +640,7 @@ void NativeHud::settings(double x, double y, double width) {
 #endif
     // 帧生成是独立开关，不随抗锯齿模式循环。呈现层在能力可用时常驻接管窗口，
     // 所以这里的开关即时生效、不需要重启；不可用时整行置灰并写明原因。
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     rows.append({"METALFX / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
 #else
     rows.append({"FRAME GENERATION / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
@@ -822,8 +822,8 @@ void NativeHud::settings(double x, double y, double width) {
     text("PERFORMANCE MODE / 性能模式", left + 16, y + performanceTop + 270, 18, "demibold");
     button(performanceMode ? "开启 / 点击关闭" : "关闭 / 点击开启", left + usable - 280,
            y + performanceTop + 258, 264, 44, "performance-mode", 16);
-    text("默认开启；关闭或最小化时只显示静态画面并释放界面资源，重启后生效。", left,
-         y + performanceTop + 324, 15);
+    text("默认开启；关闭或最小化时只显示静态画面并释放界面资源，重启后生效。", left, y + performanceTop + 324,
+         15);
     rule(left, y + updateTop - 20, usable, 0.2);
     text("SOFTWARE UPDATE / 软件更新", left, y + updateTop, 16, "demibold");
     const auto &updater = m_host->updater;

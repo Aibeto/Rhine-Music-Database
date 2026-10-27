@@ -132,9 +132,7 @@ static void selectGraphicsBackend() {
     if (!qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND")) {
         const auto overrideBackend = qEnvironmentVariable("QSG_RHI_BACKEND").trimmed().toLower();
 #ifdef Q_OS_DARWIN
-#ifdef Q_OS_MACOS
         RhineGraphics::setActiveBackend(overrideBackend);
-#endif
         return;
 #else
         if (applyNamedBackend(overrideBackend)) {
@@ -145,9 +143,7 @@ static void selectGraphicsBackend() {
 #endif
     }
 #if defined(Q_OS_DARWIN)
-#ifdef Q_OS_MACOS
     RhineGraphics::setActiveBackend(QStringLiteral("metal"));
-#endif
     // Qt 在 macOS 只提供 Metal，Vulkan 需经 MoltenVK 转换层，性能低于原生 Metal。
     const auto requested = qEnvironmentVariable("RHINE_GRAPHICS").toLower();
     if (!requested.isEmpty() && requested != "auto" && requested != "metal") {
@@ -200,11 +196,11 @@ static void selectGraphicsBackend() {
 /**
  * 垂直同步：关闭时把交换链的 swapInterval 设为 0，允许帧率超过屏幕刷新率。
  * 必须在创建任何 QQuickWindow 之前写入默认格式，Qt 的 RHI 交换链会据此选择呈现模式。
- * macOS 的 Metal 呈现由系统合成器按刷新率回收 drawable，该开关没有实际效果，
+ * Apple 平台的 Metal 呈现由系统合成器按刷新率回收 drawable，该开关没有实际效果，
  * 因此固定按关闭写入，设置页也不再提供这一项。
  */
 static void applyVSyncSetting() {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     auto format = QSurfaceFormat::defaultFormat();
     format.setSwapInterval(0);
     QSurfaceFormat::setDefaultFormat(format);
@@ -268,8 +264,8 @@ static void applyFrameGenerationSetting() {
     if (qEnvironmentVariableIsEmpty("RHINE_FG")) {
         qputenv("RHINE_FG", graphicsSettings().value("panel/fg", "off").toString().toUtf8());
     }
-#ifdef Q_OS_MACOS
-    // macOS 的窗口合成器始终按刷新率回收 drawable，垂直同步开关没有实际效果。
+#ifdef Q_OS_DARWIN
+    // Apple 的窗口合成器始终按刷新率回收 drawable，垂直同步开关没有实际效果。
     // 固定关闭并在设置页隐藏；显式 RHINE_FG_VSYNC 仍留给排障对照。
     if (qEnvironmentVariableIsEmpty("RHINE_FG_VSYNC")) {
         qputenv("RHINE_FG_VSYNC", "off");
@@ -516,14 +512,10 @@ int main(int argc, char **argv) {
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
         [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
-    // 桌面 Metal 与 Vulkan 复用受控呈现，插值能力独立于呈现路径。
+    // Apple Metal 与桌面 Vulkan 复用受控呈现，插值能力独立于呈现路径。
     // RHINE_FG_LAYER=off 可强制使用 Qt Quick 默认窗口；启动失败同样回退。
     const bool fgLayerDisabled =
-        qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0
-#ifdef Q_OS_IOS
-        || true
-#endif
-        ;
+        qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0;
     // 离屏与最小平台没有原生窗口系统，呈现层无法创建交换链；必须直接走 Qt Quick 默认路径。
     // 否则无显示环境（CI、--playback-gui-test）会在接管 Metal 窗口时崩溃。
     const auto platformName = QGuiApplication::platformName();
@@ -554,6 +546,9 @@ int main(int argc, char **argv) {
         // 是同一类问题，所以这条顺序修在公共路径，不进平台分支。
         QObject::connect(&engine, &QQmlEngine::quit, shell.get(), &PresentationShell::requestQuit);
         if (shell->start() && shell->run() == 0) {
+#ifdef Q_OS_IOS
+            configureIOSWindow(shell->window(), backend);
+#endif
             // 性能模式下窗口与服务共享生命周期：关窗只隐藏，恢复与遮挡由服务驱动。
 #ifndef Q_OS_IOS
             std::unique_ptr<PlaybackSessionWindow> session;
