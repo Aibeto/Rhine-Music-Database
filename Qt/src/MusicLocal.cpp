@@ -36,7 +36,11 @@ void MusicLibrary::refreshLocal() {
         }
         for (int index = int(player.queue.size()) - 1; index >= 0; --index) {
             const auto track = player.queue.at(index).toObject();
-            if (track["provider"] == "local" && !indexed.contains(track["path"].toString())) {
+            const auto path = track["path"].toString();
+            // GUI 重新连接时本地索引可能尚未恢复；仍可读的后台曲目不能因此被停止。
+            const bool missing =
+                !indexed.contains(path) && (!host->playbackConnection() || !QFileInfo(path).isReadable());
+            if (track["provider"] == "local" && missing) {
                 if (index == player.index) {
                     player.stop();
                     break;
@@ -45,7 +49,7 @@ void MusicLibrary::refreshLocal() {
             }
         }
         if (directory && directory->item["key"] != "playback:queue") {
-            directory->songs = local->tracks(directory->item);
+            directory->updateSongs(local->tracks(directory->item), directory->sortField);
             directory->ids = {};
             for (const auto &entry : directory->songs) {
                 directory->ids.append(entry.toObject()["id"]);

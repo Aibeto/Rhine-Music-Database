@@ -116,9 +116,10 @@ void platformPlay(const QString &id, bool activate, std::function<void(QString)>
 @end
 static RhineTouchControls *touchControls;
 static NSTouchBar *rhineTouchBar;
-// 系统媒体按钮仅转发动作；队列和音源仍由面板维护。
+static bool isBackgroundService = false;
+// 系统媒体按钮仅转发动作；队列和音源由播放核心维护。
 static NSMutableArray *mediaTargets;
-void platformMediaCommands(std::function<void(QString)> callback) {
+void platformInterfaceMediaCommands(std::function<void(QString)> callback) {
     if (!touchControls) {
         touchControls = [RhineTouchControls new];
     }
@@ -126,6 +127,22 @@ void platformMediaCommands(std::function<void(QString)> callback) {
     if (!callback) {
         [NSApp mainWindow].touchBar = nil;
         rhineTouchBar = nil;
+    }
+}
+
+void platformInterfaceMediaInfo(bool hasTrack) {
+    if (hasTrack && touchControls && touchControls->action && !rhineTouchBar && [NSApp mainWindow]) {
+        rhineTouchBar = [NSTouchBar new];
+        rhineTouchBar.delegate = touchControls;
+        rhineTouchBar.defaultItemIdentifiers =
+            @[ @"rhine.music.previous", @"rhine.music.toggle", @"rhine.music.next" ];
+        [NSApp mainWindow].touchBar = rhineTouchBar;
+    }
+}
+
+void platformMediaCommands(std::function<void(QString)> callback) {
+    if (!isBackgroundService) {
+        platformInterfaceMediaCommands(callback);
     }
     auto center = [MPRemoteCommandCenter sharedCommandCenter];
     NSArray<MPRemoteCommand *> *commands = @[
@@ -151,12 +168,8 @@ void platformMediaCommands(std::function<void(QString)> callback) {
     }
 }
 void platformMediaInfo(QString title, QString artist, QString album, QVariantMap state) {
-    if (!title.isEmpty() && touchControls && touchControls->action && !rhineTouchBar) {
-        rhineTouchBar = [NSTouchBar new];
-        rhineTouchBar.delegate = touchControls;
-        rhineTouchBar.defaultItemIdentifiers =
-            @[ @"rhine.music.previous", @"rhine.music.toggle", @"rhine.music.next" ];
-        [NSApp mainWindow].touchBar = rhineTouchBar;
+    if (!isBackgroundService) {
+        platformInterfaceMediaInfo(!title.isEmpty());
     }
     auto center = [MPNowPlayingInfoCenter defaultCenter];
     if (title.isEmpty() || state.value("duration").toLongLong() <= 0) {
@@ -174,4 +187,16 @@ void platformMediaInfo(QString title, QString artist, QString album, QVariantMap
         MPNowPlayingInfoPropertyPlaybackRate : @(playing ? 1. : 0.)
     };
     center.playbackState = playing ? MPNowPlayingPlaybackStatePlaying : MPNowPlayingPlaybackStatePaused;
+}
+
+/** 后台服务只显示菜单栏图标，避免形成第二个 Dock 应用窗口。 */
+void platformBackgroundService() {
+    isBackgroundService = true;
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+}
+
+QJsonObject platformBackgroundIdentity() {
+    return {{"identifier", QString::fromNSString(NSBundle.mainBundle.bundleIdentifier)},
+            {"agent", [NSBundle.mainBundle.infoDictionary[@"LSUIElement"] boolValue] == YES},
+            {"accessory", NSApp.activationPolicy == NSApplicationActivationPolicyAccessory}};
 }

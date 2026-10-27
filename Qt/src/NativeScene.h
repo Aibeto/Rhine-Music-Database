@@ -19,6 +19,9 @@ class NativeScene {
   public:
     explicit NativeScene(QString root);
     ~NativeScene();
+    struct ResumeState;
+    std::shared_ptr<ResumeState> captureResumeState() const;
+    void restoreResumeState(const ResumeState &state);
     bool ready() const;
     QJsonObject sample(double time, bool advance = true);
     void setMode(QString mode);

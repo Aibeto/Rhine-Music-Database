@@ -53,6 +53,11 @@ chmod +x 'RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage'
 macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BACKEND=windows` 可临时对照原生后端。
 各平台播放都会跟随系统默认输出设备
 
+桌面播放默认由独立后台服务管理（设置 → 性能与诊断 → 性能模式，默认开启，重启生效）。关闭到菜单栏、
+最小化或被其他应用遮挡时，受控呈现层会卸载界面引擎并改为预渲染的静态欢迎帧，音频、队列和系统媒体键
+继续由后台服务工作；恢复时在同一窗口重建界面，不会重建窗口、音频源或切换桌面。关闭或未启用性能模式时
+仍为单进程路径。
+
 图形后端在 Windows 与 Linux 上优先使用 Vulkan，不可用时回退 OpenGL；macOS 固定使用 Metal。
 `RHINE_GRAPHICS=vulkan|opengl|auto` 可手动指定，`QSG_RHI_BACKEND` 的优先级更高。
 
@@ -146,6 +151,7 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 | -------- | ------ | ----------- | ------ | ----- |
 | Windows  | ✅     | 已停用      | ✅     | -     |
 | macOS    | -      | -           | -      | ✅    |
+| iOS / iPadOS | - | - | - | ✅ |
 | Linux    | ✅     | -           | ✅     | -     |
 
 | API         | FXAA   | SSAA   | MSAA   | TAA     | Upscaling        | Frame Generation |
@@ -247,7 +253,7 @@ RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineM
 未指定版本时为开发版：设置中显示最后一次提交标题、12 位短 SHA 和“开发版”，三平台分发包均以短 SHA 作为构建标识。
 检查更新仅获取发布信息；点击“前往更新”会打开 [GitHub releases 页面](https://github.com/MikeQu223/Rhine-Music-Database/releases)，由浏览器下载，不在应用内下载文件。
 
-`npm test` 使用本地响应验证场景、拾取、音乐状态、账号隔离、锁定上游、打包通信和部署资源。设置 `RHINE_GPU_TEST=1` 可额外执行真实 GPU 离线渲染检查；Windows 设置 `RHINE_SOFTWARE_GPU=1` 可使用软件 GPU。离线测试不替代真实账号、在线音源、显示缩放与系统集成的实机检查。
+`npm test` 使用本地响应验证音乐与播放状态、账号隔离、输入法焦点与提交、窗口迁移、锁定上游、打包通信和部署资源。默认测试不包含视觉快照、固定动画采样或桌面场景组合。离线测试不替代真实账号、在线音源、显示缩放、系统输入法与系统集成的实机检查。
 
 Qt RHI 使用私有头文件，升级 Qt 后需重新编译并验证。
 

@@ -118,6 +118,26 @@ void NativeHud::modalDraw(double width) {
         restore();
         return;
     }
+    if (modal == "detail-sort") {
+        const auto bounds = modalBounds(width);
+        translate(0, motion.offset);
+        hits = {};
+        m_modalControls = true;
+        // 菜单之外的点击只负责收起，避免穿透到下方曲目。
+        hit(0, -motion.offset, width, 1080, "close-modal", "关闭排序菜单");
+        fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(),
+             dark ? QJsonArray{0.15, 0.15, 0.15, 1} : QJsonArray{0.929, 0.922, 0.894, 1});
+        const QStringList fields{"none", "title", "album", "artist"};
+        const QStringList labels{"默认排序", "按歌曲名排序", "按专辑名排序", "按歌手名排序"};
+        for (int index = 0; index < fields.size(); ++index) {
+            const auto label = (detailSort == fields[index] ? QString("✓ ") : QString()) + labels[index];
+            button(label, bounds.x() + 8, bounds.y() + 8 + index * 42, bounds.width() - 16, 42,
+                   "music:sort:detail:" + fields[index], 14);
+        }
+        m_modalControls = false;
+        restore();
+        return;
+    }
     if (modal == "lyrics-source") {
         const auto bounds = modalBounds(width);
         translate(0, motion.offset);
@@ -404,8 +424,8 @@ namespace {
  * Qt 的 GL RHI 没有计算着色器，OpenGL 回退时必须关闭此能力。
  */
 bool backendRunsFsr3(const Host *host) {
-#if defined(Q_OS_MACOS)
-    // macOS 只有 Metal，而 FSR3 后端只实现 Vulkan/D3D12。
+#if defined(Q_OS_DARWIN)
+    // Apple 平台使用 Metal，而 FSR3 后端只实现 Vulkan/D3D12。
     Q_UNUSED(host);
     return false;
 #elif !defined(RHINE_FSR3_VULKAN) && !defined(RHINE_FSR3_DX12)
@@ -437,7 +457,7 @@ RhineFg::FrameGenerationUi frameGenerationUi(const Host *host, bool preferenceOn
     const auto active = RhineGraphics::activeBackend();
     const bool backendCapable = active.isEmpty() ? host->preference("graphics-backend") != "opengl"
                                                  : active == QLatin1String("vulkan")
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
                                                        || active == QLatin1String("metal")
 #endif
         ;
@@ -463,6 +483,13 @@ void NativeHud::settings(double x, double y, double width) {
         {"REDUCED MOTION / 动态效果", reduced ? "减少动态效果" : "完整动效", "motion"},
         {"STARTUP ANIMATION / 初始化动画", startupAnimation ? "开启" : "关闭", "startup-animation"},
         {"AUDIO QUALITY / 音质", qualities.value(music.player.quality), "quality"}};
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    // 只有这两个平台持有托盘入口，关闭行为才有两种可选结果。
+    rows.insert(1, {"CLOSE WINDOW / 点击关闭窗口",
+                    m_host->preference("close-behavior") == "tray" ? QStringLiteral("最小化到系统托盘")
+                                                                   : QStringLiteral("退出播放器"),
+                    "close-behavior"});
+#endif
     if (music.provider == "netease") {
         rows.append({"ALTERNATE SOURCE / 替代音源",
                      music.player.alternative ? "开启（音质由来源决定）" : "关闭", "alternative"});
@@ -473,6 +500,7 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"OFFICIAL PLAYER / 官方窗口", m_host->activates() ? "播放时显示" : "尽量保持后台",
                      "music:activate"});
     }
+    rows.insert(4, {"INITIALIZATION / 手动显示初始化页面", "Reinitialize ↗", "replay"});
     if (!PlatformFeatures::DesktopWindowControls) {
         rows.removeFirst();
     }
@@ -535,7 +563,7 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"GPU / 显卡 · 重启生效", gpuLabel, "gpu-index"});
     }
 #endif
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
     // 垂直同步关闭后允许帧率超过屏幕刷新率，由交换链的呈现模式决定，重启生效。
     rows.append({"V-SYNC / 垂直同步 · 重启生效", vsync ? "开启" : "关闭", "vsync"});
 #endif
@@ -548,7 +576,7 @@ void NativeHud::settings(double x, double y, double width) {
     const auto aaScale = m_host->preference("aa-scale").toInt();
     const auto fgUi = frameGenerationUi(m_host, m_host->preference("fg") == "on");
     // 这一栏同时包含抗锯齿与超分（FSR），所以标题不能只写"抗锯齿"。
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     rows.append({"METALFX / 时域抗锯齿与超分辨率",
                  RhineFg::capability().temporalAvailable ? "" : "系统或设备不支持",
                  RhineFg::capability().temporalAvailable ? "aa-mode" : "aa-mode:unavailable"});
@@ -562,7 +590,7 @@ void NativeHud::settings(double x, double y, double width) {
     QVector<QPair<QString, QString>> aaOptions{
         {"off", QStringLiteral("关闭")},  {"fxaa", QStringLiteral("FXAA")}, {"ssaa", QStringLiteral("SSAA")},
         {"msaa", QStringLiteral("MSAA")}, {"taa", QStringLiteral("TAA")},   {"fsr", QStringLiteral("FSR")}};
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     aaOptions = {{"off", QStringLiteral("关闭")}, {"metalfx", QStringLiteral("MetalFX Temporal")}};
 #endif
     // 旧版本保存过 fsr1 / fsr3，统一按合并后的 fsr 显示，避免升级后显示成"关闭"。
@@ -607,7 +635,7 @@ void NativeHud::settings(double x, double y, double width) {
     // FSR1/FSR3 有档位与锐化，off/fxaa/taa 没有子设置。不适用的行直接不出现，
     // 避免调了没有任何效果。
 
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
     if (aaMode == "ssaa") {
         rows.append({"AA SCALE / 抗锯齿倍率", "", "aa-scale"});
     } else if (aaMode == "msaa") {
@@ -619,7 +647,7 @@ void NativeHud::settings(double x, double y, double width) {
 #endif
     // 帧生成是独立开关，不随抗锯齿模式循环。呈现层在能力可用时常驻接管窗口，
     // 所以这里的开关即时生效、不需要重启；不可用时整行置灰并写明原因。
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     rows.append({"METALFX / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
 #else
     rows.append({"FRAME GENERATION / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
@@ -628,7 +656,7 @@ void NativeHud::settings(double x, double y, double width) {
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;
     const auto performanceTop = preferenceTop + rows.size() * rowStep + 76 + dropdownExtra;
-    const auto updateTop = performanceTop + 310;
+    const auto updateTop = performanceTop + 410;
     const auto projectTop = updateTop + 310;
     settingsContentBottom = projectTop + 278;
     const auto viewport =
@@ -707,6 +735,8 @@ void NativeHud::settings(double x, double y, double width) {
             // 显卡下拉块：选中即收起（收起与写配置都在 NativeHud::action 的 gpu-index: 分支）。
             rowShift += dropdown(gpuOptions, gpuOptionIndex, QStringLiteral("gpu-index"),
                                  QStringLiteral("gpu-index:"), rowY, left, usable, rowInk, tint);
+        } else if (row.at(2) == "close-behavior") {
+            button(row.at(1), left + usable - 280, rowY + 6, 264, 44, "close-behavior", 16);
         } else if (row.at(2) == "aa-mode") {
             // 抗锯齿下拉块：选中即收起（收起逻辑在 NativeHud::action 的 aa-mode: 分支里）。
             rowShift += dropdown(aaOptions, aaIndex, QStringLiteral("aa-mode"), QStringLiteral("aa-mode:"),
@@ -794,6 +824,15 @@ void NativeHud::settings(double x, double y, double width) {
     button(discRotation ? "开启 / 点击关闭" : "关闭 / 点击了解风险", left + usable - 280,
            y + performanceTop + 166, 264, 44, "disc-rotation", 16);
     text("默认关闭；开启会增加持续渲染、耗电和发热。", left, y + performanceTop + 232, 15);
+    // 性能模式：关窗/最小化只保留静态欢迎帧并释放界面资源，音频由后台服务继续播放。
+    // 后台服务需要在新进程启动时接管，所以开关只写配置、重启后生效。
+    const bool performanceMode = m_host->preference("performance-mode") != "off";
+    fill(left, y + performanceTop + 252, usable, 56, tint);
+    text("PERFORMANCE MODE / 性能模式", left + 16, y + performanceTop + 270, 18, "demibold");
+    button(performanceMode ? "开启 / 点击关闭" : "关闭 / 点击开启", left + usable - 280,
+           y + performanceTop + 258, 264, 44, "performance-mode", 16);
+    text("默认开启；最小化或关闭到托盘时只显示静态画面并释放界面资源，重启后生效。", left,
+         y + performanceTop + 324, 15);
     rule(left, y + updateTop - 20, usable, 0.2);
     text("SOFTWARE UPDATE / 软件更新", left, y + updateTop, 16, "demibold");
     const auto &updater = m_host->updater;

@@ -1,5 +1,5 @@
 #include "PresentationShell.h"
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
 #include "MetalFxBackend.h"
 #endif
 
@@ -7,6 +7,7 @@
 #include "../fg/FgCapability.h"
 #include "../fg/FgConfig.h"
 #include "../fg/FgFrameTap.h"
+#include "PresentationWindow.h"
 #include "SceneLayerHost.h"
 
 #include "../Engine.h"
@@ -61,11 +62,23 @@ quint64 bindingKey(const QRhiTexture *a, const QRhiTexture *b) {
 
 PresentationShell::PresentationShell(QQmlEngine &engine, Engine &backend, QString backendName,
                                      QObject *parent)
-    : QObject(parent), m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
+    : QObject(parent), m_quitTransition(
+                           [this] {
+                               shutdown();
+                               QCoreApplication::quit();
+                           },
+                           this),
+      m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
+}
+
+/** QML 快捷键与原生关闭统一等待当前回调返回，避免退出时删除正在执行的信号对象。 */
+void PresentationShell::requestQuit() {
+    m_quitTransition.request();
 }
 
 /** 停调度并按 GPU 引用顺序释放资源；原生窗口留到析构，避免在自身事件处理中销毁。 */
 void PresentationShell::shutdown() {
+    m_quitTransition.cancel();
     if (m_stopped) {
         return;
     }
@@ -77,15 +90,19 @@ void PresentationShell::shutdown() {
         m_releaseTimer->stop();
     }
     RhineFg::setEnabled(false);
-#ifdef Q_OS_MACOS
-    m_backend->metalFxInputs = {};
+#ifdef Q_OS_DARWIN
+    if (m_backend) {
+        m_backend->metalFxInputs = {};
+    }
 #endif
     if (m_rhi) {
         m_rhi->finish();
     }
     releaseSwapchainResources();
     m_fg.reset();
-    m_host.reset();
+    disconnectBackend();
+    releaseHost();
+    m_suspended = false;
     delete m_pipelineBindings;
     m_pipelineBindings = nullptr;
     for (auto *resource : std::as_const(m_ownedResources)) {
@@ -96,7 +113,9 @@ void PresentationShell::shutdown() {
         m_presenter->release();
     }
     RhineFg::clear();
-    m_backend->setWindow(nullptr);
+    if (m_backend) {
+        m_backend->setWindow(nullptr);
+    }
     m_engine->rootContext()->setContextProperty(QStringLiteral("rhineHostWindow"),
                                                 QVariant::fromValue(static_cast<QWindow *>(nullptr)));
 }
@@ -107,7 +126,7 @@ PresentationShell::~PresentationShell() {
 }
 
 bool PresentationShell::compiledIn() {
-#if defined(Q_OS_MACOS) && __has_include(<MetalFX/MTLFXFrameInterpolator.h>)
+#if defined(Q_OS_DARWIN) && __has_include(<MetalFX/MTLFXFrameInterpolator.h>)
     return true;
 #elif defined(RHINE_FSR3_VULKAN) && RHINE_FSR3_VULKAN
     return FgBackend::compiledIn();
@@ -131,7 +150,10 @@ bool PresentationShell::supportsBackend(const QString &name) {
 }
 
 bool PresentationShell::requested() const {
-#ifdef Q_OS_MACOS
+    if (!m_backend || m_suspended) {
+        return false;
+    }
+#ifdef Q_OS_DARWIN
     return m_backend->renderConfiguration.snapshot().interpolation;
 #else
     return FgConfig::fromEnvironment().enabled;
@@ -196,24 +218,30 @@ bool PresentationShell::initializeLayers() {
     // QQuickRenderControl 的离屏窗口没有平台窗口、永远不会被激活，Qt 也不会像真实
     // 窗口那样在激活时自动传播 activeFocus——实测此时 window.activeFocusItem() 为
     // null，QQuickWindow 收到 KeyPress 后无处投递，按键被直接丢弃。
-    // 这里显式调一次 Overlay.qml 导出的 focusInputLayer()（内部是 forceActiveFocus，
-    // 对未激活的离屏窗口同样有效），与默认路径对齐。
+    // 显式恢复当前面板的焦点；重建后可能仍在搜索框，不能统一交回快捷键层。
     if (QQuickItem *overlayRoot = m_host->overlayRootItem()) {
-        const bool focused = QMetaObject::invokeMethod(overlayRoot, "focusInputLayer", Qt::DirectConnection);
+        const bool focused =
+            QMetaObject::invokeMethod(overlayRoot, "restoreInputFocus", Qt::DirectConnection);
         QQuickItem *focusItem = m_host->overlayWindow()->activeFocusItem();
         qInfo().noquote() << "FG: 覆盖层输入焦点" << (focused && focusItem ? "已建立" : "未建立")
                           << "activeFocusItem:"
                           << (focusItem ? focusItem->metaObject()->className() : "null");
     }
+    // 把平台输入法接到离屏输入项上
+    if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
+        inputWindow->setInputWindow(m_host->overlayWindow());
+    }
     // 只在这里打开每帧输入通道：RhiScene 的渲染器只在 tap 打开时才发布。
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     // Main.qml 未加载时仍需接上原窗口的资源统计清理，否则隐藏后会残留旧计数。
-    QObject::connect(
-        m_host->sceneWindow(), &QQuickWindow::sceneGraphInvalidated, m_backend,
-        [this] { m_backend->recordResourceRelease(); }, Qt::DirectConnection);
-    const bool temporalAvailable = RhineRender::MetalFxTemporal::supported(m_rhi);
-    m_backend->renderConfiguration.setNativeTemporalAvailable(temporalAvailable);
-    RhineFg::capabilityMutable().temporalAvailable = temporalAvailable;
+    if (m_backend) {
+        m_sceneInvalidated = QObject::connect(
+            m_host->sceneWindow(), &QQuickWindow::sceneGraphInvalidated, m_backend,
+            [this] { m_backend->recordResourceRelease(); }, Qt::DirectConnection);
+        const bool temporalAvailable = RhineRender::MetalFxTemporal::supported(m_rhi);
+        m_backend->renderConfiguration.setNativeTemporalAvailable(temporalAvailable);
+        RhineFg::capabilityMutable().temporalAvailable = temporalAvailable;
+    }
     m_fg = RhineRender::createMetalFxFrameGenerator(m_rhi);
     m_fgAvailable = bool(m_fg);
 #else
@@ -222,12 +250,208 @@ bool PresentationShell::initializeLayers() {
         m_fg = std::make_unique<FgBackend>();
     }
 #endif
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     RhineFg::setEnabled(false);
-    m_backend->metalFxInputs = {};
+    if (m_backend) {
+        m_backend->metalFxInputs = {};
+    }
 #else
     RhineFg::setEnabled(m_fgAvailable);
 #endif
+    return true;
+}
+
+/** 绑定业务引擎的更新信号；引擎在挂起时会被整体销毁，恢复后重新绑定。 */
+void PresentationShell::connectBackend() {
+    if (!m_backend) {
+        return;
+    }
+    connect(m_backend, &Engine::sceneUpdated, this, [this] {
+        if (m_host) {
+            m_host->markSceneDirty();
+        }
+        scheduleNext();
+    });
+    connect(m_backend, &Engine::hudUpdated, this, [this] {
+        if (m_host) {
+            m_host->markOverlayDirty();
+        }
+        scheduleNext();
+    });
+}
+
+void PresentationShell::disconnectBackend() {
+    if (m_backend) {
+        m_backend->disconnect(this);
+    }
+}
+
+/** 释放当前离屏宿主；静态层与正常层共用这一条路径。 */
+void PresentationShell::releaseHost() {
+    // 离屏 UI 窗口即将销毁，先解除输入法对它的引用，避免平台上下文留下悬空焦点对象
+    if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
+        inputWindow->setInputWindow(nullptr);
+    }
+    if (m_sceneInvalidated) {
+        QObject::disconnect(m_sceneInvalidated);
+        m_sceneInvalidated = {};
+    }
+    m_host.reset();
+}
+
+void PresentationShell::setBackend(Engine *backend) {
+    if (m_backend == backend) {
+        return;
+    }
+    disconnectBackend();
+    m_backend = backend;
+    if (!m_backend || !m_window) {
+        return;
+    }
+    m_backend->setWindow(m_window);
+    m_window->installEventFilter(m_backend);
+    connectBackend();
+#ifdef Q_OS_DARWIN
+    if (m_rhi) {
+        m_backend->renderConfiguration.setNativeTemporalAvailable(
+            RhineRender::MetalFxTemporal::supported(m_rhi));
+    }
+#endif
+}
+
+bool PresentationShell::suspendToStatic() {
+    if (!m_started || m_failed || m_suspended || !m_rhi) {
+        return m_suspended;
+    }
+    QByteArray staticImage;
+    if (m_presenter->supportsStaticImage()) {
+        QFile imageFile(resolveQmlUrl(QStringLiteral("welcome.png")).replace("qrc:", ":"));
+        if (!imageFile.open(QIODevice::ReadOnly)) {
+            m_error = QStringLiteral("无法读取静态图片");
+            return false;
+        }
+        staticImage = imageFile.readAll();
+    }
+    // 插值上下文与真实场景绑定，挂起时一并释放。
+    if (m_fg) {
+        m_fg->release();
+    }
+#ifdef Q_OS_DARWIN
+    if (m_backend) {
+        m_backend->metalFxInputs = {};
+    }
+#endif
+    m_rhi->finish();
+    // 合成管线与 SRB 缓存引用的是旧层的纹理，换宿主前必须作废。
+    releaseSwapchainResources();
+    releaseHost();
+
+    if (m_presenter->supportsStaticImage()) {
+        m_timer->stop();
+        if (m_releaseTimer) {
+            m_releaseTimer->stop();
+        }
+        m_fg.reset();
+        RhineFg::clear();
+        delete m_pipelineBindings;
+        m_pipelineBindings = nullptr;
+        for (auto *resource : std::as_const(m_ownedResources)) {
+            delete resource;
+        }
+        m_ownedResources.clear();
+        m_compositeUbo = nullptr;
+        m_sampler = nullptr;
+        m_pipelineBase = nullptr;
+        if (!m_presenter->suspendToImage(staticImage)) {
+            m_error = m_presenter->lastError();
+            m_rhi = m_presenter->rhi();
+            if (m_rhi && initializeLayers()) {
+                m_forcePresent = true;
+                scheduleNext();
+            }
+            return false;
+        }
+        m_rhi = nullptr;
+        m_suspended = true;
+        m_staticFramePresented = true;
+        m_pendingRealFrame = false;
+        m_engine->collectGarbage();
+        m_engine->clearComponentCache();
+        return true;
+    }
+
+    auto host = std::make_unique<SceneLayerHost>();
+    host->requestRender = [this] { scheduleNext(); };
+    if (!host->startStatic(*m_engine, QUrl(resolveQmlUrl(QStringLiteral("Static.qml"))), m_rhi,
+                           m_presenter->vulkanInstance())) {
+        m_error = QStringLiteral("静态页建立失败：%1").arg(host->lastError());
+        return false;
+    }
+    host->resize(m_size);
+    host->setPixelRatio(m_dpr);
+    // 真实 UI 的离屏窗口马上被替换掉，先断开输入法焦点
+    if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
+        inputWindow->setInputWindow(nullptr);
+    }
+    m_host = std::move(host);
+    m_suspended = true;
+    m_staticFramePresented = false;
+    m_pendingRealFrame = false;
+    m_forcePresent = true;
+    scheduleNext();
+    return true;
+}
+
+bool PresentationShell::resumeFromStatic() {
+#ifdef Q_OS_DARWIN
+    bool restored = false;
+    RhineRender::drainMetalResources([this, &restored] { restored = resumeInternal(); });
+    return restored;
+#else
+    return resumeInternal();
+#endif
+}
+
+bool PresentationShell::resumeInternal() {
+    if (!m_suspended) {
+        return true;
+    }
+    if (!m_backend) {
+        m_error = QStringLiteral("恢复真实界面前没有绑定业务引擎");
+        return false;
+    }
+    if (!m_rhi) {
+        if (!m_presenter->resumeDevice()) {
+            m_error = m_presenter->lastError();
+            return false;
+        }
+        m_rhi = m_presenter->rhi();
+        m_needRecreate = true;
+    }
+    m_rhi->finish();
+    releaseSwapchainResources();
+    releaseHost();
+    // 新引擎和新设备的帧序号不能沿用旧场景的调度、失败及插值状态。
+    m_failed = false;
+    m_fgArmed = false;
+    m_lastTapSerial = 0;
+    m_lastEngineSteps = 0;
+    m_framesSinceRecreate = 0;
+    m_recreateStreak = 0;
+    m_frameClock.invalidate();
+    m_stepClock.invalidate();
+    m_stepEndNs = 0;
+    m_suspended = false;
+    if (!initializeLayers()) {
+        // 恢复失败时退回静态页，窗口至少要继续显示有效内容。
+        m_suspended = false;
+        suspendToStatic();
+        return false;
+    }
+    m_pendingRealFrame = false;
+    m_forcePresent = true;
+    m_staticFramePresented = false;
+    scheduleNext();
     return true;
 }
 
@@ -393,12 +617,15 @@ void PresentationShell::syncSizes() {
     // 弹窗右列、播放条右半边这些按 width 相对定位的内容全被画到离屏层外面，看起来
     // 就是"UI 少了一整块"；同时 fit() 不再截断，文字也变长。
     // Engine::resize() 对相同尺寸会早退，所以这里每帧调用没有额外开销。
-    m_backend->resize(m_size.width(), m_size.height());
+    if (m_backend) {
+        m_backend->resize(m_size.width(), m_size.height());
+    }
 }
 
 const RhineFg::FrameInputs &PresentationShell::currentFrameInputs() const {
-#ifdef Q_OS_MACOS
-    return m_backend->metalFxInputs;
+#ifdef Q_OS_DARWIN
+    static const RhineFg::FrameInputs emptyInputs;
+    return m_backend ? m_backend->metalFxInputs : emptyInputs;
 #else
     return RhineFg::latest();
 #endif
@@ -442,7 +669,7 @@ bool PresentationShell::armFrameGeneration() {
 }
 
 bool PresentationShell::recordFrameGeneration(QRhiCommandBuffer *cb) {
-    if (!m_fg || !m_fgArmed) {
+    if (!m_fg || !m_fgArmed || m_suspended) {
         return false;
     }
 
@@ -544,8 +771,8 @@ void PresentationShell::publishStats(bool interpolatedThisStep) {
     m_stats.interpolated = m_interpolatedFrames;
     m_stats.rendered = m_renderedFrames;
     m_stats.renderSize = inputs.renderSize;
-#ifdef Q_OS_MACOS
-    if (m_stats.renderSize.isEmpty()) {
+#ifdef Q_OS_DARWIN
+    if (m_stats.renderSize.isEmpty() && m_backend) {
         const auto telemetry = m_backend->renderTelemetry.snapshot();
         m_stats.renderSize = {telemetry.value("renderWidth").toInt(),
                               telemetry.value("renderHeight").toInt()};
@@ -622,7 +849,9 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
     // FG 的算法命令必须和合成落在同一个离屏帧里：先插值、再合成、最后注入信号量，
     // 三者由同一次提交保证顺序与可见性。
     const bool interpolated = allowInterpolation && recordFrameGeneration(cb);
-    QRhiTexture *base = interpolated ? m_fg->output() : m_host->sceneTexture();
+    // 静态页只有 UI 层：把它同时当作底图，合成公式里 ui.a=1 会完全盖住底图。
+    QRhiTexture *base =
+        m_suspended ? m_host->overlayTexture() : (interpolated ? m_fg->output() : m_host->sceneTexture());
     m_probe.restart();
     const bool composed = composite(cb, base, m_host->overlayTexture(), frame.imageIndex);
     m_stats.compositeMs = blend(m_stats.compositeMs, tookMs());
@@ -659,6 +888,20 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
 }
 
 void PresentationShell::step() {
+#ifdef Q_OS_DARWIN
+    // 自管 QRhi 绕过 Qt Quick 渲染线程，必须自行为每帧排空 Metal 临时对象。
+    RhineRender::drainMetalResources([this] { stepFrame(); });
+#else
+    stepFrame();
+#endif
+}
+
+void PresentationShell::stepFrame() {
+#ifdef Q_OS_IOS
+    if (QGuiApplication::applicationState() != Qt::ApplicationActive) {
+        return;
+    }
+#endif
     if (m_stopped || m_failed || !m_window || !m_host) {
         return;
     }
@@ -675,7 +918,7 @@ void PresentationShell::step() {
     if (!m_window->isVisible() || !m_window->isExposed() || m_window->visibility() == QWindow::Minimized) {
         return;
     }
-    const bool idle = m_backend->performance().value(QStringLiteral("idle")).toBool();
+    const bool idle = m_backend && m_backend->performance().value(QStringLiteral("idle")).toBool();
     const bool interpolationWanted = requested();
     syncSizes();
 
@@ -697,11 +940,17 @@ void PresentationShell::step() {
     }
 
     // 引擎每走一拍就放行一次渲染。这条**不能删**：模型/纹理是异步加载的，加载完成
-    // 不一定伴随 sceneUpdated，一旦只看脏标记，3D 房间几何会永远不出现（实测如此）。
+    // 不一定伴随 sceneUpdated，一旦只看脏标记，3D 房间几何就会永远不出现（实测如此）。
     // 用 steps 的意义就是"引擎前进了"，代价是没变也要重渲——这是正确性的前提。
-    const auto engineSteps = m_backend->performance().value(QStringLiteral("steps")).toULongLong();
-    const bool engineAdvanced = m_backendName == "vulkan" && engineSteps != m_lastEngineSteps;
-    if (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent && !m_pendingRealFrame) {
+    // 引擎计时推进不等于画面改变。两层都无更新且没有待呈现帧时让事件循环休眠。
+    const auto engineSteps =
+        m_backend ? m_backend->performance().value(QStringLiteral("steps")).toULongLong() : 0;
+    const bool engineAdvanced = !m_suspended && m_backendName == "vulkan" && engineSteps != m_lastEngineSteps;
+    // 静态页的离屏层会持续上报 renderRequested；挂起后只在首次、尺寸变化或显式请求时重绘，
+    // 否则会以显示刷新率空转并持续增长图形内存。
+    const bool staticIdle = m_suspended && m_staticFramePresented && !m_forcePresent;
+    if (staticIdle ||
+        (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent && !m_pendingRealFrame)) {
         ++m_skippedSteps;
         publishStats(false);
         if (m_backendName == "vulkan") {
@@ -748,7 +997,7 @@ void PresentationShell::step() {
         return;
     }
 
-    if (m_backendName == "vulkan") {
+    if (m_backendName == "vulkan" && !m_suspended) {
         armFrameGeneration();
     }
     RhineRender::PresentationBackend::Frame frame;
@@ -816,6 +1065,11 @@ void PresentationShell::step() {
     publishStats(interpolated);
     m_forcePresent = false;
     reportStats();
+    // 静态页只需要在内容真正变化时重绘；请求已经送达，交回事件循环。
+    if (m_suspended) {
+        m_staticFramePresented = true;
+        return;
+    }
     // 新更新和待呈现的真实帧继续排队；其余情况等待下一次内容更新。
     if (m_backendName == "vulkan") {
         // 尾部立刻自续：关掉 vsync 时这个应用要的是"能跑多快跑多快"，限速会把帧率
@@ -861,7 +1115,12 @@ void PresentationShell::reportStats() {
 void PresentationShell::scheduleNext(int delayMs) {
     // 单次定时器串起来而不是固定间隔：FIFO present 自带节流，让事件循环在两次
     // 呈现之间拿到执行权（输入、窗口事件），比追着刷新率跑更稳。
-    if (!m_timer || m_stopped || m_failed) {
+#ifdef Q_OS_IOS
+    if (QGuiApplication::applicationState() != Qt::ApplicationActive) {
+        return;
+    }
+#endif
+    if (!m_timer || m_stopped || m_failed || (m_suspended && !m_rhi)) {
         return;
     }
     if (delayMs == 0 && m_timer->isActive()) {
@@ -881,10 +1140,16 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
         return QObject::eventFilter(watched, event);
     }
 
-    const bool visible = m_window->isVisible() && m_window->visibility() != QWindow::Minimized;
+    const bool visible = m_window->isVisible() && m_window->visibility() != QWindow::Minimized
+#ifdef Q_OS_IOS
+                         && QGuiApplication::applicationState() == Qt::ApplicationActive
+#endif
+        ;
     if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
         event->type() == QEvent::WindowStateChange || event->type() == QEvent::Expose) {
-        m_backend->setVisible(visible);
+        if (m_backend) {
+            m_backend->setVisible(visible);
+        }
         if (visible) {
             if (m_releaseTimer) {
                 m_releaseTimer->stop();
@@ -892,6 +1157,7 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
             m_forcePresent = true;
             scheduleNext();
         } else {
+            m_startupProbe.reset();
             if (m_timer) {
                 m_timer->stop();
             }
@@ -902,12 +1168,10 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
     }
     switch (event->type()) {
     case QEvent::Close:
-        // 与 Ctrl+Q 同一条退出顺序：先把交换链/呈现层拆掉，再让事件循环退出。
-        // 反过来（只 quit()）实测进程根本不退：呈现层还活着，析构里的排空卡死。
-        qWarning().noquote() << "FG: 窗口关闭 → 先拆呈现层再退出事件循环";
-        shutdown();
-        QCoreApplication::quit();
-        return false;
+        // 关闭可能来自 QML 按钮；先拦截原生销毁，再在输入栈退出后拆交换链并结束进程。
+        event->ignore();
+        requestQuit();
+        return true;
     case QEvent::Expose:
         if (m_window->isExposed()) {
             m_needRecreate = true;
@@ -967,6 +1231,7 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
         case QEvent::TouchBegin:
         case QEvent::TouchUpdate:
         case QEvent::TouchEnd:
+        case QEvent::TouchCancel:
             QCoreApplication::sendEvent(overlay, event);
             break;
         case QEvent::FocusOut:
@@ -982,13 +1247,8 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
             // 焦点由"可见窗口"这唯一真实来源决定：启动时建立一次，按键到达时兜底。
             break;
         case QEvent::ShortcutOverride:
-        case QEvent::InputMethod:
             QCoreApplication::sendEvent(overlay, event);
             break;
-        case QEvent::InputMethodQuery:
-            // 查询结果直接交还平台输入法，避免普通 QWindow 的默认处理覆盖它。
-            QCoreApplication::sendEvent(overlay, event);
-            return true;
         default:
             break;
         }
@@ -1015,6 +1275,16 @@ void PresentationShell::ensureOverlayFocus(QQuickWindow *overlay) {
 }
 
 bool PresentationShell::start() {
+#ifdef Q_OS_DARWIN
+    bool started = false;
+    RhineRender::drainMetalResources([this, &started] { started = startInternal(); });
+    return started;
+#else
+    return startInternal();
+#endif
+}
+
+bool PresentationShell::startInternal() {
     if (!supportsBackend(m_backendName)) {
         m_error = QStringLiteral("这个构建未编入所选呈现后端");
         return false;
@@ -1038,30 +1308,57 @@ bool PresentationShell::start() {
             scheduleNext(0);
         }
     });
-    connect(m_backend, &Engine::sceneUpdated, this, [this] {
-        m_host->markSceneDirty();
-        scheduleNext();
-    });
-    connect(m_backend, &Engine::hudUpdated, this, [this] {
-        m_host->markOverlayDirty();
-        scheduleNext();
-    });
+    connectBackend();
 
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     m_releaseTimer = new QTimer(this);
     m_releaseTimer->setSingleShot(true);
-    connect(m_releaseTimer, &QTimer::timeout, this, [this] {
-        if (!m_window->isVisible() || m_window->visibility() == QWindow::Minimized) {
-            m_backend->metalFxInputs = {};
+    const auto releaseBackgroundGraphics = [this] {
+        if (m_rhi && (!m_window->isVisible() || m_window->visibility() == QWindow::Minimized
+#ifdef Q_OS_IOS
+                      || QGuiApplication::applicationState() != Qt::ApplicationActive
+#endif
+                      )) {
+            if (m_backend) {
+                m_backend->metalFxInputs = {};
+            }
             m_rhi->finish();
             if (m_fg) {
                 m_fg->release();
             }
             releaseSwapchainResources();
-            m_host->releaseGraphics();
-            m_backend->trimMemory();
+            if (m_host) {
+                m_host->releaseGraphics();
+            }
+            if (m_backend) {
+                m_backend->trimMemory();
+            }
         }
-    });
+    };
+    connect(m_releaseTimer, &QTimer::timeout, this, releaseBackgroundGraphics);
+#endif
+#ifdef Q_OS_IOS
+    // iOS 切后台时窗口可以仍是 visible；必须按应用状态停掉 GPU 提交并释放离屏资源。
+    connect(qGuiApp, &QGuiApplication::applicationStateChanged, this,
+            [this, releaseBackgroundGraphics](Qt::ApplicationState state) {
+                const bool active = state == Qt::ApplicationActive;
+                if (m_backend) {
+                    m_backend->setVisible(active);
+                }
+                m_pendingRealFrame = false;
+                if (active) {
+                    m_releaseTimer->stop();
+                    m_needRecreate = true;
+                    m_forcePresent = true;
+                    scheduleNext();
+                } else {
+                    // 后台可能立即冻结定时器；不能等下一次自检回调才暂停计时。
+                    m_startupProbe.reset();
+                    m_timer->stop();
+                    // 同步释放，不能依赖进入后台后可能不再执行的定时器。
+                    releaseBackgroundGraphics();
+                }
+            });
 #endif
     // 预检：有些设备能建出交换链，却撑不住持续上屏（典型是"没有直连显示输出"的独显
     // ——surface 由跑在集显上的合成器管理）。实测独显上会先成功呈现 4 帧，随后
@@ -1072,6 +1369,7 @@ bool PresentationShell::start() {
     //   · 按适配器要求检查连续呈现；预检结束后恢复按需调度。
     // 判死后由 main.cpp 干净回退到默认 QQuickWindow 路径。这比
     // vkGetPhysicalDeviceSurfaceSupportKHR 靠谱：后者对这类设备仍返回支持。
+#ifndef Q_OS_IOS
     {
         QElapsedTimer probeClock;
         probeClock.start();
@@ -1093,6 +1391,7 @@ bool PresentationShell::start() {
             return false;
         }
     }
+#endif
 
     // 排障：RHINE_FG_DIAG=1 时每秒打一行真实计数。presented 只在每 300 帧打印，
     // 现场判断"到底是在跑还是在空转"时等不起，这个小计时器直接给答案。
@@ -1104,7 +1403,9 @@ bool PresentationShell::start() {
                                  << m_renderedFrames << "skipped" << m_skippedSteps << "acqTimeout"
                                  << m_acquireTimeoutCount << "outOfDate" << m_outOfDateCount << "visible"
                                  << (m_window && m_window->isVisible()) << "pendingReal" << m_pendingRealFrame
-                                 << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1)
+                                 << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1) << "dirty"
+                                 << (m_host ? m_host->contentDirty() : false) << "force" << m_forcePresent
+                                 << "suspended" << m_suspended
                                  << "| 3D层" << QString::number(m_host->sceneLayerMs(), 'f', 1) << "ms"
                                  << "(打磨" << QString::number(m_host->scenePolishMs(), 'f', 1)
                                  << "起帧" << QString::number(m_host->sceneBeginMs(), 'f', 1)
@@ -1116,8 +1417,10 @@ bool PresentationShell::start() {
         diag->start();
     }
 
-    m_backend->setWindow(m_window);
-    m_window->installEventFilter(m_backend);
+    if (m_backend) {
+        m_backend->setWindow(m_window);
+        m_window->installEventFilter(m_backend);
+    }
     m_started = true;
     publishStats(false);
     // 交换链与设备信息整个生命周期不变，这里写一次就够，之后 publishStats 带出去。
@@ -1140,7 +1443,49 @@ int PresentationShell::run() {
     if (!m_started) {
         return 1;
     }
-    m_timer->start(0);
+#ifdef Q_OS_IOS
+    // UIKit 必须先从 Qt 的主事件循环取得执行权，才能完成启动、激活和窗口暴露。
+    // processEvents 的同步轮询无法替代这一过程，不能在 start() 中等待首帧。
+    auto *probeTimer = new QTimer(this);
+    probeTimer->setInterval(16);
+    QElapsedTimer clock;
+    clock.start();
+    connect(probeTimer, &QTimer::timeout, this, [this, probeTimer, clock] {
+        if (m_stopped) {
+            probeTimer->stop();
+            return;
+        }
+        const bool ready = QGuiApplication::applicationState() == Qt::ApplicationActive &&
+                           m_window->isVisible() && m_window->isExposed() &&
+                           m_window->visibility() != QWindow::Minimized;
+        const auto result = m_startupProbe.update(clock.elapsed(), ready, m_presentedFrames,
+                                                  m_failed || m_outOfDateCount > 200);
+        using Result = RhineRender::PresentationStartupProbe::Result;
+        if (result == Result::Passed || result == Result::Failed) {
+            probeTimer->stop();
+            probeTimer->deleteLater();
+            if (result == Result::Failed) {
+                m_failed = true;
+                m_error = QStringLiteral("呈现层自检失败：前台窗口就绪后只上屏 %1 帧"
+                                         "（acquire 超时 %2 次、OutOfDate %3 次、重建 %4 次）")
+                              .arg(m_presentedFrames)
+                              .arg(m_acquireTimeoutCount)
+                              .arg(m_outOfDateCount)
+                              .arg(m_recreateStreak);
+                emit startupFailed();
+            } else {
+                qInfo() << "FG: iOS 呈现层首帧自检通过";
+            }
+            return;
+        }
+        if (result == Result::Running) {
+            m_forcePresent = true;
+            scheduleNext();
+        }
+    });
+    probeTimer->start();
+#endif
+    scheduleNext();
     return 0;
 }
 
@@ -1158,8 +1503,10 @@ QVariantMap PresentationShell::renderState() const {
             {"presented", qulonglong(m_presentedFrames)},
             {"interpolated", qulonglong(m_interpolatedFrames)},
             {"timerActive", m_timer && m_timer->isActive()},
-#ifdef Q_OS_MACOS
-            {"renderer", m_backend->renderTelemetry.snapshot()},
+            {"graphicsDevice", m_rhi != nullptr},
+            {"nativeStaticImage", m_suspended && !m_rhi},
+#ifdef Q_OS_DARWIN
+            {"renderer", m_backend ? m_backend->renderTelemetry.snapshot() : QVariantMap{}},
 #endif
             {"windowDpr", m_window ? m_window->devicePixelRatio() : 0.0},
             {"sceneDpr", sceneWindow() ? sceneWindow()->effectiveDevicePixelRatio() : 0.0},
@@ -1196,7 +1543,9 @@ QImage PresentationShell::grabFrame(bool interpolated) {
     }
     // 读回目标为 RGBA8，交换链可能是 BGRA8，不能复用两者的 render pass 管线。
     releaseSwapchainResources();
-    auto base = interpolated && m_fg && !m_fg->lastFrameReset() ? m_fg->output() : m_host->sceneTexture();
+    auto base = m_suspended ? m_host->overlayTexture()
+                            : (interpolated && m_fg && !m_fg->lastFrameReset() ? m_fg->output()
+                                                                               : m_host->sceneTexture());
     const bool composed = composite(commands, base, m_host->overlayTexture(), 0, target.get());
     QRhiReadbackResult result;
     auto updates = m_rhi->nextResourceUpdateBatch();

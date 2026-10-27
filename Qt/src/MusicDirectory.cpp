@@ -5,6 +5,43 @@
 #include <algorithm>
 #include <cmath>
 
+/** 详情与唱片资料库共享同一显示顺序，原始曲目和分页 ID 保持来源原序。 */
+QJsonArray MusicDirectory::orderedSongs() const {
+    if (cachedSongs != songs || cachedSortField != sortField) {
+        cachedSongs = songs;
+        cachedSortField = sortField;
+        sortedSongs = {};
+        for (const auto position : MusicData::sortOrder(songs, sortField)) {
+            sortedSongs.append(songs.at(position));
+        }
+    }
+    return sortedSongs;
+}
+
+/** 变更排序或补页时保留选中歌曲及物理槽位，避免索引变化选中另一首歌。 */
+void MusicDirectory::updateSongs(QJsonArray values, QString field) {
+    const auto selected = orderedSongs().at(index).toObject()["id"].toString();
+    const auto cell = (index + anchor) % 40;
+    songs = values;
+    sortField = field;
+    const auto position = MusicData::indexOfId(orderedSongs(), selected);
+    index = position >= 0 ? position : std::clamp(index, 0, std::max(0, int(songs.size()) - 1));
+    page = index / 40 * 40;
+    anchor = (cell - index % 40 + 40) % 40;
+}
+
+void MusicLibrary::setDirectorySort(QString field) {
+    if (!directory || directory->item["kind"] != "playlist" ||
+        !QStringList{"none", "title", "album", "artist"}.contains(field)) {
+        return;
+    }
+    directory->updateSongs(directory->songs, field);
+    if (directoryInfo) {
+        tracks = directory->orderedSongs();
+    }
+    changed();
+}
+
 /** 先建立可返回的目录状态，再加载内容；目录关闭或被替换后丢弃旧响应。 */
 void MusicLibrary::enterDirectory(QJsonObject value) {
     if (value.isEmpty()) {
@@ -223,9 +260,8 @@ void MusicLibrary::observeDirectory(int physical) {
     }
     // 拖动跨越槽位边界时继续逻辑索引，并复用分页入口。
     const auto previousCell = (folder->index + folder->anchor) % 40;
-    const auto movement = lane == previousCell / 8
-                              ? (row - previousCell % 8 + 12) % 8 - 4
-                              : (lane * 8 + row - previousCell + 60) % 40 - 20;
+    const auto movement = lane == previousCell / 8 ? (row - previousCell % 8 + 12) % 8 - 4
+                                                   : (lane * 8 + row - previousCell + 60) % 40 - 20;
     if (movement != 0) {
         const auto target = folder->index + movement;
         const auto count = int(folder->songs.size());
@@ -242,7 +278,7 @@ void MusicLibrary::observeDirectory(int physical) {
             // 选中槽位后不再通知
             folder->index = index;
             folder->page = index / 40 * 40;
-            choose(folder->songs.at(index).toObject());
+            choose(folder->orderedSongs().at(index).toObject());
         }
     }
 }
@@ -261,7 +297,7 @@ void MusicLibrary::selectDirectory(int index, QString mode, QString axis, int di
         axis.isEmpty() ? QJsonObject{} : QJsonObject{{"axis", axis}, {"direction", direction}};
     emit selectionRequested(physical, navigation);
     selectedPhysical = physical;
-    choose(directory->songs.at(index).toObject(), false, mode == "detail");
+    choose(directory->orderedSongs().at(index).toObject(), false, mode == "detail");
     emit modeRequested(mode);
     changed();
 }
@@ -305,7 +341,9 @@ void MusicLibrary::loadDirectoryPage(std::optional<int> selectAfter) {
                 changed();
                 return;
             }
-            folder->songs = MusicData::unique(folder->songs, MusicData::ordered(ids, result.value.toArray()));
+            folder->updateSongs(
+                MusicData::unique(folder->songs, MusicData::ordered(ids, result.value.toArray())),
+                folder->sortField);
             folder->cursor += ids.size();
             if (selectAfter && *selectAfter >= 0 && *selectAfter < folder->songs.size()) {
                 selectDirectory(*selectAfter);
@@ -333,7 +371,7 @@ void MusicLibrary::showDirectoryInfo() {
         loadSubscriptionStatus(current);
     }
     detailLoading = false;
-    tracks = directory->songs;
+    tracks = directory->orderedSongs();
     trackIDs = directory->ids;
     coverImage.clear();
     coverKey.clear();
@@ -407,7 +445,7 @@ void MusicLibrary::followPlayback(QJsonObject value) {
                               ? selectedPhysical
                               : frame["selected"].toInt(physicalSlots[selectedLane].value(0, -1));
     auto folder = directory;
-    auto index = folder ? MusicData::indexOfId(folder->songs, value["id"].toString()) : -1;
+    auto index = folder ? MusicData::indexOfId(folder->orderedSongs(), value["id"].toString()) : -1;
     if (index < 0) {
         ++m_directoryGeneration;
         directoryLoading = false;
@@ -435,7 +473,11 @@ void MusicLibrary::followPlayback(QJsonObject value) {
     if (index < 0 || index >= folder->songs.size()) {
         return;
     }
-    folder->songs.replace(index, value);
+    auto songs = folder->songs;
+    const auto rawIndex = MusicData::indexOfId(songs, value["id"].toString());
+    songs.replace(rawIndex, value);
+    folder->updateSongs(songs, folder->sortField);
+    index = MusicData::indexOfId(folder->orderedSongs(), value["id"].toString());
     const auto cell = (index + folder->anchor) % 40;
     const auto target = physicalSlots[cell / 8].value(cell % 8, -1);
     selectDirectory(index, "detail", target == physical ? "row" : "", target == physical ? 8 : 1);

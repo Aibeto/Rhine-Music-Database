@@ -103,6 +103,7 @@ function prepareResources() {
         'qq.cjs',
         'kugou.cjs',
         'lyrics-format.cjs',
+        'lyrics-text.cjs',
         'lyrics-source.json',
         'LyricsKit-LICENSE',
         'package.json',
@@ -465,8 +466,8 @@ function deployLinuxRuntime(qt, app, binary) {
         recursive: true,
     });
     const qtLibraries = linuxQtLibraryDirectory(binary);
-    // 只按依赖闭包收集 Qt 库；系统 Qt 目录里的 WebEngine、Widgets 等与面板无关。
-    const sources = [binary];
+    // 两个进程分别进入依赖闭包，后台托盘所需的 Widgets 也必须随包交付。
+    const sources = [binary, path.join(path.dirname(binary), 'RhinePlaybackService')];
     const pluginSource = linuxQtQuery(qt, 'QT_INSTALL_PLUGINS');
     // Wayland 平台插件依赖 shell 集成与装饰插件，必须整组跟随部署。
     for (const folder of [
@@ -679,7 +680,7 @@ function sharedObjects(directory) {
 
 /**
  * 写入 AppImage 根目录的入口文件
- * AppRun 只补运行环境变量并转交参数，程序自身仍按 AppDir 前缀查找资源。
+ * 普通启动由服务维持挂载，带参数的命令仍交给 GUI；资源继续按 AppDir 前缀查找。
  */
 function prepareLinuxAppDir(app) {
     const desktop = 'rhine-music-database.desktop';
@@ -707,16 +708,18 @@ function prepareLinuxAppDir(app) {
         appRun,
         [
             '#!/bin/sh',
-            '# AppImage 入口：只补运行环境，参数原样转交。',
+            '# AppImage 入口：服务维持挂载，测试与工具参数原样转交。',
             'set -eu',
             'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)',
             'export LD_LIBRARY_PATH="$here/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
             'export QT_PLUGIN_PATH="$here/usr/plugins"',
             'export QML_IMPORT_PATH="$here/usr/qml"',
             'export QT_QPA_PLATFORM_PLUGIN_PATH="$here/usr/plugins/platforms"',
-            'exit_code=0',
-            '"$here/usr/bin/RhineMusicDatabase" "$@" || exit_code=$?',
-            'exit "$exit_code"',
+            '# 无参数启动由服务维持 AppImage 挂载，GUI 退出后音源和 Node 仍可从包内读取。',
+            'if [ "$#" -eq 0 ]; then',
+            '    exec "$here/usr/bin/RhinePlaybackService" --resources "$here/usr/bin/resources" --gui "$here/usr/bin/RhineMusicDatabase" --show-interface',
+            'fi',
+            'exec "$here/usr/bin/RhineMusicDatabase" "$@"',
             '',
         ].join('\n'),
     );
@@ -746,9 +749,17 @@ function deployApp(qt, config, existingBundle = '') {
             recursive: true,
         });
         fs.copyFileSync('output/qt-build/RhineMusicDatabase.exe', path.join(app, 'RHINE MUSIC DATABASE.exe'));
+        fs.copyFileSync(
+            'output/qt-build/RhinePlaybackService.exe',
+            path.join(app, 'RhinePlaybackService.exe'),
+        );
     }
 
     fs.mkdirSync(resources, { recursive: true });
+    if (process.platform === 'darwin') {
+        // 清理旧布局的生成 helper，避免同一个包同时包含两种应用身份。
+        fs.rmSync(path.join(app, 'Contents/MacOS/RhinePlaybackService'), { force: true });
+    }
     if (mac) {
         fs.mkdirSync('output/qt-icon', {
             recursive: true,
@@ -788,6 +799,11 @@ function deployApp(qt, config, existingBundle = '') {
             app,
             '-qmldir=' + path.join(root, 'Qt/qml'),
             '-always-overwrite',
+            '-executable=' +
+                path.join(
+                    app,
+                    'Contents/Helpers/RhinePlaybackService.app/Contents/MacOS/RhinePlaybackService',
+                ),
             '-no-plugins',
         ]);
         fs.writeFileSync(

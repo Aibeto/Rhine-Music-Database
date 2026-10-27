@@ -1,34 +1,18 @@
 #include "DesktopTray.h"
+#include "AppStorage.h"
+#include "TrayIcon.h"
 #include <QAction>
 #include <QApplication>
 #include <QCloseEvent>
 #include <QCursor>
-#include <QPainter>
 #include <QWindow>
 
 namespace {
-QIcon trayIcon() {
-#ifdef Q_OS_MACOS
-    // 菜单栏图标
-    QPixmap image(44, 44);
-    image.fill(Qt::transparent);
-    QPainter painter(&image);
-    painter.setRenderHint(QPainter::Antialiasing);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(Qt::black);
-    painter.drawRoundedRect(QRectF(23, 7, 4, 26), 1, 1);
-    painter.drawEllipse(QRectF(11, 26, 16, 11));
-    painter.drawRoundedRect(QRectF(23, 7, 12, 6), 1, 1);
-    painter.end();
-    image.setDevicePixelRatio(2);
-    QIcon icon(image);
-    icon.setIsMask(true);
-    return icon;
-#else
-    return QGuiApplication::windowIcon();
-#endif
+// 未保存过关闭行为时按退出播放器处理；只有显式选择托盘才隐藏窗口。
+bool closesToTray() {
+    return AppStorage::settings().value("panel/close-behavior").toString() == QLatin1String("tray");
 }
-}
+} // namespace
 
 /**
  * 建立驻留图标与退出菜单
@@ -36,7 +20,7 @@ QIcon trayIcon() {
 DesktopTray::DesktopTray(QWindow *window, QObject *parent) : QObject(parent), m_window(window) {
     m_icon.setObjectName("desktopTrayIcon");
     m_icon.setParent(this);
-    m_icon.setIcon(trayIcon());
+    m_icon.setIcon(rhineTrayIcon());
     m_icon.setToolTip(QGuiApplication::applicationDisplayName());
     auto quit = m_menu.addAction(QStringLiteral("退出"));
     connect(quit, &QAction::triggered, this, &DesktopTray::quitApplication);
@@ -67,12 +51,13 @@ bool DesktopTray::eventFilter(QObject *watched, QEvent *event) {
         m_quitting = true;
     }
     if (watched == m_window && event->type() == QEvent::Close && !m_quitting && !qApp->isSavingSession()) {
-        if (QSystemTrayIcon::isSystemTrayAvailable()) {
+        if (closesToTray() && QSystemTrayIcon::isSystemTrayAvailable()) {
             QGuiApplication::setQuitOnLastWindowClosed(false);
             static_cast<QCloseEvent *>(event)->ignore();
             m_window->hide();
             return true;
         }
+        // 关闭即退出：放行关闭事件，让 Qt 在最后一个窗口关闭后结束进程。
         QGuiApplication::setQuitOnLastWindowClosed(true);
     }
     return QObject::eventFilter(watched, event);

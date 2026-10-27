@@ -8,6 +8,14 @@
 #include "Hud.h"
 #include "LinuxGraphics.h"
 #include "RhiScene.h"
+#ifndef Q_OS_IOS
+#include "EngineHolder.h"
+#include "PlaybackConnection.h"
+#include "PlaybackSessionWindow.h"
+#endif
+#ifdef Q_OS_MACOS
+#include "InterfaceWindowMac.h"
+#endif
 #ifdef Q_OS_IOS
 #include "IOSWindow.h"
 #endif
@@ -31,7 +39,11 @@
 #include <QStandardPaths>
 #include <QTimer>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#ifndef Q_OS_IOS
+#include <memory>
+#endif
 /* Qt 的 Vulkan 类型只在「Qt 带 Vulkan 特性」且「应用侧能看到 vulkan.h」时声明：
  *   qvulkaninstance.h:  #if QT_CONFIG(vulkan) || defined(Q_QDOC)
  *                      #if __has_include(<vulkan/vulkan.h>) || defined(Q_QDOC)
@@ -47,7 +59,9 @@
 #define RHINE_HAVE_VULKAN_TYPES 0
 #endif
 int makeIcon(const QString &directory);
-int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, FrameProfiler &profiler);
+#ifndef Q_OS_IOS
+bool runPlaybackServiceChecks(const QString &resources, const QString &executable, const QString &gui);
+#endif
 #ifdef Q_OS_WIN
 #include "WindowsTaskbar.h"
 void initializeWindowsGraphics();
@@ -118,9 +132,7 @@ static void selectGraphicsBackend() {
     if (!qEnvironmentVariableIsEmpty("QSG_RHI_BACKEND")) {
         const auto overrideBackend = qEnvironmentVariable("QSG_RHI_BACKEND").trimmed().toLower();
 #ifdef Q_OS_DARWIN
-#ifdef Q_OS_MACOS
         RhineGraphics::setActiveBackend(overrideBackend);
-#endif
         return;
 #else
         if (applyNamedBackend(overrideBackend)) {
@@ -131,9 +143,7 @@ static void selectGraphicsBackend() {
 #endif
     }
 #if defined(Q_OS_DARWIN)
-#ifdef Q_OS_MACOS
     RhineGraphics::setActiveBackend(QStringLiteral("metal"));
-#endif
     // Qt 在 macOS 只提供 Metal，Vulkan 需经 MoltenVK 转换层，性能低于原生 Metal。
     const auto requested = qEnvironmentVariable("RHINE_GRAPHICS").toLower();
     if (!requested.isEmpty() && requested != "auto" && requested != "metal") {
@@ -186,11 +196,11 @@ static void selectGraphicsBackend() {
 /**
  * 垂直同步：关闭时把交换链的 swapInterval 设为 0，允许帧率超过屏幕刷新率。
  * 必须在创建任何 QQuickWindow 之前写入默认格式，Qt 的 RHI 交换链会据此选择呈现模式。
- * macOS 的 Metal 呈现由系统合成器按刷新率回收 drawable，该开关没有实际效果，
+ * Apple 平台的 Metal 呈现由系统合成器按刷新率回收 drawable，该开关没有实际效果，
  * 因此固定按关闭写入，设置页也不再提供这一项。
  */
 static void applyVSyncSetting() {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     auto format = QSurfaceFormat::defaultFormat();
     format.setSwapInterval(0);
     QSurfaceFormat::setDefaultFormat(format);
@@ -254,8 +264,8 @@ static void applyFrameGenerationSetting() {
     if (qEnvironmentVariableIsEmpty("RHINE_FG")) {
         qputenv("RHINE_FG", graphicsSettings().value("panel/fg", "off").toString().toUtf8());
     }
-#ifdef Q_OS_MACOS
-    // macOS 的窗口合成器始终按刷新率回收 drawable，垂直同步开关没有实际效果。
+#ifdef Q_OS_DARWIN
+    // Apple 的窗口合成器始终按刷新率回收 drawable，垂直同步开关没有实际效果。
     // 固定关闭并在设置页隐藏；显式 RHINE_FG_VSYNC 仍留给排障对照。
     if (qEnvironmentVariableIsEmpty("RHINE_FG_VSYNC")) {
         qputenv("RHINE_FG_VSYNC", "off");
@@ -286,8 +296,6 @@ static void applyRenderScaleSetting() {
  * 建立应用身份、Qt 引擎和原生窗口。
  * 离线测试与正式播放沿用同一入口，资源只从独立应用读取。
  */
-int runPresentationChecks(PresentationShell &shell, Engine &backend, const QString &directory);
-
 int main(int argc, char **argv) {
 #ifdef Q_OS_WIN
     const auto storageError = AppStorage::initializePortable(AppStorage::executableDirectory());
@@ -303,8 +311,7 @@ int main(int argc, char **argv) {
     }
     // Windows GUI 子系统默认可能将 Qt 日志送到调试器；测试必须写入 CTest 的标准错误管道。
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--ui-self-test") == 0 ||
-            std::strcmp(argv[i], "--presentation-check") == 0) {
+        if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--playback-gui-test") == 0) {
             qInstallMessageHandler(
                 [](QtMsgType type, const QMessageLogContext &context, const QString &message) {
                     const auto text = qFormatLogMessage(type, context, message).toUtf8();
@@ -343,6 +350,17 @@ int main(int argc, char **argv) {
     application.setWindowIcon(QIcon(":/icons/icon-256.png"));
     QCoreApplication::setApplicationVersion(AppUpdater::currentVersion());
     QGuiApplication::setApplicationDisplayName(AppIdentity::DisplayName);
+    const auto args = application.arguments();
+#ifndef Q_OS_IOS
+    // 界面回归使用隔离的用户目录；必须在读取任何偏好之前建立。
+    const bool playbackGuiTest = args.contains("--playback-gui-test");
+    if (playbackGuiTest) {
+        const auto directory = args.value(args.indexOf("--playback-gui-test") + 1);
+        if (directory.isEmpty() || !AppStorage::initializePortable(directory).isEmpty()) {
+            return 1;
+        }
+    }
+#endif
     // 必须在创建任何 QQuickWindow 之前确定后端；组织名先落位，配置路径才能落到应用数据目录。
     selectGraphicsBackend();
     applyVSyncSetting();
@@ -357,7 +375,6 @@ int main(int argc, char **argv) {
 #else
     RhineFg::publishCapability(false, false, false, QStringLiteral("此构建未编入 Vulkan 帧生成"));
 #endif
-    const auto args = application.arguments();
     if (args.contains("--make-icon")) {
         return makeIcon(args.value(args.indexOf("--make-icon") + 1));
     }
@@ -383,16 +400,25 @@ int main(int argc, char **argv) {
         }
     }
     const bool test = args.contains("--self-test");
-    const bool visual = args.contains("--visual-fixtures");
-    const bool offline = test || visual || args.contains("--ui-self-test") || args.contains("--offline") ||
-                         qEnvironmentVariableIntValue("RHINE_OFFLINE") == 1;
-    Engine backend(root, offline);
+    const bool offline =
+        test || args.contains("--offline") || qEnvironmentVariableIntValue("RHINE_OFFLINE") == 1;
     if (test) {
-        return backend.selfTest();
-    }
-    if (visual) {
-        const int i = args.indexOf("--visual-fixtures");
-        return backend.renderFixtures(args.value(i + 1), args.value(i + 2));
+#ifndef Q_OS_IOS
+#ifdef Q_OS_MACOS
+        if (QGuiApplication::platformName() == "cocoa") {
+            // 无窗口的测试控制器不能占据第二个 Dock 身份或参与被测的调度组。
+            qputenv("QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM", "1");
+            configureTestControllerAsAccessory();
+        }
+#endif
+        const auto service = PlaybackConnection::serviceExecutable();
+        // 进程生命周期回归先于会话回归，使用原始隔离环境。
+        if (!runPlaybackServiceChecks(root, service, application.applicationFilePath())) {
+            return 1;
+        }
+#endif
+        Engine direct(root, offline);
+        return direct.selfTest();
     }
     QString profilePath;
     if (args.contains("--frame-profile")) {
@@ -402,13 +428,65 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    FrameProfiler profiler(&backend, profilePath);
-    QObject::connect(&backend, &Engine::performanceRequested, &profiler, &FrameProfiler::toggleVisible);
-    backend.start();
+    // 性能模式：界面挂在独立播放服务上，窗口可挂起为静态页并释放业务引擎。
+    // 设置页默认开启（面板不存在或不是 off 都视为开启）；关闭后回到单进程路径。
+    const bool serviceMode =
+#ifndef Q_OS_IOS
+        !offline && (playbackGuiTest || AppStorage::settings().value("panel/performance-mode").toString() !=
+                                            QStringLiteral("off"))
+#else
+        false
+#endif
+        ;
+    QQmlApplicationEngine engine;
+    Engine *backend = nullptr;
+    FrameProfiler *profiler = nullptr;
+    std::unique_ptr<Engine> directEngine;
+    std::unique_ptr<FrameProfiler> directProfiler;
+#ifndef Q_OS_IOS
+    std::unique_ptr<PlaybackConnection> playback;
+    std::unique_ptr<EngineHolder> engineHolder;
+    if (serviceMode) {
+        // 性能模式下窗口会隐藏到托盘，界面进程必须比最后一个窗口活得久；
+        // Qt 默认会在最后一个窗口关闭时退出进程，Windows/Linux 上界面进程会因此消失。
+        // 退出只走服务托盘或界面里的显式退出，和单进程路径的 DesktopTray 保持一致。
+        QGuiApplication::setQuitOnLastWindowClosed(false);
+        playback = std::make_unique<PlaybackConnection>();
+        QString error;
+        if (!connectPlaybackService(*playback, root, error)) {
+            qCritical().noquote() << error;
+            return 1;
+        }
+        if (playbackGuiTest && !playback->call("hello")["offlineTest"].toBool()) {
+            qCritical("GUI 回归只允许连接隔离的离线服务");
+            return 1;
+        }
+        const auto attached = playback->call("attach", {{"pid", double(application.applicationPid())}});
+        if (attached["existing"].toBool()) {
+            return 0;
+        }
+        // 界面进程明确退出（非崩溃）即停止播放并结束后台服务；崩溃时 aboutToQuit 不会执行。
+        QObject::connect(&application, &QCoreApplication::aboutToQuit, playback.get(),
+                         [raw = playback.get()] { raw->call("quit"); });
+        engineHolder =
+            std::make_unique<EngineHolder>(root, offline, engine.rootContext(), playback.get(), profilePath);
+        engineHolder->start();
+        backend = engineHolder->engine();
+        profiler = engineHolder->profiler();
+    }
+#endif
+    if (!serviceMode) {
+        directEngine = std::make_unique<Engine>(root, offline);
+        directProfiler = std::make_unique<FrameProfiler>(directEngine.get(), profilePath);
+        QObject::connect(directEngine.get(), &Engine::performanceRequested, directProfiler.get(),
+                         &FrameProfiler::toggleVisible);
+        backend = directEngine.get();
+        profiler = directProfiler.get();
+        backend->start();
+    }
     qmlRegisterType<RhiScene>("Rhine.Native", 1, 0, "RhiScene");
     qmlRegisterType<Hud>("Rhine.Native", 1, 0, "Hud");
     qmlRegisterUncreatableType<Engine>("Rhine.Native", 1, 0, "Engine", "Provided by application");
-    QQmlApplicationEngine engine;
     // 无边框
     if (qEnvironmentVariableIntValue("RHINE_FRAMELESS_PREVIEW") == 1) {
         engine.setInitialProperties({{"windowsFrameless", true}});
@@ -421,12 +499,12 @@ int main(int argc, char **argv) {
     const auto families = QFontDatabase::applicationFontFamilies(fontId);
     engine.rootContext()->setContextProperty("rhineFontFamily",
                                              families.isEmpty() ? QString("sans-serif") : families.first());
-    engine.rootContext()->setContextProperty("rhine", &backend);
-    engine.rootContext()->setContextProperty("profiler", &profiler);
+    engine.rootContext()->setContextProperty("rhine", backend);
+    engine.rootContext()->setContextProperty("profiler", profiler);
     if (!offline && RHINE_RELEASE_BUILD) {
-        QTimer::singleShot(8000, &backend.host, [&backend] {
-            if (backend.host.preference("auto-update") != "off") {
-                backend.host.updater.check();
+        QTimer::singleShot(8000, backend, [backend] {
+            if (backend->host.preference("auto-update") != "off") {
+                backend->host.updater.check();
             }
         });
     }
@@ -434,62 +512,107 @@ int main(int argc, char **argv) {
     QObject::connect(
         &engine, &QQmlApplicationEngine::objectCreationFailed, &application,
         [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
-    // 桌面 Metal 与 Vulkan 复用受控呈现，插值能力独立于呈现路径。
+    // Apple Metal 与桌面 Vulkan 复用受控呈现，插值能力独立于呈现路径。
     // RHINE_FG_LAYER=off 可强制使用 Qt Quick 默认窗口；启动失败同样回退。
-    // 默认自检保留原窗口入口，--presentation-check 专门验证受控呈现。
     const bool fgLayerDisabled =
-        qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0
-#ifdef Q_OS_IOS
-        || true
-#endif
-        ;
-    const bool fgCandidate = !test && !visual && !args.contains("--ui-self-test") &&
-                             !args.contains("--capture") && !fgLayerDisabled &&
+        qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0;
+    // 离屏与最小平台没有原生窗口系统，呈现层无法创建交换链；必须直接走 Qt Quick 默认路径。
+    // 否则无显示环境（CI、--playback-gui-test）会在接管 Metal 窗口时崩溃。
+    const auto platformName = QGuiApplication::platformName();
+    const bool hasNativeWindowSystem =
+        platformName != QStringLiteral("offscreen") && platformName != QStringLiteral("minimal");
+    const bool fgCandidate = !test && !args.contains("--capture") && !fgLayerDisabled &&
+                             hasNativeWindowSystem &&
                              PresentationShell::supportsBackend(RhineGraphics::activeBackend());
+#ifdef Q_OS_WIN
+    // 首次显示窗口前就监听 Explorer 的就绪消息，FG 与默认窗口共用同一个任务栏所有者。
+    WindowsTaskbar taskbar(backend, nullptr, playback.get());
+#endif
     // 排障：接管与否只看这一行。之前出现过"设了 RHINE_FG_LAYER=on 才接管"的怪现象，
     // 把每个输入的实测值打出来，比逐条读代码猜快得多。
     qWarning().noquote() << "FG gate: candidate" << fgCandidate << "layerDisabled" << fgLayerDisabled
-                         << "test" << test << "visual" << visual << "backend"
-                         << RhineGraphics::activeBackend() << "compiledIn" << PresentationShell::compiledIn();
+                         << "test" << test << "backend" << RhineGraphics::activeBackend() << "compiledIn"
+                         << PresentationShell::compiledIn();
     if (fgCandidate) {
         // FG 路径从不调用 QQmlApplicationEngine::load()（Main.qml 不加载，两个离屏层
         // 都是手工用 QQuickRenderControl 建的），而"QML 里的 Qt.quit() 真能退出进程"
         // 正是 load() 内部接的那根线。少了它，Overlay.qml 的 Ctrl+Q 会打出
         // "Signal QQmlEngine::quit() emitted, but no receivers connected to handle it."
         // 然后什么都不发生——快捷键看着触发了，进程却不退。
-        auto shell = std::make_unique<PresentationShell>(engine, backend, RhineGraphics::activeBackend());
+        auto shell = std::make_unique<PresentationShell>(engine, *backend, RhineGraphics::activeBackend());
         // 退出顺序有讲究：先拆呈现层（VkSwapchainKHR / VkSurfaceKHR），再让事件循环退出。
         // 反过来的话窗口先被关闭，驱动 WSI 会对已销毁的 wl_surface 做 roundtrip，
         // 退出时 SIGABRT/SIGSEGV（实测两条都复现过）。Win32 的 HWND、X11 的 Window
         // 是同一类问题，所以这条顺序修在公共路径，不进平台分支。
-        QObject::connect(&engine, &QQmlEngine::quit, shell.get(), [raw = shell.get()]() {
-            raw->shutdown();
-            QCoreApplication::quit();
-        });
-#ifdef Q_OS_MACOS
-        if (args.contains("--presentation-check")) {
-            backend.scene.review("detail");
-            // review 已收束场景动画；HUD 沿用从零开始的实际业务时钟，避免制造未来动画期限。
-            backend.step(0);
-        }
-#endif
+        QObject::connect(&engine, &QQmlEngine::quit, shell.get(), &PresentationShell::requestQuit);
         if (shell->start() && shell->run() == 0) {
-            if (args.contains("--presentation-check")) {
-                const auto directory = args.value(args.indexOf("--presentation-check") + 1);
-                QTimer::singleShot(2500, shell.get(), [&, raw = shell.get(), directory] {
-                    application.exit(runPresentationChecks(*raw, backend, directory));
-                });
+#ifdef Q_OS_IOS
+            configureIOSWindow(shell->window(), backend);
+            // 自检在 UIKit 完成启动后运行；排队回退，确保退出呈现回调后才释放 GPU 资源。
+            QObject::connect(
+                shell.get(), &PresentationShell::startupFailed, &application,
+                [&, raw = shell.get()] {
+                    const auto error = raw->lastError();
+                    qWarning().noquote() << "FG: 呈现层启动失败，回退默认路径：" << error;
+                    raw->shutdown();
+                    raw->window()->hide();
+                    RhineFg::publishInactive(error);
+                    engine.loadFromModule("RhineMusic", "Main");
+                    if (engine.rootObjects().isEmpty()) {
+                        application.exit(1);
+                        return;
+                    }
+                    auto *fallbackWindow = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+                    backend->setWindow(fallbackWindow);
+                    fallbackWindow->installEventFilter(backend);
+                    configureIOSWindow(fallbackWindow, backend);
+                    profiler->attach(fallbackWindow);
+                    QObject::connect(
+                        fallbackWindow, &QQuickWindow::sceneGraphInvalidated, backend,
+                        [backend] { backend->recordResourceRelease(); }, Qt::DirectConnection);
+                },
+                Qt::QueuedConnection);
+#endif
+            // 性能模式下窗口与服务共享生命周期：关窗只隐藏，恢复与遮挡由服务驱动。
+#ifndef Q_OS_IOS
+            std::unique_ptr<PlaybackSessionWindow> session;
+            if (serviceMode) {
+                session = std::make_unique<PlaybackSessionWindow>(playback.get(), shell->window(),
+                                                                  shell.get(), engineHolder.get());
+#ifdef Q_OS_MACOS
+                // 业务窗口属于自己的桌面和调度组，不能继承呈现层的跨桌面行为。
+                bindInterfaceToDesktop(shell->window());
+#endif
+                // 进入原生事件循环后才报告就绪，避免 AppKit 尚未完成启动时收到激活命令。
+                QTimer::singleShot(0, playback.get(), [&playback] { playback->call("interface.ready"); });
             }
-            // FG 使用独立的 QWindow，也必须保留任务栏控制和关闭后驻留托盘的行为。
+            if (playbackGuiTest) {
+                qInfo("PLAYBACK_GUI_READY");
+                if (args.contains("--playback-test-quit")) {
+                    QTimer::singleShot(700, &application, &QCoreApplication::quit);
+                }
+            }
+#endif
+            // FG 使用独立的 QWindow，也必须保留任务栏控制；托盘只在单进程路径由界面持有。
 #ifdef Q_OS_WIN
-            WindowsTaskbar taskbar(&backend, shell->window());
+            taskbar.bindWindow(shell->window());
 #endif
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-            DesktopTray tray(shell->window(), &application);
+            std::unique_ptr<DesktopTray> tray;
+            if (!serviceMode) {
+                tray = std::make_unique<DesktopTray>(shell->window(), &application);
+            }
 #endif
             QObject::connect(&application, &QCoreApplication::aboutToQuit, shell.get(),
                              [raw = shell.get()] { raw->shutdown(); });
-            return application.exec();
+            const auto exitCode = application.exec();
+#ifndef Q_OS_IOS
+            if (serviceMode) {
+                // aboutToQuit 已原子保存界面状态；进程退出由系统回收图形上下文。
+                std::_Exit(exitCode);
+            }
+#endif
+            return exitCode;
         }
         qWarning().noquote() << "FG: 呈现层启动失败，回退默认路径：" << shell->lastError();
         RhineFg::publishInactive(shell->lastError());
@@ -508,27 +631,41 @@ int main(int argc, char **argv) {
     }
     graphics.setPipelineCacheSaveFile(pipelineCache);
     window->setGraphicsConfiguration(graphics);
-    WindowsTaskbar taskbar(&backend, window);
+    taskbar.bindWindow(window);
     window->show();
 #endif
-    backend.setWindow(window);
+    backend->setWindow(window);
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    DesktopTray tray(window, &application);
+    // 性能模式下托盘归后台服务所有；界面只在单进程路径持有驻留入口。
+    std::unique_ptr<DesktopTray> tray;
+    if (!serviceMode) {
+        tray = std::make_unique<DesktopTray>(window, &application);
+    }
 #endif
 #ifdef Q_OS_IOS
-    configureIOSWindow(window, &backend);
+    configureIOSWindow(window, backend);
 #endif
-    window->installEventFilter(&backend);
-    profiler.attach(window);
+    window->installEventFilter(backend);
+    profiler->attach(window);
+#ifndef Q_OS_IOS
+    // 呈现层未能接管时的界面回归入口：进程仍需完成握手并响应测试动作，
+    // 但本平台没有静态页与挂起能力，服务端生命周期验收会跳过窗口部分。
+    if (playbackGuiTest) {
+        qInfo("PLAYBACK_GUI_READY");
+        if (args.contains("--playback-test-quit")) {
+            QTimer::singleShot(700, &application, &QCoreApplication::quit);
+        }
+    }
+#endif
     // 短暂切换窗口继续复用 GPU；隐藏或最小化超过两秒才释放图形设备和可重建缓存。
     auto backgroundRelease = new QTimer(window);
     backgroundRelease->setSingleShot(true);
     backgroundRelease->setInterval(2000);
-    QObject::connect(backgroundRelease, &QTimer::timeout, window, [&backend, window] {
+    QObject::connect(backgroundRelease, &QTimer::timeout, window, [backend, window] {
         if (window->isVisible() && window->visibility() != QWindow::Minimized) {
             return;
         }
-        backend.trimMemory();
+        backend->trimMemory();
         window->setPersistentSceneGraph(false);
         window->setPersistentGraphics(false);
         window->releaseResources();
@@ -544,12 +681,8 @@ int main(int argc, char **argv) {
                          }
                      });
     QObject::connect(
-        window, &QQuickWindow::sceneGraphInvalidated, &backend,
-        [&backend] { backend.recordResourceRelease(); }, Qt::DirectConnection);
-    if (args.contains("--ui-self-test")) {
-        return runUiChecks(backend, qobject_cast<QQuickWindow *>(engine.rootObjects().first()),
-                           args.value(args.indexOf("--ui-self-test") + 1), profiler);
-    }
+        window, &QQuickWindow::sceneGraphInvalidated, backend,
+        [backend] { backend->recordResourceRelease(); }, Qt::DirectConnection);
     if (args.contains("--capture")) {
         const auto index = args.indexOf("--capture");
         const auto path = args.value(index + 1);
@@ -558,27 +691,27 @@ int main(int argc, char **argv) {
         if (path.isEmpty()) {
             return 1;
         }
-        auto poll = new QTimer(&backend);
+        auto poll = new QTimer(backend);
         poll->setInterval(200);
         bool *reviewed = new bool(false);
-        QObject::connect(poll, &QTimer::timeout, &backend, [&, path, captureMode, poll, reviewed] {
-            if (!backend.ready()) {
+        QObject::connect(poll, &QTimer::timeout, backend, [&, path, captureMode, poll, reviewed] {
+            if (!backend->ready()) {
                 return;
             }
             if (!*reviewed) {
                 *reviewed = true;
-                backend.scene.review(captureMode.isEmpty() || captureMode.startsWith("--")
-                                         ? QStringLiteral("archive")
-                                         : captureMode);
+                backend->scene.review(captureMode.isEmpty() || captureMode.startsWith("--")
+                                          ? QStringLiteral("archive")
+                                          : captureMode);
                 return;
             }
-            backend.step(50);
-            if (backend.frame().isEmpty()) {
+            backend->step(50);
+            if (backend->frame().isEmpty()) {
                 return;
             }
             poll->stop();
             delete reviewed;
-            backend.snapshot(path);
+            backend->snapshot(path);
             auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
             if (window) {
                 window->grabWindow().save(path + "/qt-window.png");

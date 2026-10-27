@@ -1,7 +1,15 @@
 // 只检查自维护脚本；上游、依赖和生成文件保留原样。
 export default [
     {
-        ignores: ['node_modules/**', 'output/**', 'vendor/**', 'MusicBridge/upstream/**'],
+        ignores: [
+            'node_modules/**',
+            'output/**',
+            '**/*.app/**',
+            'vendor/**',
+            'third_party/**',
+            'FidelityFX-SDK/**',
+            'MusicBridge/upstream/**',
+        ],
     },
     {
         files: [

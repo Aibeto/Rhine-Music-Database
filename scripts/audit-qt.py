@@ -23,11 +23,23 @@ else:
     resources = app / "resources"
     executable = app / "RHINE MUSIC DATABASE.exe"
 assert executable.is_file()
+if mac:
+    service_app = app / "Contents/Helpers/RhinePlaybackService.app"
+    service = service_app / "Contents/MacOS/RhinePlaybackService"
+    helper_info = plistlib.loads((service_app / "Contents/Info.plist").read_bytes())
+    main_info = plistlib.loads((app / "Contents/Info.plist").read_bytes())
+    assert helper_info.get("LSUIElement") is True, "Playback helper must be a Dock-hidden agent"
+    assert helper_info["CFBundleIdentifier"] != main_info["CFBundleIdentifier"], "Shared application identity"
+    assert not (executable.parent / "RhinePlaybackService").exists(), "Obsolete unbundled helper"
+else:
+    service = executable.parent / ("RhinePlaybackService.exe" if not linux else "RhinePlaybackService")
+assert service.is_file(), "Missing independent playback service"
 for pattern in (
     "diagnose-windows-audio*",
     "windows-audio-snapshot.ps1",
     "AudioRouteProbe*",
     "RhinePlatformRegression*",
+    "RhineDesktopFixture*",
 ):
     assert not list(app.rglob(pattern)), "Local diagnostic or regression tool entered release package"
 assert not re.search(
@@ -72,6 +84,13 @@ if mac:
     assert (
         app / "Contents/Frameworks/QtWidgets.framework/QtWidgets"
     ).is_file(), "Missing bundled desktop tray runtime"
+    service_libraries = subprocess.check_output(["otool", "-L", str(service)], text=True)
+    assert (
+        "QtQuick" not in service_libraries and "QtQml" not in service_libraries
+    ), "Renderer linked into playback service"
+    assert not any(
+        "/Users/" in line or "/opt/homebrew/" in line for line in service_libraries.splitlines()[1:]
+    ), "Undeployed playback dependency"
     assert "libswift" not in libraries.lower(), "Swift runtime dependency found"
     assert not any(p.suffix == ".swift" for p in app.rglob("*") if p.is_file())
     assert not any(p.name in {"node_modules", ".git", ".DS_Store"} for p in app.iterdir())
@@ -123,11 +142,17 @@ elif linux:
             if "=> /" not in line:
                 continue
             name, target = line.split("=>", 1)[0].strip(), line.split("=>")[1].split(" (")[0].strip()
-            if name.startswith("libQt6") and pathlib.Path(target).parent != bundled.resolve():
+            if name.startswith("libQt6") and pathlib.Path(target).resolve().parent != bundled.resolve():
                 outside.append(name)
         return missing, outside
 
     libraries = subprocess.run(["ldd", str(executable)], text=True, capture_output=True, env=probe).stdout
+    service_libraries = subprocess.run(
+        ["ldd", str(service)], text=True, capture_output=True, env=probe
+    ).stdout
+    assert "libQt6Quick" not in service_libraries and "libQt6Qml" not in service_libraries
+    missing, outside = resolve(service)
+    assert not missing and not outside, "Undeployed playback dependency: " + str(missing + outside)
     assert "libQt6Core" in libraries and "libQt6Quick" in libraries, "Missing Qt runtime"
     assert "not found" not in libraries, "Undeployed library dependency"
     assert (bundled / "libQt6Core.so.6").is_file(), "Qt runtime is not bundled"

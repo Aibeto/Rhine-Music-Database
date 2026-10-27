@@ -12,6 +12,7 @@ namespace {
 QJsonObject directoryState(const MusicDirectory &folder) {
     return {{"item", folder.item},
             {"songs", folder.songs},
+            {"sortField", folder.sortField},
             {"ids", folder.ids},
             {"albums", folder.albums},
             {"cursor", folder.cursor},
@@ -27,44 +28,6 @@ QJsonObject directoryState(const MusicDirectory &folder) {
 int nonnegative(const QJsonValue &value) {
     return std::max(0, value.toInt());
 }
-}
-
-QJsonObject MusicPlayer::sessionState() const {
-    const auto live = m_host->mediaState();
-    const auto position =
-        m_resumePosition.value_or(live.value("position", state["position"].toVariant()).toDouble());
-    const bool requested = m_resumePosition
-                               ? !m_resumePaused
-                               : loading || live.value("requested", state["playing"].toVariant()).toBool();
-    return {{"current", current},
-            {"queue", queue},
-            {"index", index},
-            {"mode", mode},
-            {"position", position},
-            {"requested", requested},
-            {"preview", previewRequested}};
-}
-
-void MusicPlayer::restoreSessionState(const QJsonObject &saved) {
-    const auto position = saved["position"].toDouble(-1);
-    if (!std::isfinite(position) || position < 0 || position > 1e12) {
-        return;
-    }
-    const auto savedMode = saved["mode"].toString();
-    mode = QStringList{"all", "one", "off", "shuffle"}.contains(savedMode) ? savedMode : "all";
-    const auto track = saved["current"].toObject();
-    auto source = saved["queue"].toArray();
-    if (track.isEmpty()) {
-        queue = source;
-        index = -1;
-        emit changed();
-        return;
-    }
-    if (track["kind"] != "song" || track["provider"].toString(m_api->provider) != m_api->provider) {
-        return;
-    }
-    // 用歌曲身份重建索引，损坏的旧索引不能使下一首跳到无关位置。
-    play(track, source, std::nullopt, saved["preview"].toBool(), saved);
 }
 
 QJsonObject MusicLibrary::sessionState() const {
@@ -155,6 +118,10 @@ bool MusicLibrary::restoreSessionState(const QJsonObject &saved) {
         folder->parent = directory;
         folder->item = value["item"].toObject();
         folder->songs = value["songs"].toArray();
+        const auto sortField = value["sortField"].toString("none");
+        if (QStringList{"none", "title", "album", "artist"}.contains(sortField)) {
+            folder->sortField = sortField;
+        }
         folder->ids = value["ids"].toArray();
         folder->albums = value["albums"].toArray();
         folder->cursor = std::clamp(value["cursor"].toInt(), 0, int(folder->ids.size()));
@@ -271,7 +238,9 @@ bool NativeApplication::restoreSessionState(const QJsonObject &saved) {
     const auto selected = std::clamp(view["selected"].toInt(), 0, 39);
     m_scene->select(selected);
     m_scene->setMode(view["mode"] == "detail" && !music.current.isEmpty() ? "detail" : "archive");
-    music.player.restoreSessionState(saved["player"].toObject());
+    if (!m_host->playbackConnection()) {
+        music.player.restoreSessionState(saved["player"].toObject());
+    }
     return true;
 }
 

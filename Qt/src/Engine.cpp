@@ -32,18 +32,18 @@ QPointF haltonJitter(int phase) {
 } // namespace
 bool runNativeHostChecks(const QString &root);
 bool runNativeMusicChecks(const QString &root);
-bool runGpuReferenceCheck(const QImage &expected, const QImage &actual);
 
 /** 建立纯原生音乐、HUD 和场景状态；Qt 定时器只在输入或动画尚未收束时运行。 */
-Engine::Engine(QString path, bool offline, QObject *parent)
-    : QObject(parent), host(path, offline), scene(path), m_glyphs(path) {
+Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *connection,
+               QJsonObject resumeState)
+    : QObject(parent), host(path, offline, nullptr, false, connection), scene(path), m_glyphs(path) {
     // FSR3 抖动默认关闭；环境变量在进程启动时读取一次，运行期不再变化。
     m_jitterEnabled = qEnvironmentVariableIntValue("RHINE_JITTER") == 1;
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
     app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
     connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
     connect(&app->hud, &NativeHud::localImportRequested, this, &Engine::localImportRequested);
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     renderConfiguration.initialize([this](const QString &key) { return host.preference(key); });
     connect(&host, &Host::preferenceChanged, this, [this](const QString &key, const QString &value) {
         if (renderConfiguration.applyPreference(key, value)) {
@@ -53,7 +53,7 @@ Engine::Engine(QString path, bool offline, QObject *parent)
         }
     });
 #endif
-    app->initialize();
+    m_restoredSession = app->initialize(resumeState);
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this,
             [this] { app->saveSession(); });
     connect(&host, &Host::invalidated, this, [this] { wake(false); });
@@ -107,6 +107,18 @@ Engine::~Engine() {
 }
 bool Engine::ready() const {
     return scene.ready();
+}
+double Engine::animationTime() const {
+    return m_animationTime;
+}
+bool Engine::restoredSession() const {
+    return m_restoredSession;
+}
+void Engine::restorePresentation(const NativeScene::ResumeState &state, double time) {
+    if (m_restoredSession) {
+        scene.restoreResumeState(state);
+        m_animationTime = time;
+    }
 }
 namespace {
 // 鼠标滚轮一格的距离按设置页与歌词的行高换算，约一行内容；触控板保留系统给出的连续像素距离。
@@ -272,7 +284,7 @@ void Engine::setVisible(bool value) {
         m_sleeping = true;
     } else {
         host.restoreMemoryBudget();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         if (renderConfiguration.snapshot().temporal()) {
             resetTemporalState();
         }
@@ -633,7 +645,7 @@ void Engine::step(double time) {
     // 相位只在真正产生帧的 step 里推进，按 8 帧循环。
     // 但时间性抗锯齿（FSR3/TAA）本身就是靠相位差累积历史，没有抖动它们只会反复混合
     // 同一张图、等于白做，所以这两者开启时无条件打开。AA 模式每帧读环境变量，切换免重启。
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     const bool metalFxTemporal = m_frame.value("mode") != "boot" && renderConfiguration.snapshot().temporal();
     if (!metalFxTemporal) {
         m_temporalFramesRemaining = 0;
@@ -773,7 +785,7 @@ void Engine::snapshot(QString path) {
     }
     QDir().mkpath(path);
     const QSize size(1920, 1080);
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     const auto settings = renderConfiguration.snapshot();
     auto metal =
         renderReference(root(), m_frame, m_current, cover(), size, scene.drawBuffers, nullptr, &settings);
@@ -830,61 +842,9 @@ int Engine::selfTest() {
             ok &= hit && hit->lane == cell["lane"].toInt() && hit->row == cell["row"].toInt();
         }
     }
-    if (qEnvironmentVariableIntValue("RHINE_GPU_TEST") == 1) {
-        const QSize size(960, 540);
-        const auto actual =
-            renderReference(root(), m_frame, m_current, host.image(m_cover), size, scene.drawBuffers);
-        const auto original =
-            renderReference(root(), legacy, m_current, host.image(m_cover), size, scene.drawBuffers);
-        ok &= runGpuReferenceCheck(original, actual);
-        if (!ok) {
-            qCritical() << "Native GPU frame differs from original fixture";
-        }
-    }
     qInfo() << "Qt native scene, Host, music, playback and offline package checks:"
             << (ok ? "passed" : "FAILED");
     return ok ? 0 : 1;
-}
-
-int Engine::renderFixtures(QString source, QString output) {
-    for (const auto &name : QDir(source).entryList({"*.json"}, QDir::Files, QDir::Name)) {
-        QFile input(source + "/" + name);
-        if (!input.open(QIODevice::ReadOnly)) {
-            return 1;
-        }
-        const auto fixture = QJsonDocument::fromJson(input.readAll()).object();
-        const auto store = fixture["store"].toObject();
-        const auto settings = fixture["hud"].toObject();
-        app->music.current = store["current"].toObject();
-        const auto lists = store["lists"].toArray();
-        const auto totals = store["totals"].toArray();
-        const auto more = store["hasMore"].toArray();
-        for (int lane = 0; lane < 5; ++lane) {
-            app->music.lists[lane] = lists.at(lane).toArray();
-            app->music.totals[lane] = totals.at(lane).toInt();
-            app->music.hasMore[lane] = more.at(lane).toBool();
-        }
-        app->music.keyword = store["keyword"].toString();
-        app->music.status = store["status"].toString();
-        app->hud.modal = settings["modal"].toString();
-        app->hud.dark = settings["dark"].toBool();
-        app->hud.themeMode = settings["themeMode"].toString();
-        app->hud.reduced = settings["reduced"].toBool();
-        app->hud.motion.set(true, 0, true);
-        m_frame = fixture["frame"].toObject();
-        app->hud.draw(m_frame, 1920, 50);
-        m_commands = app->hud.commands;
-        m_current = app->music.current;
-        m_cover.clear();
-        m_coverImage = QImage();
-        const auto folder = output + "/" + fixture["name"].toString();
-        snapshot(folder);
-        QFile hitsFile(folder + "/qt-hits.json");
-        if (hitsFile.open(QIODevice::WriteOnly)) {
-            hitsFile.write(QJsonDocument(app->hud.hits).toJson());
-        }
-    }
-    return failure.isEmpty() ? 0 : 1;
 }
 
 void Engine::importLocal(QList<QUrl> urls) {

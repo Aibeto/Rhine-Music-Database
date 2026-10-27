@@ -654,7 +654,7 @@ void MusicLibrary::logout() {
     vipLevel = "unknown";
     discover->cancel();
     player.stop();
-    player.history = {};
+    player.clearHistory();
     host->setPreference("play-history", "[]");
     while (directory) {
         leaveDirectory();

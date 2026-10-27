@@ -2,7 +2,7 @@
 #include "Glyphs.h"
 #include "Host.h"
 #include "NativeApplication.h"
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
 #include "render/RenderConfiguration.h"
 #include "fg/FgFrameTap.h"
 #endif
@@ -19,7 +19,8 @@ class Engine : public QObject {
     Q_PROPERTY(QVariantList hits READ hits NOTIFY hitsChanged)
     Q_PROPERTY(QVariantMap performance READ performance NOTIFY stateChanged)
   public:
-    Engine(QString root, bool offline = false, QObject *parent = nullptr);
+    Engine(QString root, bool offline = false, QObject *parent = nullptr,
+           PlaybackConnection *connection = nullptr, QJsonObject resumeState = {});
     ~Engine() override;
     QVariantMap state() const {
         return m_state;
@@ -70,6 +71,9 @@ class Engine : public QObject {
     Q_INVOKABLE void wheel(double x, double y, double delta, bool pixels = false);
     Q_INVOKABLE void snapshot(QString path);
     void step(double time);
+    double animationTime() const;
+    bool restoredSession() const;
+    void restorePresentation(const NativeScene::ResumeState &state, double time);
     QVariantMap performance() const;
     SceneDrawBuffers drawBuffers() const {
         return scene.drawBuffers;
@@ -86,7 +90,7 @@ class Engine : public QObject {
         return m_musicTextures;
     }
     void trimMemory();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     RhineRender::RenderConfiguration renderConfiguration;
     RhineRender::RenderTelemetry renderTelemetry;
     RhineFg::FrameInputs metalFxInputs;
@@ -120,7 +124,6 @@ class Engine : public QObject {
     }
     bool ready() const;
     int selfTest();
-    int renderFixtures(QString source, QString output);
     Host host;
     NativeScene scene;
     std::unique_ptr<NativeApplication> app;
@@ -171,6 +174,7 @@ class Engine : public QObject {
     qint64 m_paceStepSum = 0, m_paceStepMax = 0;
     int m_paceTicks = 0;
     double m_animationTime = 0;
+    bool m_restoredSession = false;
     double m_discAngle = 0;
     double m_discTime = 0;
     bool m_discRotating = false;

@@ -506,7 +506,7 @@ void FrameProfiler::formatMetrics() {
     if (backend.isEmpty()) {
         backend = QStringLiteral("未知");
     }
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     const auto aaMode = m_engine->renderConfiguration.snapshot().modeName;
 #else
     const auto aaMode = qEnvironmentVariable("RHINE_AA_MODE").toLower();
@@ -574,7 +574,7 @@ void FrameProfiler::formatMetrics() {
                                   : qEnvironmentVariableIntValue("RHINE_FSR_SHARPNESS");
         aaLine += QStringLiteral(" · 锐化 %1%").arg(sharpness);
     }
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     if (aaMode == "metalfx") {
         const auto actual = m_engine->renderTelemetry.snapshot().value("implementation").toString();
         aaLine = actual == "metalfx-temporal" ? QStringLiteral("MetalFX 时域抗锯齿 / 超分")

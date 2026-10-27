@@ -1,0 +1,92 @@
+#include "AppIdentity.h"
+#include "AppStorage.h"
+#include "PlaybackService.h"
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+#include "ServiceTray.h"
+#endif
+#include <QApplication>
+#include <QDir>
+#include <QFileInfo>
+#include <QIcon>
+#include <QLockFile>
+#include <QTimer>
+
+#ifdef Q_OS_MACOS
+void platformBackgroundService();
+#endif
+
+/** 后台入口仅初始化桌面托盘、音频和本地 IPC，禁止在此创建渲染引擎。 */
+int main(int argc, char **argv) {
+#ifdef Q_OS_WIN
+    const auto storageError = AppStorage::initializePortable(AppStorage::executableDirectory());
+    if (!storageError.isEmpty()) {
+        return 1;
+    }
+#endif
+    if (qEnvironmentVariableIsEmpty("QT_MEDIA_BACKEND")) {
+        qputenv("QT_MEDIA_BACKEND", "ffmpeg");
+    }
+#ifdef Q_OS_MACOS
+    // Helper 自身从启动起就是独立 agent，不能先成为主应用的第二个 Dock 实例再切换身份。
+    qputenv("QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM", "1");
+    const QDir plugins(QFileInfo(QString::fromLocal8Bit(argv[0])).absolutePath() + "/../../../../PlugIns");
+    if (plugins.exists("platforms/libqcocoa.dylib")) {
+        qputenv("QT_PLUGIN_PATH", plugins.absolutePath().toUtf8());
+    }
+#endif
+    QApplication application(argc, argv);
+    QCoreApplication::setApplicationVersion(AppUpdater::currentVersion());
+    QCoreApplication::setOrganizationName(AppIdentity::Organization);
+    QCoreApplication::setOrganizationDomain(AppIdentity::Id);
+    QCoreApplication::setApplicationName(AppIdentity::Id);
+    QGuiApplication::setApplicationDisplayName(AppIdentity::DisplayName);
+    application.setWindowIcon(QIcon(":/icons/icon-256.png"));
+    application.setQuitOnLastWindowClosed(false);
+    const auto arguments = application.arguments();
+    const bool test = arguments.contains("--offline-test");
+    if (test) {
+        const auto directory = arguments.value(arguments.indexOf("--offline-test") + 1);
+        if (directory.isEmpty() || !AppStorage::initializePortable(directory).isEmpty()) {
+            return 1;
+        }
+    }
+#ifdef Q_OS_MACOS
+    platformBackgroundService();
+#endif
+    const auto root = arguments.value(arguments.indexOf("--resources") + 1);
+    const auto gui = arguments.value(arguments.indexOf("--gui") + 1);
+    if (!arguments.contains("--resources") || root.isEmpty() || (!test && gui.isEmpty())) {
+        return 1;
+    }
+    if (!QDir().mkpath(AppStorage::dataDirectory())) {
+        return 1;
+    }
+    QLockFile lock(AppStorage::dataDirectory() + "/playback-service.lock");
+    if (!lock.tryLock(0)) {
+        if (arguments.contains("--show-interface")) {
+            PlaybackConnection existing;
+            if (existing.connectToService(PlaybackConnection::endpoint())) {
+                existing.call("show");
+            }
+        }
+        return 0;
+    }
+    PlaybackService service(root, gui, test);
+    if (!service.listen(PlaybackConnection::endpoint())) {
+        return 1;
+    }
+    if (arguments.contains("--show-interface")) {
+        QTimer::singleShot(0, &service, &PlaybackService::showInterface);
+    }
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+    // 托盘入口只在有系统托盘实现的桌面平台创建；Linux 无托盘时关闭窗口后
+    // 仍可从再次启动界面（attach 会激活原窗口）恢复。
+    std::unique_ptr<ServiceTray> tray;
+    if (!test) {
+        tray = std::make_unique<ServiceTray>([&service] { service.showInterface(); },
+                                             [&service] { service.shutdown(); });
+    }
+#endif
+    QObject::connect(&application, &QCoreApplication::aboutToQuit, &service, &PlaybackService::shutdown);
+    return application.exec();
+}

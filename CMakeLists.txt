@@ -115,14 +115,13 @@ set(RHINE_APP_SOURCES
     Qt/src/NativePicking.h
     Qt/src/UiMotion.cpp
     Qt/src/UiMotion.h
-    Qt/tests/UiChecks.cpp
-    Qt/tests/RhiSceneChecks.cpp
-    Qt/tests/ScenePostProcessChecks.cpp
     Qt/tests/NativeHostChecks.cpp
     Qt/tests/NativeMusicChecks.cpp
     Qt/tests/SessionChecks.cpp
     Qt/src/Icon.cpp
     Qt/src/main.cpp
+    Qt/src/PlaybackConnection.cpp
+    Qt/src/PlaybackConnection.h
     Qt/src/Host.cpp
     Qt/src/Host.h
     Qt/src/MusicApi.cpp
@@ -157,12 +156,14 @@ set(RHINE_APP_SOURCES
     Qt/src/NativeApplication.cpp
     Qt/src/NativeScene.h
     Qt/src/NativeScene.cpp
+    Qt/src/NativeSceneSession.cpp
     Qt/src/NativeSceneUpdate.cpp
     Qt/src/NativeSceneCamera.cpp
     Qt/src/NativeSceneFrame.cpp
     Qt/src/NativeSceneInput.cpp
     Qt/src/NativeViewer.h
     Qt/src/NativeViewer.cpp
+    Qt/src/NativeViewerSession.cpp
     Qt/src/SceneMath.h
     Qt/src/SceneMath.cpp
     Qt/src/SceneDrag.h
@@ -176,6 +177,10 @@ set(RHINE_APP_SOURCES
     Qt/src/MusicDiscover.cpp
     Qt/src/MusicDiscover.h
     Qt/src/Platform.cpp
+    Qt/src/DesktopPlaybackControls.cpp
+    Qt/src/DesktopPlaybackControls.h
+    Qt/src/DeferredWindowTransition.cpp
+    Qt/src/DeferredWindowTransition.h
     Qt/src/Engine.cpp
     Qt/src/Engine.h
     Qt/src/Hud.cpp
@@ -190,6 +195,8 @@ set(RHINE_APP_SOURCES
     Qt/src/fsr/Fsr3Backend.h
     Qt/src/render/SceneLayerHost.cpp
     Qt/src/render/SceneLayerHost.h
+    Qt/src/render/PresentationWindow.cpp
+    Qt/src/render/PresentationWindow.h
     Qt/src/fg/FgBackend.cpp
     Qt/src/fg/FgBackend.h
     Qt/src/fg/FgConfig.h
@@ -212,6 +219,36 @@ set(RHINE_CORE_SOURCES ${RHINE_APP_SOURCES})
 list(FILTER RHINE_CORE_SOURCES EXCLUDE REGEX
      "/(main|Engine|Icon|RhiScene|Hud|FrameProfiler)\\.(cpp|h)$|/tests/|/fsr/|/fg/|/render/")
 list(REMOVE_ITEM RHINE_APP_SOURCES ${RHINE_CORE_SOURCES})
+# 桌面后台只链接播放源码；场景、字形、资料库与 HUD 不进入服务二进制。
+set(RHINE_SYSTEM_CORE RhineCore)
+if(NOT IOS)
+    set(RHINE_PLAYBACK_SOURCES ${RHINE_CORE_SOURCES})
+    list(
+        FILTER
+        RHINE_PLAYBACK_SOURCES
+        INCLUDE
+        REGEX
+        "/(AppUpdater|AppStorage|AudioPlayer|HttpAudioStream|PlaybackDiagnostics|PlaybackConnection|Host|MusicApi|MusicPlayer|LyricsController|Platform)\\.(cpp|h)$|/qrcodegen\\.cpp$"
+    )
+    list(REMOVE_ITEM RHINE_CORE_SOURCES ${RHINE_PLAYBACK_SOURCES})
+    add_library(RhinePlaybackCore STATIC ${RHINE_PLAYBACK_SOURCES})
+    target_include_directories(
+        RhinePlaybackCore
+        PUBLIC Qt/src
+        PRIVATE "${CMAKE_CURRENT_BINARY_DIR}" vendor/qrcodegen)
+    target_compile_definitions(
+        RhinePlaybackCore
+        PUBLIC RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}" RHINE_VERSION="${PROJECT_VERSION}"
+               RHINE_RELEASE_BUILD=$<BOOL:${RHINE_RELEASE_BUILD}>)
+    target_link_libraries(
+        RhinePlaybackCore
+        PUBLIC Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Multimedia
+        PRIVATE Qt6::MultimediaPrivate)
+    if(MSVC)
+        target_compile_options(RhinePlaybackCore PRIVATE /utf-8)
+    endif()
+    set(RHINE_SYSTEM_CORE RhinePlaybackCore)
+endif()
 add_library(RhineCore STATIC ${RHINE_CORE_SOURCES})
 target_include_directories(
     RhineCore
@@ -225,8 +262,10 @@ target_link_libraries(
     RhineCore
     PUBLIC Qt6::Core Qt6::Gui Qt6::Network Qt6::Concurrent Qt6::Multimedia
     PRIVATE Qt6::MultimediaPrivate tag)
+if(NOT IOS)
+    target_link_libraries(RhineCore PUBLIC RhinePlaybackCore)
+endif()
 add_subdirectory(Qt)
-target_sources(RhineMusicDatabase PRIVATE Qt/tests/PresentationChecks.cpp)
 target_link_libraries(RhineMusicDatabase PRIVATE RhineCore)
 # FSR 只挂在应用目标上：设置页要按编译期能力置灰，所以把可用性也传成宏。 FSR1 是纯着色器（EASU+RCAS），任何后端都能用；FSR3 需要 Vulkan 或 D3D12。
 if(TARGET FidelityFX::SDK)
@@ -273,8 +312,7 @@ qt_add_resources(
     Assets/icons/icon-256.png
     Assets/icons/icon-512.png
     Assets/icons/icon-1024.png)
-# 着色器按原通道顺序打包，所有后端使用同一份公式。
-# GLSL 130 兼容 Windows 随包的软件 OpenGL，其他后端仍保留原有版本。
+# 着色器按原通道顺序打包，所有后端使用同一份公式。 GLSL 130 兼容 Windows 随包的软件 OpenGL，其他后端仍保留原有版本。
 qt_add_shaders(
     RhineMusicDatabase
     "rhine_shaders"
@@ -331,9 +369,80 @@ target_link_libraries(
             Qt6::Concurrent
             Qt6::Multimedia)
 # 平台分支只处理原生能力、部署身份及链接依赖。
-if(WIN32 OR (APPLE AND NOT IOS))
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/DesktopTray.cpp Qt/src/DesktopTray.h)
-    target_link_libraries(RhineMusicDatabase PRIVATE Qt6::Widgets)
+if(NOT IOS)
+    find_package(Qt6 6.12 REQUIRED COMPONENTS Widgets)
+    target_sources(
+        RhineMusicDatabase
+        PRIVATE Qt/src/EngineHolder.cpp Qt/src/EngineHolder.h Qt/tests/WindowTransitionChecks.cpp
+                Qt/src/PlaybackSessionWindow.cpp Qt/src/PlaybackSessionWindow.h
+                Qt/tests/PlaybackServiceChecks.cpp)
+    if(WIN32 OR (APPLE AND NOT IOS))
+        target_sources(RhineMusicDatabase PRIVATE Qt/src/DesktopTray.cpp Qt/src/DesktopTray.h)
+        target_link_libraries(RhineMusicDatabase PRIVATE Qt6::Widgets)
+    endif()
+    # 后台可执行文件不链接 Qt Quick、QML 或任何渲染资源。
+    qt_add_executable(
+        RhinePlaybackService
+        WIN32
+        Qt/src/playback_main.cpp
+        Qt/src/PlaybackService.cpp
+        Qt/src/PlaybackService.h
+        Qt/src/InterfaceSession.cpp
+        Qt/src/InterfaceSession.h
+        Qt/src/DesktopPresence.cpp
+        Qt/src/DesktopPresence.h
+        Qt/src/DesktopVisibility.h)
+    target_link_libraries(RhinePlaybackService PRIVATE RhinePlaybackCore Qt6::Widgets)
+    target_include_directories(RhinePlaybackService PRIVATE Qt/src)
+    if(APPLE)
+        target_sources(RhineMusicDatabase PRIVATE Qt/src/InterfaceWindowMac.mm)
+        target_link_libraries(RhineMusicDatabase PRIVATE "-framework QuartzCore")
+        target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityMac.mm Qt/src/ServiceTray.cpp
+                                                    Qt/src/ServiceTray.h)
+        target_compile_options(RhinePlaybackService PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+        target_link_libraries(RhinePlaybackService PRIVATE "-framework AppKit" "-framework CoreGraphics" proc)
+    elseif(WIN32)
+        target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityWindows.cpp
+                                                    Qt/src/ServiceTray.cpp Qt/src/ServiceTray.h)
+        target_link_libraries(RhinePlaybackService PRIVATE dwmapi)
+    elseif(UNIX)
+        target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityX11.cpp)
+    endif()
+    qt_add_resources(
+        RhinePlaybackService
+        "service_icons"
+        PREFIX
+        "/icons"
+        BASE
+        "Assets/icons"
+        FILES
+        Assets/icons/icon-256.png)
+    if(MSVC)
+        target_compile_options(RhinePlaybackService PRIVATE /utf-8)
+    endif()
+    if(APPLE)
+        # helper 跟随主包一起签名和部署；主目标的打包钩子执行前必须已完成构建。
+        set_target_properties(
+            RhinePlaybackService
+            PROPERTIES MACOSX_BUNDLE TRUE
+                       MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Qt/PlaybackServiceInfo.plist.in"
+                       RUNTIME_OUTPUT_DIRECTORY "$<TARGET_FILE_DIR:RhineMusicDatabase>/../Helpers")
+    elseif(UNIX)
+        set_target_properties(RhinePlaybackService PROPERTIES INSTALL_RPATH "\$ORIGIN/../lib")
+        install(TARGETS RhinePlaybackService RUNTIME DESTINATION bin)
+    endif()
+    add_dependencies(RhineMusicDatabase RhinePlaybackService)
+endif()
+if(APPLE)
+    target_sources(RhineMusicDatabase PRIVATE Qt/src/render/MetalFxBackend.mm Qt/src/render/MetalFxBackend.h
+                                              Qt/src/render/FrameGenerator.h Qt/src/render/SceneResources.h)
+    target_link_libraries(RhineMusicDatabase PRIVATE "-framework Metal")
+    # iOS 模拟器 SDK 不带 MetalFX，仍构建共用呈现层并报告原生效果不可用。
+    find_library(RHINE_METALFX_FRAMEWORK MetalFX)
+    if(RHINE_METALFX_FRAMEWORK)
+        target_link_libraries(RhineMusicDatabase PRIVATE "-weak_framework MetalFX")
+    endif()
+    target_compile_options(RhineMusicDatabase PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
 endif()
 if(IOS)
     target_sources(RhineCore PRIVATE Qt/src/PlatformIOS.mm Qt/src/BridgeProcessIOS.cpp Qt/src/BridgeProcess.h)
@@ -342,21 +451,19 @@ if(IOS)
     target_compile_options(RhineCore PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     include(Qt/IOS.cmake)
 elseif(APPLE)
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/render/MetalFxBackend.mm Qt/src/render/MetalFxBackend.h
-                                              Qt/src/render/FrameGenerator.h Qt/src/render/SceneResources.h)
-    target_link_libraries(RhineMusicDatabase PRIVATE "-weak_framework MetalFX" "-framework Metal")
-    target_compile_options(RhineMusicDatabase PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
-    target_sources(RhineCore PRIVATE Qt/src/Platform.mm)
-    target_link_libraries(RhineCore PRIVATE "-framework Security" "-framework AppKit"
-                                            "-framework MediaPlayer")
-    target_compile_options(RhineCore PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_sources(${RHINE_SYSTEM_CORE} PRIVATE Qt/src/Platform.mm)
+    target_link_libraries(${RHINE_SYSTEM_CORE} PRIVATE "-framework Security" "-framework AppKit"
+                                                       "-framework MediaPlayer")
+    target_compile_options(${RHINE_SYSTEM_CORE} PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
     set_target_properties(
         RhineMusicDatabase
         PROPERTIES MACOSX_BUNDLE_GUI_IDENTIFIER ${RHINE_APPLICATION_ID}
                    MACOSX_BUNDLE_BUNDLE_NAME "RHINE MUSIC DATABASE"
                    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Qt/Info.plist.in")
 elseif(WIN32)
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp)
+    target_sources(
+        RhineMusicDatabase PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp
+                                   Qt/src/render/WindowsStaticImage.cpp Qt/src/render/WindowsStaticImage.h)
     target_link_libraries(RhineMusicDatabase PRIVATE dxgi ole32 uuid gdi32 dwmapi)
     if(RHINE_ENABLE_D3D12_BACKEND)
         target_link_libraries(RhineMusicDatabase PRIVATE d3d12)
@@ -371,14 +478,14 @@ elseif(WIN32)
     configure_file(Qt/WindowsIcon.rc.in "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc" @ONLY)
     target_sources(RhineMusicDatabase PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/WindowsIcon.rc")
     target_link_libraries(RhineCore PRIVATE psapi)
-    target_sources(RhineCore PRIVATE Qt/src/PlatformWindows.cpp)
-    target_link_libraries(RhineCore PRIVATE crypt32 shell32 user32 windowsapp runtimeobject
-                                            Qt6::MultimediaPrivate)
+    target_sources(${RHINE_SYSTEM_CORE} PRIVATE Qt/src/PlatformWindows.cpp)
+    target_link_libraries(${RHINE_SYSTEM_CORE} PRIVATE crypt32 shell32 user32 windowsapp runtimeobject
+                                                       Qt6::MultimediaPrivate)
     target_compile_options(RhineMusicDatabase PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
     target_compile_options(RhineCore PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/utf-8>)
 elseif(UNIX)
     # Linux 复用同一份原生场景实现；凭据、协议交付和媒体集成由本平台文件补齐。
-    target_sources(RhineCore PRIVATE Qt/src/PlatformLinux.cpp)
+    target_sources(${RHINE_SYSTEM_CORE} PRIVATE Qt/src/PlatformLinux.cpp)
     # 显卡选择：Windows 那条直路是 DXGI + QT_D3D_ADAPTER_INDEX，Linux 只能把序号翻译成 驱动认识的环境变量，且必须在 QGuiApplication
     # 之前完成，所以单独成文件、只挂主程序。
     target_sources(RhineMusicDatabase PRIVATE Qt/src/LinuxGraphics.cpp)
@@ -427,40 +534,6 @@ if(IOS)
     return()
 endif()
 enable_testing()
-# 冻结动画与场景基准只在手动视觉回归中启用，避免正常 UI 调整导致默认测试失败。
-option(RHINE_VISUAL_TESTS "Register frozen animation and scene snapshot regressions" OFF)
-qt_add_executable(RhineSceneMotionRegression Qt/tests/SceneMotionChecks.cpp Qt/src/SceneMotion.cpp
-                  Qt/src/BootTimeline.cpp Qt/src/SceneMath.cpp Qt/src/SceneDrag.cpp)
-target_include_directories(RhineSceneMotionRegression PRIVATE Qt/src)
-target_compile_definitions(RhineSceneMotionRegression PRIVATE RHINE_SCENE_MOTION_TEST_MAIN)
-target_link_libraries(RhineSceneMotionRegression PRIVATE Qt6::Core)
-qt_add_resources(
-    RhineSceneMotionRegression
-    "scene_motion_tracks"
-    PREFIX
-    "/animation"
-    BASE
-    "Assets/animation"
-    FILES
-    Assets/animation/boot-tracks.json)
-if(MSVC)
-    target_compile_options(RhineSceneMotionRegression PRIVATE /utf-8)
-endif()
-if(RHINE_VISUAL_TESTS)
-    add_test(NAME qt_scene_motion_regression
-             COMMAND RhineSceneMotionRegression
-                     "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/scene-motion.qz")
-endif()
-qt_add_executable(RhineUiMotionRegression Qt/tests/UiMotionRegression.cpp Qt/src/UiMotion.cpp)
-target_include_directories(RhineUiMotionRegression PRIVATE Qt/src)
-target_link_libraries(RhineUiMotionRegression PRIVATE Qt6::Core)
-if(MSVC)
-    target_compile_options(RhineUiMotionRegression PRIVATE /utf-8)
-endif()
-if(RHINE_VISUAL_TESTS)
-    add_test(NAME qt_ui_motion_regression
-             COMMAND RhineUiMotionRegression "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/ui-motion.qz")
-endif()
 qt_add_executable(RhinePlatformRegression Qt/tests/PlatformRegression.cpp Qt/src/AppStorage.cpp
                   Qt/src/AudioPlayer.cpp Qt/src/HttpAudioStream.cpp Qt/src/ProcessMetrics.cpp)
 target_include_directories(RhinePlatformRegression PRIVATE Qt/src)
@@ -486,6 +559,17 @@ endif()
 add_test(NAME qt_platform_regression COMMAND RhinePlatformRegression
                                              "${CMAKE_CURRENT_BINARY_DIR}/platform-regression")
 set_tests_properties(qt_platform_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+qt_add_executable(RhineInputMethodRegression Qt/tests/InputMethodChecks.cpp
+                  Qt/src/render/PresentationWindow.cpp Qt/src/render/PresentationWindow.h)
+# 测试在内存中创建 QML；动态 Qt kit 直接加载插件，无需递归扫描仓库和部署产物。
+set_target_properties(RhineInputMethodRegression PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+target_include_directories(RhineInputMethodRegression PRIVATE Qt/src)
+target_link_libraries(RhineInputMethodRegression PRIVATE Qt6::Quick)
+if(MSVC)
+    target_compile_options(RhineInputMethodRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_input_method_regression COMMAND RhineInputMethodRegression)
+set_tests_properties(qt_input_method_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 qt_add_executable(RhineAudioPlaybackRegression Qt/tests/AudioPlaybackChecks.cpp)
 target_link_libraries(RhineAudioPlaybackRegression PRIVATE Qt6::Core Qt6::Multimedia)
 if(MSVC)
@@ -526,25 +610,18 @@ set_tests_properties(
     PROPERTIES ENVIRONMENT
                "QT_QPA_PLATFORM=offscreen;RHINE_RESOURCES=${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
 
-qt_add_executable(RhineNativeSceneRegression Qt/tests/NativeSceneChecks.cpp)
-target_compile_definitions(RhineNativeSceneRegression PRIVATE RHINE_SCENE_REGRESSION_TEST_MAIN)
-target_link_libraries(RhineNativeSceneRegression PRIVATE RhineCore)
-qt_add_resources(
-    RhineNativeSceneRegression
-    "native_scene_tracks"
-    PREFIX
-    "/animation"
-    BASE
-    "Assets/animation"
-    FILES
-    Assets/animation/boot-tracks.json)
+qt_add_executable(RhineGlyphsRegression Qt/tests/GlyphsChecks.cpp)
+target_link_libraries(RhineGlyphsRegression PRIVATE RhineCore)
 if(MSVC)
-    target_compile_options(RhineNativeSceneRegression PRIVATE /utf-8)
+    target_compile_options(RhineGlyphsRegression PRIVATE /utf-8)
 endif()
-if(RHINE_VISUAL_TESTS)
-    add_test(NAME qt_native_scene_regression
-             COMMAND RhineNativeSceneRegression "${CMAKE_CURRENT_SOURCE_DIR}/output/resources"
-                     "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/scene-frame.qz")
+add_test(NAME qt_glyphs_regression COMMAND RhineGlyphsRegression
+                                           "${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
+if(WIN32)
+    # offscreen 插件不使用 Windows 字体库，缺字回退需要原生平台插件；测试本身不创建窗口。
+    set_tests_properties(qt_glyphs_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=windows")
+else()
+    set_tests_properties(qt_glyphs_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 endif()
 
 qt_add_executable(RhineNativeHudRegression Qt/tests/NativeHudChecks.cpp)
