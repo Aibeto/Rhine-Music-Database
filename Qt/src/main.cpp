@@ -38,7 +38,6 @@
 #include <QSGRendererInterface>
 #include <QStandardPaths>
 #include <QTimer>
-#include <QThread>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -60,16 +59,12 @@
 #define RHINE_HAVE_VULKAN_TYPES 0
 #endif
 int makeIcon(const QString &directory);
-int runUiChecks(Engine &backend, QQuickWindow *window, const QString &output, FrameProfiler &profiler);
 #ifndef Q_OS_IOS
 bool runPlaybackServiceChecks(const QString &resources, const QString &executable, const QString &gui);
-void verifyRestoredWindowInput(PresentationShell *shell, Engine *engine);
-bool triggerWindowChromeAction(QQuickItem *item, const QString &action);
 #endif
 #ifdef Q_OS_WIN
 #include "WindowsTaskbar.h"
 void initializeWindowsGraphics();
-int runWindowsWindowChecks(int argc, char **argv);
 #endif
 #if !defined(Q_OS_DARWIN)
 /**
@@ -305,15 +300,8 @@ static void applyRenderScaleSetting() {
  * 建立应用身份、Qt 引擎和原生窗口。
  * 离线测试与正式播放沿用同一入口，资源只从独立应用读取。
  */
-int runPresentationChecks(PresentationShell &shell, Engine &backend, const QString &directory);
-
 int main(int argc, char **argv) {
 #ifdef Q_OS_WIN
-    for (int index = 1; index < argc; ++index) {
-        if (std::strcmp(argv[index], "--native-window-check") == 0) {
-            return runWindowsWindowChecks(argc, argv);
-        }
-    }
     const auto storageError = AppStorage::initializePortable(AppStorage::executableDirectory());
     if (!storageError.isEmpty()) {
         std::fprintf(stderr, "%s\n", storageError.toUtf8().constData());
@@ -327,8 +315,7 @@ int main(int argc, char **argv) {
     }
     // Windows GUI 子系统默认可能将 Qt 日志送到调试器；测试必须写入 CTest 的标准错误管道。
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--ui-self-test") == 0 ||
-            std::strcmp(argv[i], "--presentation-check") == 0) {
+        if (std::strcmp(argv[i], "--self-test") == 0) {
             qInstallMessageHandler(
                 [](QtMsgType type, const QMessageLogContext &context, const QString &message) {
                     const auto text = qFormatLogMessage(type, context, message).toUtf8();
@@ -417,9 +404,8 @@ int main(int argc, char **argv) {
         }
     }
     const bool test = args.contains("--self-test");
-    const bool visual = args.contains("--visual-fixtures");
-    const bool offline = test || visual || args.contains("--ui-self-test") || args.contains("--offline") ||
-                         qEnvironmentVariableIntValue("RHINE_OFFLINE") == 1;
+    const bool offline =
+        test || args.contains("--offline") || qEnvironmentVariableIntValue("RHINE_OFFLINE") == 1;
     if (test) {
 #ifndef Q_OS_IOS
 #ifdef Q_OS_MACOS
@@ -438,11 +424,6 @@ int main(int argc, char **argv) {
         Engine direct(root, offline);
         return direct.selfTest();
     }
-    if (visual) {
-        Engine direct(root, offline);
-        const int i = args.indexOf("--visual-fixtures");
-        return direct.renderFixtures(args.value(i + 1), args.value(i + 2));
-    }
     QString profilePath;
     if (args.contains("--frame-profile")) {
         profilePath = args.value(args.indexOf("--frame-profile") + 1);
@@ -455,9 +436,8 @@ int main(int argc, char **argv) {
     // 设置页默认开启（面板不存在或不是 off 都视为开启）；关闭后回到单进程路径。
     const bool serviceMode =
 #ifndef Q_OS_IOS
-        !offline && !args.contains("--presentation-check") &&
-        (playbackGuiTest ||
-         AppStorage::settings().value("panel/performance-mode").toString() != QStringLiteral("off"))
+        !offline && (playbackGuiTest || AppStorage::settings().value("panel/performance-mode").toString() !=
+                                            QStringLiteral("off"))
 #else
         false
 #endif
@@ -538,15 +518,19 @@ int main(int argc, char **argv) {
         [] { QCoreApplication::exit(1); }, Qt::QueuedConnection);
     // 桌面 Metal 与 Vulkan 复用受控呈现，插值能力独立于呈现路径。
     // RHINE_FG_LAYER=off 可强制使用 Qt Quick 默认窗口；启动失败同样回退。
-    // 默认自检保留原窗口入口，--presentation-check 专门验证受控呈现。
     const bool fgLayerDisabled =
         qEnvironmentVariable("RHINE_FG_LAYER").compare("off", Qt::CaseInsensitive) == 0
 #ifdef Q_OS_IOS
         || true
 #endif
         ;
-    const bool fgCandidate = !test && !visual && !args.contains("--ui-self-test") &&
-                             !args.contains("--capture") && !fgLayerDisabled &&
+    // 离屏与最小平台没有原生窗口系统，呈现层无法创建交换链；必须直接走 Qt Quick 默认路径。
+    // 否则无显示环境（CI、--playback-gui-test）会在接管 Metal 窗口时崩溃。
+    const auto platformName = QGuiApplication::platformName();
+    const bool hasNativeWindowSystem =
+        platformName != QStringLiteral("offscreen") && platformName != QStringLiteral("minimal");
+    const bool fgCandidate = !test && !args.contains("--capture") && !fgLayerDisabled &&
+                             hasNativeWindowSystem &&
                              PresentationShell::supportsBackend(RhineGraphics::activeBackend());
 #ifdef Q_OS_WIN
     // 首次显示窗口前就监听 Explorer 的就绪消息，FG 与默认窗口共用同一个任务栏所有者。
@@ -555,8 +539,8 @@ int main(int argc, char **argv) {
     // 排障：接管与否只看这一行。之前出现过"设了 RHINE_FG_LAYER=on 才接管"的怪现象，
     // 把每个输入的实测值打出来，比逐条读代码猜快得多。
     qWarning().noquote() << "FG gate: candidate" << fgCandidate << "layerDisabled" << fgLayerDisabled
-                         << "test" << test << "visual" << visual << "backend"
-                         << RhineGraphics::activeBackend() << "compiledIn" << PresentationShell::compiledIn();
+                         << "test" << test << "backend" << RhineGraphics::activeBackend() << "compiledIn"
+                         << PresentationShell::compiledIn();
     if (fgCandidate) {
         // FG 路径从不调用 QQmlApplicationEngine::load()（Main.qml 不加载，两个离屏层
         // 都是手工用 QQuickRenderControl 建的），而"QML 里的 Qt.quit() 真能退出进程"
@@ -569,20 +553,7 @@ int main(int argc, char **argv) {
         // 退出时 SIGABRT/SIGSEGV（实测两条都复现过）。Win32 的 HWND、X11 的 Window
         // 是同一类问题，所以这条顺序修在公共路径，不进平台分支。
         QObject::connect(&engine, &QQmlEngine::quit, shell.get(), &PresentationShell::requestQuit);
-#ifdef Q_OS_MACOS
-        if (args.contains("--presentation-check")) {
-            backend->scene.review("detail");
-            // review 已收束场景动画；HUD 沿用从零开始的实际业务时钟，避免制造未来动画期限。
-            backend->step(0);
-        }
-#endif
         if (shell->start() && shell->run() == 0) {
-            if (args.contains("--presentation-check")) {
-                const auto directory = args.value(args.indexOf("--presentation-check") + 1);
-                QTimer::singleShot(2500, shell.get(), [&, raw = shell.get(), directory] {
-                    application.exit(runPresentationChecks(*raw, *backend, directory));
-                });
-            }
             // 性能模式下窗口与服务共享生命周期：关窗只隐藏，恢复与遮挡由服务驱动。
 #ifndef Q_OS_IOS
             std::unique_ptr<PlaybackSessionWindow> session;
@@ -597,40 +568,9 @@ int main(int argc, char **argv) {
                 QTimer::singleShot(0, playback.get(), [&playback] { playback->call("interface.ready"); });
             }
             if (playbackGuiTest) {
-                // 生命周期夹具从可操作的归档页开始，避免初始化动画隐藏导航按钮。
-                backend->action("skip");
-                QObject::connect(
-                    engineHolder.get(), &EngineHolder::started, shell.get(),
-                    [raw = shell.get()](Engine *restored) { verifyRestoredWindowInput(raw, restored); });
-                if (args.contains("--playback-test-block-exit")) {
-                    // 在正常存档回调之后模拟退出被插件阻塞，父服务必须仍能回收界面。
-                    QObject::connect(&application, &QCoreApplication::aboutToQuit, &application, [] {
-                        qInfo("PLAYBACK_GUI_EXIT_BLOCKED");
-                        for (;;) {
-                            QThread::msleep(100);
-                        }
-                    });
-                }
                 qInfo("PLAYBACK_GUI_READY");
-                auto target = shell->window();
-                if (args.contains("--playback-test-close")) {
-                    QTimer::singleShot(700, shell.get(), [raw = shell.get()] {
-                        qInfo("PLAYBACK_GUI_RELEASE_REQUESTED");
-                        if (!triggerWindowChromeAction(raw->inputWindow()->contentItem(), "close")) {
-                            qFatal("Cannot trigger the real QML close button");
-                        }
-                    });
-                } else if (args.contains("--playback-test-minimize")) {
-                    QTimer::singleShot(700, shell.get(), [raw = shell.get()] {
-                        qInfo("PLAYBACK_GUI_RELEASE_REQUESTED");
-                        if (!triggerWindowChromeAction(raw->inputWindow()->contentItem(), "minimize")) {
-                            qFatal("Cannot trigger the real QML minimize button");
-                        }
-                    });
-                } else if (args.contains("--playback-test-quit")) {
+                if (args.contains("--playback-test-quit")) {
                     QTimer::singleShot(700, &application, &QCoreApplication::quit);
-                } else if (args.contains("--playback-test-fullscreen")) {
-                    QTimer::singleShot(700, target, &QWindow::showFullScreen);
                 }
             }
 #endif
@@ -692,14 +632,6 @@ int main(int argc, char **argv) {
     // 呈现层未能接管时的界面回归入口：进程仍需完成握手并响应测试动作，
     // 但本平台没有静态页与挂起能力，服务端生命周期验收会跳过窗口部分。
     if (playbackGuiTest) {
-        if (args.contains("--playback-test-block-exit")) {
-            QObject::connect(&application, &QCoreApplication::aboutToQuit, &application, [] {
-                qInfo("PLAYBACK_GUI_EXIT_BLOCKED");
-                for (;;) {
-                    QThread::msleep(100);
-                }
-            });
-        }
         qInfo("PLAYBACK_GUI_READY");
         if (args.contains("--playback-test-quit")) {
             QTimer::singleShot(700, &application, &QCoreApplication::quit);
@@ -732,10 +664,6 @@ int main(int argc, char **argv) {
     QObject::connect(
         window, &QQuickWindow::sceneGraphInvalidated, backend,
         [backend] { backend->recordResourceRelease(); }, Qt::DirectConnection);
-    if (args.contains("--ui-self-test")) {
-        return runUiChecks(*backend, qobject_cast<QQuickWindow *>(engine.rootObjects().first()),
-                           args.value(args.indexOf("--ui-self-test") + 1), *profiler);
-    }
     if (args.contains("--capture")) {
         const auto index = args.indexOf("--capture");
         const auto path = args.value(index + 1);

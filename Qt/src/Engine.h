@@ -124,7 +124,6 @@ class Engine : public QObject {
     }
     bool ready() const;
     int selfTest();
-    int renderFixtures(QString source, QString output);
     Host host;
     NativeScene scene;
     std::unique_ptr<NativeApplication> app;

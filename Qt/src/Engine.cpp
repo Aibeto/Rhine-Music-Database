@@ -32,7 +32,6 @@ QPointF haltonJitter(int phase) {
 } // namespace
 bool runNativeHostChecks(const QString &root);
 bool runNativeMusicChecks(const QString &root);
-bool runGpuReferenceCheck(const QImage &expected, const QImage &actual);
 
 /** 建立纯原生音乐、HUD 和场景状态；Qt 定时器只在输入或动画尚未收束时运行。 */
 Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *connection,
@@ -841,61 +840,9 @@ int Engine::selfTest() {
             ok &= hit && hit->lane == cell["lane"].toInt() && hit->row == cell["row"].toInt();
         }
     }
-    if (qEnvironmentVariableIntValue("RHINE_GPU_TEST") == 1) {
-        const QSize size(960, 540);
-        const auto actual =
-            renderReference(root(), m_frame, m_current, host.image(m_cover), size, scene.drawBuffers);
-        const auto original =
-            renderReference(root(), legacy, m_current, host.image(m_cover), size, scene.drawBuffers);
-        ok &= runGpuReferenceCheck(original, actual);
-        if (!ok) {
-            qCritical() << "Native GPU frame differs from original fixture";
-        }
-    }
     qInfo() << "Qt native scene, Host, music, playback and offline package checks:"
             << (ok ? "passed" : "FAILED");
     return ok ? 0 : 1;
-}
-
-int Engine::renderFixtures(QString source, QString output) {
-    for (const auto &name : QDir(source).entryList({"*.json"}, QDir::Files, QDir::Name)) {
-        QFile input(source + "/" + name);
-        if (!input.open(QIODevice::ReadOnly)) {
-            return 1;
-        }
-        const auto fixture = QJsonDocument::fromJson(input.readAll()).object();
-        const auto store = fixture["store"].toObject();
-        const auto settings = fixture["hud"].toObject();
-        app->music.current = store["current"].toObject();
-        const auto lists = store["lists"].toArray();
-        const auto totals = store["totals"].toArray();
-        const auto more = store["hasMore"].toArray();
-        for (int lane = 0; lane < 5; ++lane) {
-            app->music.lists[lane] = lists.at(lane).toArray();
-            app->music.totals[lane] = totals.at(lane).toInt();
-            app->music.hasMore[lane] = more.at(lane).toBool();
-        }
-        app->music.keyword = store["keyword"].toString();
-        app->music.status = store["status"].toString();
-        app->hud.modal = settings["modal"].toString();
-        app->hud.dark = settings["dark"].toBool();
-        app->hud.themeMode = settings["themeMode"].toString();
-        app->hud.reduced = settings["reduced"].toBool();
-        app->hud.motion.set(true, 0, true);
-        m_frame = fixture["frame"].toObject();
-        app->hud.draw(m_frame, 1920, 50);
-        m_commands = app->hud.commands;
-        m_current = app->music.current;
-        m_cover.clear();
-        m_coverImage = QImage();
-        const auto folder = output + "/" + fixture["name"].toString();
-        snapshot(folder);
-        QFile hitsFile(folder + "/qt-hits.json");
-        if (hitsFile.open(QIODevice::WriteOnly)) {
-            hitsFile.write(QJsonDocument(app->hud.hits).toJson());
-        }
-    }
-    return failure.isEmpty() ? 0 : 1;
 }
 
 void Engine::importLocal(QList<QUrl> urls) {

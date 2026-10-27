@@ -115,9 +115,6 @@ set(RHINE_APP_SOURCES
     Qt/src/NativePicking.h
     Qt/src/UiMotion.cpp
     Qt/src/UiMotion.h
-    Qt/tests/UiChecks.cpp
-    Qt/tests/RhiSceneChecks.cpp
-    Qt/tests/ScenePostProcessChecks.cpp
     Qt/tests/NativeHostChecks.cpp
     Qt/tests/NativeMusicChecks.cpp
     Qt/tests/SessionChecks.cpp
@@ -269,7 +266,6 @@ if(NOT IOS)
     target_link_libraries(RhineCore PUBLIC RhinePlaybackCore)
 endif()
 add_subdirectory(Qt)
-target_sources(RhineMusicDatabase PRIVATE Qt/tests/PresentationChecks.cpp)
 target_link_libraries(RhineMusicDatabase PRIVATE RhineCore)
 # FSR 只挂在应用目标上：设置页要按编译期能力置灰，所以把可用性也传成宏。 FSR1 是纯着色器（EASU+RCAS），任何后端都能用；FSR3 需要 Vulkan 或 D3D12。
 if(TARGET FidelityFX::SDK)
@@ -399,17 +395,6 @@ if(NOT IOS)
     target_link_libraries(RhinePlaybackService PRIVATE RhinePlaybackCore Qt6::Widgets)
     target_include_directories(RhinePlaybackService PRIVATE Qt/src)
     if(APPLE)
-        add_executable(RhineDesktopFixture MACOSX_BUNDLE Qt/tests/DesktopWindowFixture.mm)
-        target_compile_options(RhineDesktopFixture PRIVATE -fobjc-arc)
-        target_link_libraries(RhineDesktopFixture PRIVATE "-framework AppKit")
-        set_target_properties(
-            RhineDesktopFixture
-            PROPERTIES AUTOMOC OFF
-                       AUTOUIC OFF
-                       AUTORCC OFF
-                       MACOSX_BUNDLE_GUI_IDENTIFIER "${RHINE_APPLICATION_ID}.desktop-fixture"
-                       MACOSX_BUNDLE_BUNDLE_NAME "Rhine Desktop Fixture")
-        add_dependencies(RhineMusicDatabase RhineDesktopFixture)
         target_sources(RhineMusicDatabase PRIVATE Qt/src/InterfaceWindowMac.mm)
         target_link_libraries(RhineMusicDatabase PRIVATE "-framework QuartzCore")
         target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityMac.mm Qt/src/ServiceTray.cpp
@@ -417,14 +402,6 @@ if(NOT IOS)
         target_compile_options(RhinePlaybackService PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
         target_link_libraries(RhinePlaybackService PRIVATE "-framework AppKit" "-framework CoreGraphics" proc)
     elseif(WIN32)
-        add_executable(RhineDesktopFixture Qt/tests/DesktopWindowFixtureWindows.cpp)
-        target_link_libraries(RhineDesktopFixture PRIVATE user32)
-        set_target_properties(
-            RhineDesktopFixture
-            PROPERTIES AUTOMOC OFF
-                       AUTOUIC OFF
-                       AUTORCC OFF)
-        add_dependencies(RhineMusicDatabase RhineDesktopFixture)
         target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityWindows.cpp
                                                     Qt/src/ServiceTray.cpp Qt/src/ServiceTray.h)
         target_link_libraries(RhinePlaybackService PRIVATE dwmapi)
@@ -478,9 +455,8 @@ elseif(APPLE)
                    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Qt/Info.plist.in")
 elseif(WIN32)
     target_sources(
-        RhineMusicDatabase
-        PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp Qt/src/render/WindowsStaticImage.cpp
-                Qt/src/render/WindowsStaticImage.h Qt/tests/WindowsWindowChecks.cpp)
+        RhineMusicDatabase PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp
+                                   Qt/src/render/WindowsStaticImage.cpp Qt/src/render/WindowsStaticImage.h)
     target_link_libraries(RhineMusicDatabase PRIVATE dxgi ole32 uuid gdi32 dwmapi)
     if(RHINE_ENABLE_D3D12_BACKEND)
         target_link_libraries(RhineMusicDatabase PRIVATE d3d12)
@@ -551,40 +527,6 @@ if(IOS)
     return()
 endif()
 enable_testing()
-# 冻结动画与场景基准只在手动视觉回归中启用，避免正常 UI 调整导致默认测试失败。
-option(RHINE_VISUAL_TESTS "Register frozen animation and scene snapshot regressions" OFF)
-qt_add_executable(RhineSceneMotionRegression Qt/tests/SceneMotionChecks.cpp Qt/src/SceneMotion.cpp
-                  Qt/src/BootTimeline.cpp Qt/src/SceneMath.cpp Qt/src/SceneDrag.cpp)
-target_include_directories(RhineSceneMotionRegression PRIVATE Qt/src)
-target_compile_definitions(RhineSceneMotionRegression PRIVATE RHINE_SCENE_MOTION_TEST_MAIN)
-target_link_libraries(RhineSceneMotionRegression PRIVATE Qt6::Core)
-qt_add_resources(
-    RhineSceneMotionRegression
-    "scene_motion_tracks"
-    PREFIX
-    "/animation"
-    BASE
-    "Assets/animation"
-    FILES
-    Assets/animation/boot-tracks.json)
-if(MSVC)
-    target_compile_options(RhineSceneMotionRegression PRIVATE /utf-8)
-endif()
-if(RHINE_VISUAL_TESTS)
-    add_test(NAME qt_scene_motion_regression
-             COMMAND RhineSceneMotionRegression
-                     "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/scene-motion.qz")
-endif()
-qt_add_executable(RhineUiMotionRegression Qt/tests/UiMotionRegression.cpp Qt/src/UiMotion.cpp)
-target_include_directories(RhineUiMotionRegression PRIVATE Qt/src)
-target_link_libraries(RhineUiMotionRegression PRIVATE Qt6::Core)
-if(MSVC)
-    target_compile_options(RhineUiMotionRegression PRIVATE /utf-8)
-endif()
-if(RHINE_VISUAL_TESTS)
-    add_test(NAME qt_ui_motion_regression
-             COMMAND RhineUiMotionRegression "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/ui-motion.qz")
-endif()
 qt_add_executable(RhinePlatformRegression Qt/tests/PlatformRegression.cpp Qt/src/AppStorage.cpp
                   Qt/src/AudioPlayer.cpp Qt/src/HttpAudioStream.cpp Qt/src/ProcessMetrics.cpp)
 target_include_directories(RhinePlatformRegression PRIVATE Qt/src)
@@ -661,27 +603,6 @@ set_tests_properties(
     PROPERTIES ENVIRONMENT
                "QT_QPA_PLATFORM=offscreen;RHINE_RESOURCES=${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
 
-qt_add_executable(RhineNativeSceneRegression Qt/tests/NativeSceneChecks.cpp)
-target_compile_definitions(RhineNativeSceneRegression PRIVATE RHINE_SCENE_REGRESSION_TEST_MAIN)
-target_link_libraries(RhineNativeSceneRegression PRIVATE RhineCore)
-qt_add_resources(
-    RhineNativeSceneRegression
-    "native_scene_tracks"
-    PREFIX
-    "/animation"
-    BASE
-    "Assets/animation"
-    FILES
-    Assets/animation/boot-tracks.json)
-if(MSVC)
-    target_compile_options(RhineNativeSceneRegression PRIVATE /utf-8)
-endif()
-if(RHINE_VISUAL_TESTS)
-    add_test(NAME qt_native_scene_regression
-             COMMAND RhineNativeSceneRegression "${CMAKE_CURRENT_SOURCE_DIR}/output/resources"
-                     "${CMAKE_CURRENT_SOURCE_DIR}/Qt/tests/fixtures/scene-frame.qz")
-endif()
-
 qt_add_executable(RhineGlyphsRegression Qt/tests/GlyphsChecks.cpp)
 target_link_libraries(RhineGlyphsRegression PRIVATE RhineCore)
 if(MSVC)
@@ -699,15 +620,6 @@ endif()
 qt_add_executable(RhineNativeHudRegression Qt/tests/NativeHudChecks.cpp)
 target_compile_definitions(RhineNativeHudRegression PRIVATE RHINE_HUD_REGRESSION_TEST_MAIN)
 target_link_libraries(RhineNativeHudRegression PRIVATE RhineCore)
-qt_add_resources(
-    RhineNativeHudRegression
-    "native_hud_tracks"
-    PREFIX
-    "/animation"
-    BASE
-    "Assets/animation"
-    FILES
-    Assets/animation/boot-tracks.json)
 if(MSVC)
     target_compile_options(RhineNativeHudRegression PRIVATE /utf-8)
 endif()

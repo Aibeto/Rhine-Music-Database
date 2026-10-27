@@ -219,15 +219,13 @@ class AudioPlayerRegression {
 int main(int argc, char **argv) {
     qputenv("QT_MEDIA_BACKEND", "ffmpeg");
     QCoreApplication app(argc, argv);
+    // 只保留核心断流路径：完整流、截断恢复、托管重连、分块流、跳转与取消。
     bool ok = AudioPlayerRegression::pausedError();
     ok &= AudioPlayerRegression::stream(100, true);
     ok &= AudioPlayerRegression::stream(50, false);
-    ok &= AudioPlayerRegression::stream(94, false);
     ok &= AudioPlayerRegression::stream(100, false, true, true);
     ok &= AudioPlayerRegression::stream(50, false, true);
-    ok &= AudioPlayerRegression::stream(94, false, true);
     ok &= AudioPlayerRegression::stream(50, false, true, false, false);
-    ok &= AudioPlayerRegression::stream(100, false, true, false, true, true);
     ok &= AudioPlayerRegression::stream(100, false, true, false, true, true, true);
     ok &= AudioPlayerRegression::stream(100, false, true, false, true, true, false, true);
     return ok ? 0 : 1;

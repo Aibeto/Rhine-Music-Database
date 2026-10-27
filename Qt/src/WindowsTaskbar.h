@@ -31,7 +31,6 @@ class WindowsTaskbar : public QObject, public QAbstractNativeEventFilter {
     bool eventFilter(QObject *watched, QEvent *event) override;
 
   private:
-    friend struct WindowsTaskbarProbe;
     void bindEngine(Engine *engine);
     void resetToolbar();
     void initializeToolbar();
