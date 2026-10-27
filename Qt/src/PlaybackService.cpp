@@ -40,9 +40,7 @@ PlaybackService::PlaybackService(QString root, QString guiExecutable, bool offli
     connect(&m_interfaceSession, &InterfaceSession::restorationRequested, this,
             [this] { send(m_gui, {{"event", "restore"}}); });
     connect(&m_interfaceSession, &InterfaceSession::suspensionRequested, this,
-            [this](bool canResetSurface) {
-                send(m_gui, {{"event", "suspend"}, {"canResetSurface", canResetSurface}});
-            });
+            [this] { send(m_gui, {{"event", "suspend"}}); });
     connect(&m_interfaceSession, &InterfaceSession::stateChanged, this, &PlaybackService::publish);
     auto provider = m_host.preference("provider");
     if (!QStringList{"netease", "qq", "kugou", "local"}.contains(provider)) {
@@ -163,6 +161,9 @@ void PlaybackService::publish() {
         return;
     }
     auto snapshot = m_player.playbackSnapshot();
+    snapshot["provider"] = m_api.provider;
+    snapshot["accountEpoch"] = m_host.epoch;
+    snapshot["metadataRevision"] = m_host.metadataVersion();
     snapshot["selectionSerial"] = m_selectionSerial;
     snapshot["selectedTrack"] = m_selectedTrack;
     snapshot["servicePid"] = double(QCoreApplication::applicationPid());

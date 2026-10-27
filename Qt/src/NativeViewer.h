@@ -4,10 +4,14 @@
 #include "SceneMotion.h"
 #include <QPointF>
 #include <optional>
+#include <memory>
 
 class NativeViewer {
   public:
     explicit NativeViewer(QString root);
+    struct ResumeState;
+    std::shared_ptr<ResumeState> captureResumeState() const;
+    void restoreResumeState(const ResumeState &state);
     bool isOpen() const;
     bool pending() const;
     void open(double time);

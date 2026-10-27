@@ -46,7 +46,7 @@ class InterfaceSession : public QObject {
 
   signals:
     void activationRequested();
-    void suspensionRequested(bool canResetSurface);
+    void suspensionRequested();
     void restorationRequested();
     void stateChanged();
 

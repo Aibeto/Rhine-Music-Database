@@ -20,7 +20,7 @@ class Engine : public QObject {
     Q_PROPERTY(QVariantMap performance READ performance NOTIFY stateChanged)
   public:
     Engine(QString root, bool offline = false, QObject *parent = nullptr,
-           PlaybackConnection *connection = nullptr);
+           PlaybackConnection *connection = nullptr, QJsonObject resumeState = {});
     ~Engine() override;
     QVariantMap state() const {
         return m_state;
@@ -71,6 +71,9 @@ class Engine : public QObject {
     Q_INVOKABLE void wheel(double x, double y, double delta, bool pixels = false);
     Q_INVOKABLE void snapshot(QString path);
     void step(double time);
+    double animationTime() const;
+    bool restoredSession() const;
+    void restorePresentation(const NativeScene::ResumeState &state, double time);
     QVariantMap performance() const;
     SceneDrawBuffers drawBuffers() const {
         return scene.drawBuffers;
@@ -172,6 +175,7 @@ class Engine : public QObject {
     qint64 m_paceStepSum = 0, m_paceStepMax = 0;
     int m_paceTicks = 0;
     double m_animationTime = 0;
+    bool m_restoredSession = false;
     double m_discAngle = 0;
     double m_discTime = 0;
     bool m_discRotating = false;

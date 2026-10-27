@@ -35,7 +35,8 @@ bool runNativeMusicChecks(const QString &root);
 bool runGpuReferenceCheck(const QImage &expected, const QImage &actual);
 
 /** 建立纯原生音乐、HUD 和场景状态；Qt 定时器只在输入或动画尚未收束时运行。 */
-Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *connection)
+Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *connection,
+               QJsonObject resumeState)
     : QObject(parent), host(path, offline, nullptr, false, connection), scene(path), m_glyphs(path) {
     // FSR3 抖动默认关闭；环境变量在进程启动时读取一次，运行期不再变化。
     m_jitterEnabled = qEnvironmentVariableIntValue("RHINE_JITTER") == 1;
@@ -53,7 +54,7 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
         }
     });
 #endif
-    app->initialize();
+    m_restoredSession = app->initialize(resumeState);
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this,
             [this] { app->saveSession(); });
     connect(&host, &Host::invalidated, this, [this] { wake(false); });
@@ -107,6 +108,18 @@ Engine::~Engine() {
 }
 bool Engine::ready() const {
     return scene.ready();
+}
+double Engine::animationTime() const {
+    return m_animationTime;
+}
+bool Engine::restoredSession() const {
+    return m_restoredSession;
+}
+void Engine::restorePresentation(const NativeScene::ResumeState &state, double time) {
+    if (m_restoredSession) {
+        scene.restoreResumeState(state);
+        m_animationTime = time;
+    }
 }
 namespace {
 // 鼠标滚轮一格的距离按设置页与歌词的行高换算，约一行内容；触控板保留系统给出的连续像素距离。

@@ -156,13 +156,7 @@ void InterfaceSession::updateVisibility() {
         if (shouldSuspend && !m_state.suspended && !m_activateNext) {
             m_state.restoreRequiresUser = !presence.automaticRestoreAllowed || presence.stagedAway;
             m_state.suspended = true;
-            // 仅在经典桌面、同一 Space 且非全屏/台前调度时重建表面；
-            // 此时窗口被遮挡，隐藏再置底可释放 GPU 资源，
-            // 同时不改变 Space、调度组或前台应用。
-            const bool canResetSurface = presence.covered && presence.workspaceActive &&
-                                         !presence.stagedAway && presence.automaticRestoreAllowed &&
-                                         !m_state.fullscreen;
-            emit suspensionRequested(canResetSurface);
+            emit suspensionRequested();
         } else if (!shouldSuspend && m_state.suspended && !m_state.restoreRequiresUser) {
             m_state.suspended = false;
             emit restorationRequested();

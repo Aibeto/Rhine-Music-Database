@@ -30,7 +30,7 @@ NativeApplication::NativeApplication(Host *host, Glyphs *glyphs, NativeScene *sc
             [scene](QString key) { scene->musicIdentity(key); });
     connect(&music, &MusicLibrary::musicClearRequested, this, [scene]() { scene->musicClear(); });
 }
-void NativeApplication::initialize() {
+bool NativeApplication::initialize(const QJsonObject &resumeState) {
     m_scene->theme(hud.dark);
     m_scene->reduced(hud.reduced);
     const auto startupPreference = m_host->preference("startup-animation");
@@ -50,18 +50,22 @@ void NativeApplication::initialize() {
     if (!m_host->playbackConnection()) {
         music.player.volume(valid && std::isfinite(volume) ? volume : 0.7);
     }
-    if (!m_host->offline) {
+    bool resumed = false;
+    if (!resumeState.isEmpty()) {
+        resumed = restoreSessionState(resumeState);
+    } else if (!m_host->offline) {
         QFile file(AppStorage::dataDirectory() + "/session.json");
         if (file.open(QIODevice::ReadOnly) && file.size() <= 64 * 1024 * 1024) {
             restoreSessionState(QJsonDocument::fromJson(file.readAll()).object());
         }
     }
     // 会话先恢复浏览与播放状态，再决定是否展示初始化页，避免旧场景模式覆盖开关。
-    if (firstLaunch || hud.startupAnimation) {
+    if (resumeState.isEmpty() && (firstLaunch || hud.startupAnimation)) {
         hud.action("replay");
     }
     music.restoreAccount();
     music.restoreIdentityName();
+    return resumed;
 }
 QJsonObject NativeApplication::step(double time, double width, bool reuseScene) {
     const auto frame = reuseScene ? music.frame : m_scene->sample(time);

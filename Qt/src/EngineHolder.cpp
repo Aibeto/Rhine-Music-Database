@@ -27,8 +27,8 @@ void relieveMemoryPressure() {
 #ifdef Q_OS_MACOS
     malloc_zone_pressure_relief(nullptr, 0);
 #elif defined(Q_OS_WIN)
-    HeapCompact(GetProcessHeap(), 0);
-    SetProcessWorkingSetSize(GetCurrentProcess(), (SIZE_T)-1, (SIZE_T)-1);
+    // 已释放的物理页交还系统；不遍历或压缩进程堆，图形资源由呈现层负责销毁。
+    SetProcessWorkingSetSize(GetCurrentProcess(), SIZE_T(-1), SIZE_T(-1));
 #else
     malloc_trim(0);
 #endif
@@ -59,7 +59,13 @@ bool EngineHolder::startInternal() {
     if (m_engine) {
         return true;
     }
-    m_engine = std::make_unique<Engine>(m_root, m_offline, nullptr, m_connection);
+    m_engine = std::make_unique<Engine>(m_root, m_offline, nullptr, m_connection, m_resumeState);
+    if (m_sceneState) {
+        m_engine->restorePresentation(*m_sceneState, m_animationTime);
+    }
+    // 恢复后由新引擎持有状态，挂起检查点不继续占用已失去用途的元数据。
+    m_resumeState = {};
+    m_sceneState.reset();
     m_profiler = std::make_unique<FrameProfiler>(m_engine.get(), m_profilePath);
     connect(m_engine.get(), &Engine::performanceRequested, m_profiler.get(), &FrameProfiler::toggleVisible);
     if (m_context) {
@@ -74,7 +80,11 @@ void EngineHolder::stop() {
     if (!m_engine) {
         return;
     }
-    emit stopping(m_engine.get());
+    // 只保留元数据和场景纯值，不保留引擎、图片、QML 或 GPU 资源。
+    m_resumeState = m_engine->app->sessionState();
+    m_resumeState.remove("player");
+    m_sceneState = m_engine->scene.captureResumeState();
+    m_animationTime = m_engine->animationTime();
     if (m_context) {
         m_context->setContextProperty("rhine", QVariant::fromValue<QObject *>(nullptr));
         m_context->setContextProperty("profiler", QVariant::fromValue<QObject *>(nullptr));

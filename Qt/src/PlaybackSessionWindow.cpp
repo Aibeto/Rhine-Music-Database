@@ -13,6 +13,8 @@
 #include <QJsonObject>
 #include <QProcess>
 #include <QScreen>
+#include <QScopedValueRollback>
+#include <utility>
 #include <QThread>
 #include <QTimer>
 #include <QWindow>
@@ -53,7 +55,8 @@ bool connectPlaybackService(PlaybackConnection &connection, const QString &root,
 
 PlaybackSessionWindow::PlaybackSessionWindow(PlaybackConnection *connection, QWindow *window,
                                              PresentationShell *shell, EngineHolder *holder, QObject *parent)
-    : QObject(parent), m_connection(connection), m_window(window), m_shell(shell), m_holder(holder) {
+    : QObject(parent), m_transition([this] { applyTransition(); }, this), m_connection(connection),
+      m_window(window), m_shell(shell), m_holder(holder) {
     auto settings = AppStorage::settings();
     const auto savedGeometry = settings.value("interface/geometry").toRect();
     if (savedGeometry.isValid()) {
@@ -77,52 +80,41 @@ PlaybackSessionWindow::PlaybackSessionWindow(PlaybackConnection *connection, QWi
     notifyScreen();
     connect(m_window, &QWindow::screenChanged, this, notifyScreen);
     connect(m_window, &QWindow::windowStateChanged, this, [this, notifyScreen](Qt::WindowState state) {
-        if (m_resettingSurface) {
+        if (m_changingWindowState) {
             return;
         }
         notifyScreen();
         if (state == Qt::WindowMinimized) {
-            suspendRendering();
+            requestSuspension();
         }
     });
     connect(m_window, &QWindow::visibilityChanged, this, [this](QWindow::Visibility visibility) {
-        if (m_resettingSurface) {
+        if (m_changingWindowState) {
             return;
         }
         if (visibility == QWindow::Hidden || visibility == QWindow::Minimized) {
-            suspendRendering();
+            requestSuspension();
         } else {
-            restoreRendering();
+            requestRestoration();
             m_savedStates = m_window->windowStates() & (Qt::WindowMaximized | Qt::WindowFullScreen);
         }
     });
     connect(qGuiApp, &QGuiApplication::applicationStateChanged, this, [this](Qt::ApplicationState state) {
-        if (m_resettingSurface) {
+        if (m_changingWindowState) {
             return;
         }
         if (state == Qt::ApplicationHidden) {
-            suspendRendering();
+            requestSuspension();
         } else if (state == Qt::ApplicationActive) {
             if (m_window->isVisible() && m_window->visibility() != QWindow::Minimized) {
-                restoreRendering();
+                requestRestoration();
             }
         }
     });
 
-    connect(m_connection, &PlaybackConnection::restoreRequested, this,
-            &PlaybackSessionWindow::restoreRendering);
-    connect(
-        m_connection, &PlaybackConnection::suspendRequested, this,
-        [this](bool canResetSurface) { suspendRendering(true, canResetSurface); }, Qt::QueuedConnection);
-    connect(m_connection, &PlaybackConnection::activateRequested, this, [this] {
-        restoreRendering();
-        const auto states = m_window->windowStates() & ~Qt::WindowMinimized;
-        m_window->setWindowStates(states);
-        m_window->setVisible(true);
-        m_window->setWindowStates(states);
-        m_window->raise();
-        m_window->requestActivate();
-    });
+    connect(m_connection, &PlaybackConnection::restoreRequested, this, [this] { requestRestoration(); });
+    connect(m_connection, &PlaybackConnection::suspendRequested, this, [this] { requestSuspension(true); });
+    connect(m_connection, &PlaybackConnection::activateRequested, this, [this] { requestRestoration(true); });
     connect(m_connection, &PlaybackConnection::closeWindowRequested, m_window, &QWindow::close,
             Qt::QueuedConnection);
     connect(
@@ -147,22 +139,61 @@ PlaybackSessionWindow::~PlaybackSessionWindow() = default;
 bool PlaybackSessionWindow::eventFilter(QObject *watched, QEvent *event) {
     if (watched == QCoreApplication::instance() && event->type() == QEvent::Quit) {
         m_explicitExit = true;
+        m_transition.cancel();
     }
     if (watched == m_window && (event->type() == QEvent::Move || event->type() == QEvent::Resize) &&
-        !m_resettingSurface && m_window->visibility() == QWindow::Windowed) {
+        !m_changingWindowState && m_window->visibility() == QWindow::Windowed) {
         m_normalGeometry = m_window->geometry();
+    }
+    if (watched == m_window && event->type() == QEvent::Expose && m_restoreWhenExposed &&
+        m_window->isExposed() && m_window->visibility() != QWindow::Minimized) {
+        requestRestoration();
     }
     if (watched == m_window && event->type() == QEvent::Close && !m_explicitExit) {
         m_window->hide();
-        suspendRendering();
+        requestSuspension();
         event->ignore();
         return true;
     }
     return QObject::eventFilter(watched, event);
 }
 
+/** 原生事件与服务通知只提交意图；手动收起不能被同批被动恢复覆盖。 */
+void PlaybackSessionWindow::requestSuspension(bool automatic) {
+    if (m_explicitExit || (automatic && m_intent == Intent::Activate)) {
+        return;
+    }
+    if (!automatic || m_intent != Intent::SuspendManually) {
+        m_intent = automatic ? Intent::SuspendAutomatically : Intent::SuspendManually;
+    }
+    m_transition.request();
+}
+
+void PlaybackSessionWindow::requestRestoration(bool activate) {
+    if (m_explicitExit || (!activate && m_intent == Intent::SuspendManually)) {
+        return;
+    }
+    if (activate || m_intent != Intent::Activate) {
+        m_intent = activate ? Intent::Activate : Intent::Restore;
+    }
+    m_transition.request();
+}
+
+/** 所有入口在同一迁移边界收敛，原生消息处理期间不卸载 QML 或图形设备。 */
+void PlaybackSessionWindow::applyTransition() {
+    if (m_explicitExit) {
+        return;
+    }
+    const auto intent = std::exchange(m_intent, Intent::None);
+    if (intent == Intent::SuspendManually || intent == Intent::SuspendAutomatically) {
+        suspendRendering(intent == Intent::SuspendAutomatically);
+    } else if (intent == Intent::Restore || intent == Intent::Activate) {
+        restoreRendering(intent == Intent::Activate);
+    }
+}
+
 /** 挂起为静态页：先切换呈现层，再销毁业务引擎；窗口与原生句柄保持不变。 */
-void PlaybackSessionWindow::suspendRendering(bool automatic, bool resetSurface) {
+void PlaybackSessionWindow::suspendRendering(bool automatic) {
     // 关闭与最小化会同时触发窗口状态和可见性回调，只上报一次挂起意图。
     if (!m_suspensionReported || m_automaticSuspension != automatic) {
         m_suspensionReported = true;
@@ -172,6 +203,7 @@ void PlaybackSessionWindow::suspendRendering(bool automatic, bool resetSurface) 
     if (m_suspended) {
         return;
     }
+    m_restoreWhenExposed = false;
     m_suspended = true;
     const auto release = [this] {
         if (!m_shell->suspendToStatic()) {
@@ -194,47 +226,41 @@ void PlaybackSessionWindow::suspendRendering(bool automatic, bool resetSurface) 
         return;
     }
 
-    // 被遮挡的窗口不会出帧，QRhi 延迟清理无法执行；
-    // 此时重建一次表面把旧资源交还系统。只在经典桌面且窗口被遮挡时执行，
-    // 隐藏后立即置底，不改变 Space、调度组或前台应用。
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    if (resetSurface && m_shell->renderState().value("graphicsDevice").toBool() &&
-        m_window->visibility() != QWindow::Minimized) {
-        m_resettingSurface = true;
-#ifdef Q_OS_WIN
-        // Windows 上 show() 可能抢占前台；挂起期间保持不接收焦点，恢复时再解除。
-        if (!m_window->flags().testFlag(Qt::WindowDoesNotAcceptFocus)) {
-            m_window->setFlag(Qt::WindowDoesNotAcceptFocus, true);
-            m_resetFocusGuard = true;
-        }
-#endif
-        const auto states = m_window->windowStates() & ~Qt::WindowMinimized;
-        m_window->hide();
-        m_window->show();
-        m_window->setWindowStates(states);
-        m_window->lower();
-        m_resettingSurface = false;
-    }
-#else
-    Q_UNUSED(resetSurface);
-#endif
+    // 原生静态页已经销毁完整设备，不再隐藏、重显或改窗口标志来催促回收。
     publishRenderState();
 }
 
 /** 在同一窗口重建业务引擎与真实界面；服务端音频与队列不受影响。 */
-void PlaybackSessionWindow::restoreRendering() {
+void PlaybackSessionWindow::restoreRendering(bool activate) {
+    // 主动打开只在这里额外显示并激活窗口；后续暴露检查、引擎与输入恢复完全共用。
+    if (activate) {
+        QScopedValueRollback changingState(m_changingWindowState, true);
+        const auto states = m_window->windowStates() & ~Qt::WindowMinimized;
+        m_window->setWindowStates(states);
+        m_window->setVisible(true);
+        m_window->setWindowStates(states);
+        m_window->raise();
+        m_window->requestActivate();
+    }
+    if (!m_window->isVisible() || !m_window->isExposed() || m_window->visibility() == QWindow::Minimized) {
+        m_restoreWhenExposed = true;
+        return;
+    }
+    m_restoreWhenExposed = false;
     if (!m_suspended) {
         return;
     }
     m_suspended = false;
     m_suspensionReported = false;
-#ifdef Q_OS_WIN
-    if (m_resetFocusGuard) {
-        m_resetFocusGuard = false;
-        m_window->setFlag(Qt::WindowDoesNotAcceptFocus, false);
+    if (!m_holder->start()) {
+        m_suspended = true;
+        return;
     }
-#endif
-    m_holder->start();
+    auto engine = m_holder->engine();
+    engine->resize(m_window->width(), m_window->height());
+    engine->setVisible(true);
+    engine->start();
+    engine->step(engine->animationTime());
     if (!m_shell->resumeFromStatic()) {
         m_suspended = true;
         m_shell->setBackend(nullptr);

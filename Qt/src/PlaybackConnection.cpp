@@ -138,7 +138,7 @@ void PlaybackConnection::readMessages() {
         } else if (message["event"] == "restore") {
             emit restoreRequested();
         } else if (message["event"] == "suspend") {
-            emit suspendRequested(message["canResetSurface"].toBool());
+            emit suspendRequested();
         } else if (message["event"] == "close-window") {
             emit closeWindowRequested();
         } else if (message["event"] == "diagnostic") {

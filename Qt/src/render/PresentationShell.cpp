@@ -57,11 +57,23 @@ quint64 bindingKey(const QRhiTexture *a, const QRhiTexture *b) {
 
 PresentationShell::PresentationShell(QQmlEngine &engine, Engine &backend, QString backendName,
                                      QObject *parent)
-    : QObject(parent), m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
+    : QObject(parent), m_quitTransition(
+                           [this] {
+                               shutdown();
+                               QCoreApplication::quit();
+                           },
+                           this),
+      m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
+}
+
+/** QML 快捷键与原生关闭统一等待当前回调返回，避免退出时删除正在执行的信号对象。 */
+void PresentationShell::requestQuit() {
+    m_quitTransition.request();
 }
 
 /** 停调度并按 GPU 引用顺序释放资源；原生窗口留到析构，避免在自身事件处理中销毁。 */
 void PresentationShell::shutdown() {
+    m_quitTransition.cancel();
     if (m_stopped) {
         return;
     }
@@ -201,10 +213,10 @@ bool PresentationShell::initializeLayers() {
     // QQuickRenderControl 的离屏窗口没有平台窗口、永远不会被激活，Qt 也不会像真实
     // 窗口那样在激活时自动传播 activeFocus——实测此时 window.activeFocusItem() 为
     // null，QQuickWindow 收到 KeyPress 后无处投递，按键被直接丢弃。
-    // 这里显式调一次 Overlay.qml 导出的 focusInputLayer()（内部是 forceActiveFocus，
-    // 对未激活的离屏窗口同样有效），与默认路径对齐。
+    // 显式恢复当前面板的焦点；重建后可能仍在搜索框，不能统一交回快捷键层。
     if (QQuickItem *overlayRoot = m_host->overlayRootItem()) {
-        const bool focused = QMetaObject::invokeMethod(overlayRoot, "focusInputLayer", Qt::DirectConnection);
+        const bool focused =
+            QMetaObject::invokeMethod(overlayRoot, "restoreInputFocus", Qt::DirectConnection);
         QQuickItem *focusItem = m_host->overlayWindow()->activeFocusItem();
         qInfo().noquote() << "FG: 覆盖层输入焦点" << (focused && focusItem ? "已建立" : "未建立")
                           << "activeFocusItem:"
@@ -402,6 +414,16 @@ bool PresentationShell::resumeInternal() {
     m_rhi->finish();
     releaseSwapchainResources();
     releaseHost();
+    // 新引擎和新设备的帧序号不能沿用旧场景的调度、失败及插值状态。
+    m_failed = false;
+    m_fgArmed = false;
+    m_lastTapSerial = 0;
+    m_lastEngineSteps = 0;
+    m_framesSinceRecreate = 0;
+    m_recreateStreak = 0;
+    m_frameClock.invalidate();
+    m_stepClock.invalidate();
+    m_stepEndNs = 0;
     m_suspended = false;
     if (!initializeLayers()) {
         // 恢复失败时退回静态页，窗口至少要继续显示有效内容。
@@ -1091,12 +1113,10 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
     }
     switch (event->type()) {
     case QEvent::Close:
-        // 与 Ctrl+Q 同一条退出顺序：先把交换链/呈现层拆掉，再让事件循环退出。
-        // 反过来（只 quit()）实测进程根本不退：呈现层还活着，析构里的排空卡死。
-        qWarning().noquote() << "FG: 窗口关闭 → 先拆呈现层再退出事件循环";
-        shutdown();
-        QCoreApplication::quit();
-        return false;
+        // 关闭可能来自 QML 按钮；先拦截原生销毁，再在输入栈退出后拆交换链并结束进程。
+        event->ignore();
+        requestQuit();
+        return true;
     case QEvent::Expose:
         if (m_window->isExposed()) {
             m_needRecreate = true;

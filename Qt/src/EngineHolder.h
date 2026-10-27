@@ -1,8 +1,10 @@
 #pragma once
 
 #include <QObject>
+#include <QJsonObject>
 #include <QString>
 #include <memory>
+#include "NativeScene.h"
 
 class Engine;
 class FrameProfiler;
@@ -39,8 +41,6 @@ class EngineHolder : public QObject {
   signals:
     /// 引擎就绪，调用方可重新绑定渲染层。
     void started(Engine *engine);
-    /// 引擎即将销毁，调用方必须先断开所有引用。
-    void stopping(Engine *engine);
 
   private:
     bool startInternal();
@@ -49,6 +49,9 @@ class EngineHolder : public QObject {
     QQmlContext *m_context;
     PlaybackConnection *m_connection;
     QString m_profilePath;
+    QJsonObject m_resumeState;
+    std::shared_ptr<NativeScene::ResumeState> m_sceneState;
+    double m_animationTime = 0;
     std::unique_ptr<Engine> m_engine;
     std::unique_ptr<FrameProfiler> m_profiler;
 };

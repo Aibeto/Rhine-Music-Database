@@ -159,12 +159,14 @@ set(RHINE_APP_SOURCES
     Qt/src/NativeApplication.cpp
     Qt/src/NativeScene.h
     Qt/src/NativeScene.cpp
+    Qt/src/NativeSceneSession.cpp
     Qt/src/NativeSceneUpdate.cpp
     Qt/src/NativeSceneCamera.cpp
     Qt/src/NativeSceneFrame.cpp
     Qt/src/NativeSceneInput.cpp
     Qt/src/NativeViewer.h
     Qt/src/NativeViewer.cpp
+    Qt/src/NativeViewerSession.cpp
     Qt/src/SceneMath.h
     Qt/src/SceneMath.cpp
     Qt/src/SceneDrag.h
@@ -178,6 +180,10 @@ set(RHINE_APP_SOURCES
     Qt/src/MusicDiscover.cpp
     Qt/src/MusicDiscover.h
     Qt/src/Platform.cpp
+    Qt/src/DesktopPlaybackControls.cpp
+    Qt/src/DesktopPlaybackControls.h
+    Qt/src/DeferredWindowTransition.cpp
+    Qt/src/DeferredWindowTransition.h
     Qt/src/Engine.cpp
     Qt/src/Engine.h
     Qt/src/Hud.cpp
@@ -367,10 +373,11 @@ target_link_libraries(
 # 平台分支只处理原生能力、部署身份及链接依赖。
 if(NOT IOS)
     find_package(Qt6 6.12 REQUIRED COMPONENTS Widgets)
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/EngineHolder.cpp Qt/src/EngineHolder.h
-                                              Qt/src/PlaybackSessionWindow.cpp
-                                              Qt/src/PlaybackSessionWindow.h
-                                              Qt/tests/PlaybackServiceChecks.cpp)
+    target_sources(
+        RhineMusicDatabase
+        PRIVATE Qt/src/EngineHolder.cpp Qt/src/EngineHolder.h Qt/tests/WindowTransitionChecks.cpp
+                Qt/src/PlaybackSessionWindow.cpp Qt/src/PlaybackSessionWindow.h
+                Qt/tests/PlaybackServiceChecks.cpp)
     if(WIN32 OR (APPLE AND NOT IOS))
         target_sources(RhineMusicDatabase PRIVATE Qt/src/DesktopTray.cpp Qt/src/DesktopTray.h)
         target_link_libraries(RhineMusicDatabase PRIVATE Qt6::Widgets)
@@ -416,8 +423,8 @@ if(NOT IOS)
                        AUTOUIC OFF
                        AUTORCC OFF)
         add_dependencies(RhineMusicDatabase RhineDesktopFixture)
-        target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityWindows.cpp Qt/src/ServiceTray.cpp
-                                                    Qt/src/ServiceTray.h)
+        target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityWindows.cpp
+                                                    Qt/src/ServiceTray.cpp Qt/src/ServiceTray.h)
         target_link_libraries(RhinePlaybackService PRIVATE dwmapi)
     elseif(UNIX)
         target_sources(RhinePlaybackService PRIVATE Qt/src/DesktopVisibilityX11.cpp)
@@ -468,7 +475,10 @@ elseif(APPLE)
                    MACOSX_BUNDLE_BUNDLE_NAME "RHINE MUSIC DATABASE"
                    MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/Qt/Info.plist.in")
 elseif(WIN32)
-    target_sources(RhineMusicDatabase PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp)
+    target_sources(
+        RhineMusicDatabase PRIVATE Qt/src/WindowsGraphics.cpp Qt/src/WindowsTaskbar.cpp
+                                   Qt/src/render/WindowsStaticImage.cpp Qt/src/render/WindowsStaticImage.h
+                                   Qt/tests/WindowsWindowChecks.cpp)
     target_link_libraries(RhineMusicDatabase PRIVATE dxgi ole32 uuid gdi32 dwmapi)
     if(RHINE_ENABLE_D3D12_BACKEND)
         target_link_libraries(RhineMusicDatabase PRIVATE d3d12)

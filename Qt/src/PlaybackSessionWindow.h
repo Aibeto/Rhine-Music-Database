@@ -1,5 +1,6 @@
 #pragma once
 
+#include "DeferredWindowTransition.h"
 #include <QObject>
 #include <QRect>
 #include <QString>
@@ -34,21 +35,27 @@ class PlaybackSessionWindow : public QObject {
     bool eventFilter(QObject *watched, QEvent *event) override;
 
   private:
-    void suspendRendering(bool automatic = false, bool resetSurface = false);
-    void restoreRendering();
+    enum class Intent { None, SuspendAutomatically, SuspendManually, Restore, Activate };
+    void requestSuspension(bool automatic = false);
+    void requestRestoration(bool activate = false);
+    void applyTransition();
+    void suspendRendering(bool automatic);
+    void restoreRendering(bool activate);
     void notifyScreen();
     void saveInterfaceState();
 
+    DeferredWindowTransition m_transition;
+    Intent m_intent = Intent::None;
     PlaybackConnection *m_connection;
     QWindow *m_window;
     PresentationShell *m_shell;
     EngineHolder *m_holder;
     QRect m_normalGeometry;
     Qt::WindowStates m_savedStates;
+    bool m_restoreWhenExposed = false;
     bool m_suspended = false;
     bool m_suspensionReported = false;
     bool m_automaticSuspension = false;
     bool m_explicitExit = false;
-    bool m_resettingSurface = false;
-    bool m_resetFocusGuard = false;
+    bool m_changingWindowState = false;
 };

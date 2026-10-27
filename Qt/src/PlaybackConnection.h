@@ -25,7 +25,7 @@ class PlaybackConnection : public QObject {
     void snapshotChanged();
     void activateRequested();
     void quitRequested();
-    void suspendRequested(bool canResetSurface);
+    void suspendRequested();
     void restoreRequested();
     void closeWindowRequested();
     void disconnected();

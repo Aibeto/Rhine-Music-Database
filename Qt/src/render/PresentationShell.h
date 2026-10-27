@@ -3,6 +3,7 @@
 #include "../fg/FgStats.h"
 #include "../fg/FgFrameTap.h"
 #include "PresentationBackend.h"
+#include "../DeferredWindowTransition.h"
 #include "FrameGenerator.h"
 
 #include <QByteArray>
@@ -71,6 +72,7 @@ class PresentationShell : public QObject {
      * 幂等，析构路径会再调用一次。
      */
     void shutdown();
+    void requestQuit();
 
     bool start();
 
@@ -109,6 +111,7 @@ class PresentationShell : public QObject {
     bool eventFilter(QObject *watched, QEvent *event) override;
 
   private:
+    DeferredWindowTransition m_quitTransition;
     /// 交换链要的物理像素尺寸（逻辑尺寸 × 设备像素比）。
     QSize pixelSize() const;
     /// 同步补焦点：按键到达时若没有焦点项就当场重建。

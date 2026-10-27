@@ -987,6 +987,12 @@ void Host::invalidateMetadata() {
         metadata.remove(name);
     }
 }
+int Host::metadataVersion() const {
+    return metadataRevision;
+}
+void Host::clearPreferenceCache() {
+    remotePreferences.clear();
+}
 namespace {
 // 可读写的偏好键。读取与写入必须共用同一份名单：两份名单一旦分叉，写入会成功但读回
 // 为空，界面上的表现就是"设置完立刻跳回原值"。
@@ -999,8 +1005,7 @@ const QStringList &preferenceKeys() {
         // 换卡后序号可能指向另一张卡或不存在，启动时由 initializeLinuxGraphics 校验并回退。
         "gpu-index", "vsync", "supersample", "render-scale", "aa-mode", "aa-scale", "msaa", "fsr-quality",
         "fsr-sharpness", "fg", "performance-mode", "auto-update", "volume", "quality", "alternate-source",
-        "provider",
-        "lyrics-cache", "lyrics-global-offset-ms", "welcome-name-netease", "welcome-name-qq",
+        "provider", "lyrics-cache", "lyrics-global-offset-ms", "welcome-name-netease", "welcome-name-qq",
         "welcome-name-kugou", "account-id-netease", "account-id-qq", "account-id-kugou", "kugou-edition",
         "welcome-name-kugou-standard", "welcome-name-kugou-lite", "account-id-kugou-standard",
         "account-id-kugou-lite"};

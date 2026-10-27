@@ -57,6 +57,8 @@ class Host : public QObject {
     }
     Q_INVOKABLE bool systemDark() const;
     Q_INVOKABLE void invalidateMetadata();
+    int metadataVersion() const;
+    void clearPreferenceCache();
     Q_INVOKABLE QString preference(QString key) const;
     Q_INVOKABLE void setPreference(QString key, QString value);
     Q_INVOKABLE bool activates() const;

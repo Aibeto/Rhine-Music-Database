@@ -1,4 +1,7 @@
 #include "PlaybackConnection.h"
+#include "DesktopPlaybackControls.h"
+#include "Engine.h"
+#include "render/PresentationShell.h"
 #include "DesktopVisibility.h"
 #include <QAudioDevice>
 #include <QCoreApplication>
@@ -9,13 +12,21 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QJsonArray>
+#include <QKeyEvent>
+#include <QInputMethodEvent>
+#include <QMouseEvent>
 #include <QMediaDevices>
 #include <QProcess>
+#include <QQuickItem>
 #include <QProcessEnvironment>
 #include <QTemporaryDir>
 #include <QThread>
+#include <QTimer>
 #include <QUrl>
 #include <memory>
+
+bool runWindowTransitionChecks();
+bool runEngineResumeChecks(const QString &resources);
 
 namespace {
 bool waitFor(const std::function<bool()> &ready, int timeoutMs = 10000) {
@@ -50,11 +61,69 @@ bool writeWave(const QString &path) {
 }
 }
 
+/** 调用实际窗口按钮的 QML activate()，覆盖信号回调仍在栈上的最小化/关闭路径。 */
+bool triggerWindowChromeAction(QQuickItem *item, const QString &action) {
+    if (item->objectName() == QStringLiteral("windowButton_") + action) {
+        return QMetaObject::invokeMethod(item, "activate", Qt::DirectConnection);
+    }
+    for (auto child : item->childItems()) {
+        if (triggerWindowChromeAction(child, action)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** 重建后从真实宿主窗口点击搜索并输入文字，覆盖只恢复图片却丢失输入层的回归。 */
+void verifyRestoredWindowInput(PresentationShell *shell, Engine *engine) {
+    QTimer::singleShot(500, engine, [shell, engine] {
+        if (shell->suspended() || !shell->inputWindow()) {
+            return;
+        }
+        for (const auto &entry : engine->hits()) {
+            const auto hit = entry.toMap();
+            if (hit["action"] != "search") {
+                continue;
+            }
+            const auto scale = shell->window()->height() / 1080.0;
+            const QPointF point((hit["x"].toDouble() + hit["width"].toDouble() / 2) * scale,
+                                (hit["y"].toDouble() + hit["height"].toDouble() / 2) * scale);
+            for (auto type : {QEvent::MouseButtonPress, QEvent::MouseButtonRelease}) {
+                QMouseEvent event(type, point, shell->window()->mapToGlobal(point), Qt::LeftButton,
+                                  type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton,
+                                  Qt::NoModifier);
+                QCoreApplication::sendEvent(shell->window(), &event);
+            }
+            break;
+        }
+        QTimer::singleShot(500, engine, [shell, engine] {
+            if (shell->suspended() || !shell->inputWindow()) {
+                return;
+            }
+            const auto before = engine->app->hud.query;
+            QKeyEvent key(QEvent::KeyPress, Qt::Key_A, Qt::NoModifier, "a");
+            QCoreApplication::sendEvent(shell->window(), &key);
+            QInputMethodEvent commit;
+            commit.setCommitString(QStringLiteral("测试"));
+            QCoreApplication::sendEvent(shell->window(), &commit);
+            const bool passed = engine->app->hud.modal == "search" &&
+                                engine->app->hud.query == before + QStringLiteral("a测试");
+            qInfo() << "PLAYBACK_GUI_RESTORED_INPUT" << passed;
+        });
+    });
+}
+
 /**
  * 用真实服务与 GUI 进程验证生命周期；
  * 所有数据和套接字均限定在本轮临时目录。
  */
 bool runPlaybackServiceChecks(const QString &sourceResources, const QString &executable, const QString &gui) {
+    if (!runWindowTransitionChecks()) {
+        return false;
+    }
+    if (!runEngineResumeChecks(sourceResources)) {
+        return false;
+    }
     auto desktopFixture = qEnvironmentVariable("RHINE_DESKTOP_FIXTURE");
     if (desktopFixture.isEmpty()) {
 #ifdef Q_OS_WIN
@@ -183,7 +252,8 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
         return waitFor([&] {
             const auto report = inspect();
             return report["suspended"].toBool() == suspended && report["liveContent"].toBool() != suspended &&
-                   (!suspended || (!report["timerActive"].toBool() && report["gpuResources"].toDouble() == 0));
+                   (!suspended ||
+                    (!report["timerActive"].toBool() && report["gpuResources"].toDouble() == 0));
         });
     };
     // 静态页挂起只在受控呈现层接管的平台上存在；离屏/回退路径跳过窗口验收，
@@ -221,10 +291,14 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
                 check(waitFor([&] { return inspect()["windowFrames"].toDouble() >= 1.0; }),
                       "suspended window still paints the static page frame");
             }
+#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
+            check(!inspect()["graphicsDevice"].toBool() && inspect()["nativeStaticImage"].toBool(),
+                  "native static page releases the entire graphics device");
+#endif
             const auto before = inspect();
             QElapsedTimer idle;
             idle.start();
-            waitFor([&] { return idle.elapsed() >= 700; }, 1500);
+            waitFor([&] { return idle.elapsed() >= 1800; }, 2500);
             const auto after = inspect();
             check(before["steps"] == after["steps"] && before["renderFrames"] == after["renderFrames"],
                   "static background page performs no scene simulation or 3D rendering");
@@ -265,7 +339,8 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
         check(waitRendering(false), "menu action restores the hidden original window");
         verifyIdentity();
         if (qEnvironmentVariable("QT_QPA_PLATFORM") == "cocoa") {
-            const auto nativeIdentity = connection->call("test.nativeCoverage")["backgroundIdentity"].toObject();
+            const auto nativeIdentity =
+                connection->call("test.nativeCoverage")["backgroundIdentity"].toObject();
             check(nativeIdentity["identifier"].toString().endsWith(".playback") &&
                       nativeIdentity["agent"].toBool() && nativeIdentity["accessory"].toBool(),
                   "playback helper retains its separate Dock-hidden identity");
@@ -344,6 +419,11 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
         check(waitRendering(false) && inspect()["windowId"] == originalId &&
                   retained.state() == QProcess::Running,
               "minimized or closed window restores using the same native handle");
+        check(waitFor([&] {
+                  retainedLog += retained.readAll();
+                  return retainedLog.contains("PLAYBACK_GUI_RESTORED_INPUT true");
+              }),
+              "restored window accepts real mouse, keyboard and input-method events");
         retained.kill();
         retained.waitForFinished();
         check(waitFor([&] {
@@ -353,6 +433,31 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
               "test window cleanup is observed");
     }
     if (output) {
+        // 这里没有存活的 GUI 引擎，控制模型仍应直接驱动服务。
+        DesktopPlaybackControls controls(resources, connection.get());
+        check(waitFor([&] { return controls.state()["canPlay"].toBool(); }),
+              "persistent taskbar model remains enabled without the GUI engine");
+        controls.trigger("toggle");
+        check(waitFor([&] { return !connection->snapshot()["state"].toObject()["requested"].toBool(); }),
+              "taskbar pause reaches the service while rendering is absent");
+        controls.trigger("toggle");
+        check(waitFor([&] { return connection->snapshot()["state"].toObject()["requested"].toBool(); }),
+              "taskbar resume reaches the service while rendering is absent");
+        controls.trigger("next");
+        check(waitFor([&] { return connection->snapshot()["current"].toObject()["id"] == "1"; }),
+              "taskbar next reaches the service without creating an engine");
+        controls.trigger("prev");
+        check(waitFor([&] { return connection->snapshot()["current"].toObject()["id"] == "0"; }),
+              "taskbar previous reaches the service without creating an engine");
+        check(!controls.state()["canLike"].toBool(), "local track never exposes an online mutation");
+    }
+    if (output) {
+        check(waitFor([&] {
+                  const auto snapshot = connection->snapshot();
+                  return !snapshot["loading"].toBool() &&
+                         snapshot["state"].toObject()["position"].toDouble() > 0;
+              }),
+              "taskbar track switch finishes loading before the EOF seek");
         connection->call("player.seek", {{"value", .99}});
         connection.reset();
         QElapsedTimer elapsed;
