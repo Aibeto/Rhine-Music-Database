@@ -1,6 +1,7 @@
 #include "NativeHud.h"
 #include "MusicData.h"
 #include "MusicDiscover.h"
+#include "SceneMotion.h"
 #include <QDebug>
 #include <QGuiApplication>
 #include <QDir>
@@ -93,6 +94,59 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
     bool ok = true;
     int testCount = 0;
 
+    // 用真实时间轴绘制初始化页，验证背景、普通文字与反色闪烁的像素对比。
+    {
+        QFile tracks(":/animation/boot-tracks.json");
+        if (!tracks.open(QIODevice::ReadOnly)) {
+            qCritical() << "Initialization animation tracks missing";
+            return false;
+        }
+        SceneMotion::BootTimeline timeline(QJsonDocument::fromJson(tracks.readAll()).object());
+        auto music = std::unique_ptr<MusicLibrary>(createTestMusicLibrary(&host, "netease", content));
+        HudSceneActions actions;
+        NativeHud bootHud(&host, &glyphs, music.get(), actions);
+        const auto output = qEnvironmentVariable("RHINE_BOOT_PREVIEW");
+        for (const bool dark : {false, true}) {
+            bootHud.dark = dark;
+            bootHud.themeMode = dark ? "dark" : "light";
+            for (const double time : {2., 5., 10., 15.5, 17.761, 19., 21.5}) {
+                bootHud.draw({{"mode", "boot"}, {"boot", timeline.sample(time)}}, 1920, time);
+                QImage image(960, 540, QImage::Format_ARGB32_Premultiplied);
+                image.fill(Qt::transparent);
+                QPainter painter(&image);
+                painter.setRenderHint(QPainter::Antialiasing);
+                painter.scale(0.5, 0.5);
+                glyphs.commands(painter, bootHud.commands, [](QString) { return QImage(); });
+                painter.end();
+                const auto background = image.pixelColor(10, 10);
+                if (background.alpha() != 255 ||
+                    (dark ? background.lightness() >= 80 : background.lightness() <= 180)) {
+                    qCritical() << "Initialization background ignores theme" << dark << time;
+                    ok = false;
+                }
+                if (time == 17.761 || time == 19.) {
+                    int minimum = 255;
+                    int maximum = 0;
+                    for (int y = 200; y < 240; ++y) {
+                        for (int x = 365; x < 595; ++x) {
+                            const int lightness = image.pixelColor(x, y).lightness();
+                            minimum = std::min(minimum, lightness);
+                            maximum = std::max(maximum, lightness);
+                        }
+                    }
+                    if (maximum - minimum < 120) {
+                        qCritical() << "Initialization welcome loses contrast" << dark << time;
+                        ok = false;
+                    }
+                }
+                if (!output.isEmpty()) {
+                    QDir().mkpath(output);
+                    image.save(output + (dark ? "/dark-" : "/light-") + QString::number(time) + ".png");
+                }
+            }
+        }
+    }
+
     // 测试所有平台和主题组合
     for (const auto &provider : {QString("netease"), QString("qq"), QString("kugou")}) {
         for (const bool dark : {false, true}) {
@@ -100,6 +154,8 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
 
             MusicLibrary *music = createTestMusicLibrary(&host, provider, content);
             HudSceneActions scene;
+            QString requestedMode;
+            scene.mode = [&](QString mode) { requestedMode = mode; };
             scene.theme = [](bool) {};
             NativeHud hud(&host, &glyphs, music, scene);
             hud.dark = dark;
@@ -204,7 +260,7 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
 
             const QStringList requiredSettings{
                 "theme",   "motion",        "startup-animation",  "detail-autoplay", "single-play-mode",
-                "quality", "disc-rotation", "performance:toggle", "update:check"};
+                "quality", "disc-rotation", "performance:toggle", "update:check",    "replay"};
             QSet<QString> visibleSettings;
             for (double offset = 0;; offset += 400) {
                 hud.settingsScroll = std::min(offset, hud.settingsScrollMaximum());
@@ -259,6 +315,18 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                 qCritical() << "Startup animation toggle failed" << provider << (dark ? "dark" : "light");
                 ok = false;
             }
+
+            const auto startupPreference = host.preference("startup-animation");
+            hud.action("replay");
+            if (requestedMode != "boot" || !hud.modal.isEmpty() || hud.closing ||
+                hud.startupAnimation != initialStartupAnim ||
+                host.preference("startup-animation") != startupPreference) {
+                qCritical()
+                    << "Manual initialization must close settings without changing startup preference";
+                ok = false;
+            }
+            hud.openModal("settings");
+            hud.draw(archiveFrame, 1920, 50);
 
             // === 测试 4: 设置面板滚动功能 ===
             const auto bounds = hud.modalBounds(1920);

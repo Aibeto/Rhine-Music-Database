@@ -473,6 +473,7 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"OFFICIAL PLAYER / 官方窗口", m_host->activates() ? "播放时显示" : "尽量保持后台",
                      "music:activate"});
     }
+    rows.insert(4, {"INITIALIZATION / 手动显示初始化页面", "Reinitialize ↗", "replay"});
     if (!PlatformFeatures::DesktopWindowControls) {
         rows.removeFirst();
     }

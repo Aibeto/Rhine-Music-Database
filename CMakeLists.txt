@@ -308,8 +308,7 @@ qt_add_resources(
     Assets/icons/icon-256.png
     Assets/icons/icon-512.png
     Assets/icons/icon-1024.png)
-# 着色器按原通道顺序打包，所有后端使用同一份公式。
-# GLSL 130 兼容 Windows 随包的软件 OpenGL，其他后端仍保留原有版本。
+# 着色器按原通道顺序打包，所有后端使用同一份公式。 GLSL 130 兼容 Windows 随包的软件 OpenGL，其他后端仍保留原有版本。
 qt_add_shaders(
     RhineMusicDatabase
     "rhine_shaders"
@@ -677,6 +676,15 @@ endif()
 qt_add_executable(RhineNativeHudRegression Qt/tests/NativeHudChecks.cpp)
 target_compile_definitions(RhineNativeHudRegression PRIVATE RHINE_HUD_REGRESSION_TEST_MAIN)
 target_link_libraries(RhineNativeHudRegression PRIVATE RhineCore)
+qt_add_resources(
+    RhineNativeHudRegression
+    "native_hud_tracks"
+    PREFIX
+    "/animation"
+    BASE
+    "Assets/animation"
+    FILES
+    Assets/animation/boot-tracks.json)
 if(MSVC)
     target_compile_options(RhineNativeHudRegression PRIVATE /utf-8)
 endif()

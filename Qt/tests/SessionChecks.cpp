@@ -35,6 +35,43 @@ bool runNativeSessionChecks(const QString &root, const QString &audioURL) {
     Glyphs glyphs(root);
     NativeScene scene(root);
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
+    // 实际写入配置和 session.json，再重建应用对象，覆盖开关关闭 -> 开启 -> 重启的路径。
+    {
+        Host startupHost(root, true);
+        startupHost.offline = false;
+        startupHost.fixture = [](QString, QJsonObject) {
+            return QJsonObject{{"body", QJsonObject{{"code", 200}}}};
+        };
+        {
+            NativeScene firstScene(root);
+            NativeApplication first(&startupHost, &glyphs, &firstScene, content);
+            first.initialize();
+            ok &= check(firstScene.mode() == "boot" && startupHost.preference("startup-animation") == "off",
+                        "first launch shows initialization once by default");
+            first.hud.action("skip");
+            first.music.keyword = "startup-session";
+            first.hud.openModal("settings");
+            first.hud.action("startup-animation");
+            first.saveSession();
+        }
+        for (const bool enabled : {true, false, true}) {
+            NativeScene restartedScene(root);
+            NativeApplication restarted(&startupHost, &glyphs, &restartedScene, content);
+            restarted.initialize();
+            ok &= check(restarted.hud.startupAnimation == enabled &&
+                            restartedScene.mode() == (enabled ? "boot" : "archive") &&
+                            restarted.music.keyword == "startup-session",
+                        "startup preference wins over restored view while preserving browsing state");
+            ok &= check(enabled ? restarted.hud.modal.isEmpty() : restarted.hud.modal == "settings",
+                        "restored settings never cover initialization");
+            restarted.hud.action("skip");
+            restarted.hud.openModal("settings");
+            restarted.hud.action("startup-animation");
+            restarted.saveSession();
+        }
+        QFile::remove(AppStorage::dataDirectory() + "/session.json");
+        AppStorage::settings().clear();
+    }
     NativeApplication original(&host, &glyphs, &scene, content);
     auto &music = original.music;
     music.selectedLane = 1;

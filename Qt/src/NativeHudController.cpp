@@ -577,6 +577,10 @@ void NativeHud::action(QString value) {
     } else if (value == "replay") {
         if (!modal.isEmpty()) {
             closeModal();
+            // 初始化页立即接管界面，不能让恢复的设置面板或输入框盖住动画。
+            motion.set(false, lastTime, true);
+            modal.clear();
+            closing = false;
         }
         m_scene.mode("boot");
     } else if (value == "alternative") {

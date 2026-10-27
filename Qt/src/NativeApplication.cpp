@@ -56,6 +56,10 @@ void NativeApplication::initialize() {
             restoreSessionState(QJsonDocument::fromJson(file.readAll()).object());
         }
     }
+    // 会话先恢复浏览与播放状态，再决定是否展示初始化页，避免旧场景模式覆盖开关。
+    if (firstLaunch || hud.startupAnimation) {
+        hud.action("replay");
+    }
     music.restoreAccount();
     music.restoreIdentityName();
 }

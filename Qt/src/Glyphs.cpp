@@ -1,5 +1,7 @@
 #include "Glyphs.h"
 #include <QFile>
+#include <QCoreApplication>
+#include <QThread>
 #include <QFontDatabase>
 #include <QGlyphRun>
 #include <QTextLayout>
@@ -74,10 +76,19 @@ Glyphs::Glyphs(const QString &root) {
     }
 }
 Glyphs::~Glyphs() {
-    for (int id : applicationFonts) {
-        if (id >= 0) {
-            QFontDatabase::removeApplicationFont(id);
+    const auto removeFonts = [ids = applicationFonts] {
+        for (int id : ids) {
+            if (id >= 0) {
+                QFontDatabase::removeApplicationFont(id);
+            }
         }
+    };
+    const auto application = QCoreApplication::instance();
+    if (application && QThread::currentThread() != application->thread()) {
+        // 部分平台移除字体会同步刷新窗口事件；渲染线程不能在主线程等待其退出时做这一步。
+        QMetaObject::invokeMethod(application, removeFonts, Qt::QueuedConnection);
+    } else {
+        removeFonts();
     }
 }
 
@@ -488,9 +499,10 @@ void Glyphs::commands(QPainter &c, const QJsonArray &commands, std::function<QIm
             c.fillRect(QRectF(start, 0, n(4) - start, n(5)), gradient);
         } else if (op == "gradient") {
             QRadialGradient gradient(QPointF(979.2, 518.4), 1100);
-            gradient.setColorAt(0, QColor(231, 231, 225));
-            gradient.setColorAt(.76, QColor(227, 225, 220));
-            gradient.setColorAt(1, QColor(228, 223, 219));
+            const bool dark = a.size() > 1 && a[1].toBool();
+            gradient.setColorAt(0, dark ? QColor(32, 42, 47) : QColor(231, 231, 225));
+            gradient.setColorAt(.76, dark ? QColor(23, 33, 37) : QColor(227, 225, 220));
+            gradient.setColorAt(1, dark ? QColor(17, 24, 27) : QColor(228, 223, 219));
             c.fillRect(QRectF(-4096, -4096, 8192, 8192), gradient);
         } else if (op == "image") {
             auto img = image(a[1].toString());

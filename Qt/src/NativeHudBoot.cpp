@@ -62,9 +62,10 @@ void NativeHud::boot(double width) {
     if (number("backgroundOpacity") > 0) {
         save();
         alpha(number("backgroundOpacity"));
-        op({"gradient"});
+        op({"gradient", dark});
         restore();
-        fill(-offset, 0, width, 1080, {1, 1, 1, number("white")});
+        const double flash = dark ? 0 : 1;
+        fill(-offset, 0, width, 1080, {flash, flash, flash, number("white")});
     }
     if (number("accessOpacity") > 0) {
         save();
@@ -157,7 +158,7 @@ void NativeHud::boot(double width) {
         auto panel = ink();
         panel[3] = number("welcomePanel");
         fill(725, 344, 470, 392, panel);
-        const auto white = 1 - number("welcomeInk");
+        const auto white = dark ? number("welcomeInk") : 1 - number("welcomeInk");
         art("welcome", 960 - m_glyphs->artWidth("welcome", 55) / 2, 403, 55, -1, 0,
             {white, white, white, 1, "calibratedWhite"});
         if (boot["companyVisible"].toBool()) {
@@ -169,8 +170,10 @@ void NativeHud::boot(double width) {
             save();
             clip(755, 470, 410 * number("highlight"), 60);
             fill(755, 470, 410, 60);
-            art("company", 960 - companyWidth / 2, 475, 48, -1, -0.5,
-                {238.0 / 255, 237.0 / 255, 232.0 / 255, mask ? 0.06 : 1});
+            auto highlight = dark ? QJsonArray{17.0 / 255, 24.0 / 255, 27.0 / 255, 1}
+                                  : QJsonArray{238.0 / 255, 237.0 / 255, 232.0 / 255, 1};
+            highlight[3] = mask ? 0.06 : 1;
+            art("company", 960 - companyWidth / 2, 475, 48, -1, -0.5, highlight);
             restore();
             restore();
         }
@@ -223,6 +226,7 @@ void NativeHud::scan(const QJsonObject &boot) {
     };
     save();
     translate(960, 540);
+    const auto paper = dark ? QJsonArray{17.0 / 255, 24.0 / 255, 27.0 / 255, 1} : QJsonArray{1, 1, 1, 1};
     const auto ringScale = boot["ringScale"].toDouble();
     scale(ringScale, ringScale);
     translate(-960, -540);
@@ -230,7 +234,7 @@ void NativeHud::scan(const QJsonObject &boot) {
     arc(music["radius"].toDouble(), music["outerStart"].toDouble(), music["outerSweep"].toDouble(), 960, 540,
         2.4);
     arc(music["whiteRadius"].toDouble(), music["whiteStart"].toDouble(), music["whiteSweep"].toDouble(), 960,
-        540, 4, {1, 1, 1, 1});
+        540, 4, paper);
     arc(music["innerRadius"].toDouble(), music["innerStart"].toDouble(), music["innerSweep"].toDouble());
     arc(music["innerRadius"].toDouble(), music["innerStart"].toDouble() + std::numbers::pi,
         music["innerSweep"].toDouble());
@@ -259,7 +263,7 @@ void NativeHud::scan(const QJsonObject &boot) {
     dot(960 + std::cos(black) * music["radius"].toDouble(),
         540 + std::sin(black) * music["radius"].toDouble(), music["blackCap"].toDouble());
     dot(960 + std::cos(white) * music["whiteRadius"].toDouble(),
-        540 + std::sin(white) * music["whiteRadius"].toDouble(), music["whiteCap"].toDouble(), {1, 1, 1, 1});
+        540 + std::sin(white) * music["whiteRadius"].toDouble(), music["whiteCap"].toDouble(), paper);
     restore();
     save();
     alpha(boot["permissionOpacity"].toDouble());
