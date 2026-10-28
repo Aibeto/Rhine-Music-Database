@@ -265,6 +265,11 @@ bool PresentationShell::initializeLayers() {
 }
 
 QSize PresentationShell::pixelSize() const {
+#ifdef Q_OS_LINUX
+    if (m_backendName == "vulkan" && m_presenter && !m_presenter->extent().isEmpty()) {
+        return m_presenter->extent();
+    }
+#endif
     return QSize(qMax(1, qRound(m_size.width() * m_dpr)), qMax(1, qRound(m_size.height() * m_dpr)));
 }
 
@@ -361,7 +366,9 @@ void PresentationShell::releaseSwapchainResources() {
 bool PresentationShell::recreateSwapchain() {
     // 强制重建：OutOfDate 的交换链即使窗口尺寸没变也已经不可用，不能走 resize() 里
     // "尺寸没变就返回"的捷径——以前就是被这条捷径吞掉，acquire 于是永远 OutOfDate。
-    if (!m_presenter->resize(pixelSize(), true)) {
+    const QSize requestedPixels(qMax(1, qRound(m_size.width() * m_dpr)),
+                                qMax(1, qRound(m_size.height() * m_dpr)));
+    if (!m_presenter->resize(requestedPixels, true)) {
         m_error = QStringLiteral("交换链重建失败：%1").arg(m_presenter->lastError());
         return false;
     }
@@ -728,6 +735,12 @@ void PresentationShell::step() {
         scheduleNext();
         return;
     }
+#ifdef Q_OS_LINUX
+    if (m_backendName == "vulkan") {
+        // WSI 可以覆盖请求尺寸；离屏目标和 3D 内部纹理必须采用实际 surface 的像素数。
+        m_host->resize(m_size, m_presenter->extent());
+    }
+#endif
     if (!ensureSwapchainResources() || !ensureCompositeResources()) {
         qWarning().noquote() << "FG:" << m_error;
         scheduleNext();
