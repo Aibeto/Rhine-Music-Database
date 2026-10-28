@@ -4,10 +4,43 @@
 #include <QDir>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
+#include <QFileInfo>
 #include <QJsonDocument>
+#include <QProcess>
+#include <QThread>
 #include <QTimer>
 #include <memory>
 #include <utility>
+
+/** 连接同一用户的唯一服务；独立启动的服务不随界面析构或标准输入关闭而退出。 */
+bool connectPlaybackService(PlaybackConnection &connection, const QString &root, QString &error) {
+    const auto endpoint = PlaybackConnection::endpoint();
+    if (!connection.connectToService(endpoint, 100)) {
+        const auto executable = PlaybackConnection::serviceExecutable();
+        if (!QFileInfo::exists(executable) ||
+            !QProcess::startDetached(
+                executable, {"--resources", root, "--gui", QCoreApplication::applicationFilePath()})) {
+            error = QStringLiteral("无法启动后台播放服务，请重新构建或安装完整应用");
+            return false;
+        }
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (!connection.connectToService(endpoint, 100)) {
+            if (elapsed.elapsed() >= 10000) {
+                error = QStringLiteral("后台播放服务启动超时：") + connection.error();
+                return false;
+            }
+            QThread::msleep(50);
+        }
+    }
+    const auto hello = connection.call("hello");
+    if (hello["protocol"] != PlaybackConnection::ProtocolVersion ||
+        hello["version"].toString() != QCoreApplication::applicationVersion()) {
+        error = QStringLiteral("后台播放服务版本不一致，请从托盘退出旧版后重新启动");
+        return false;
+    }
+    return true;
+}
 
 PlaybackConnection::PlaybackConnection(QObject *parent) : QObject(parent) {
     connect(&m_socket, &QLocalSocket::readyRead, this, &PlaybackConnection::readMessages);
@@ -135,12 +168,6 @@ void PlaybackConnection::readMessages() {
             emit activateRequested();
         } else if (message["event"] == "quit") {
             emit quitRequested();
-        } else if (message["event"] == "restore") {
-            emit restoreRequested();
-        } else if (message["event"] == "suspend") {
-            emit suspendRequested();
-        } else if (message["event"] == "close-window") {
-            emit closeWindowRequested();
         } else if (message["event"] == "diagnostic") {
             emit diagnosticEvent(message["name"].toString(), message["values"].toObject());
         }

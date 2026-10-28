@@ -25,9 +25,6 @@ class PlaybackConnection : public QObject {
     void snapshotChanged();
     void activateRequested();
     void quitRequested();
-    void suspendRequested();
-    void restoreRequested();
-    void closeWindowRequested();
     void disconnected();
     void diagnosticEvent(QString event, QJsonObject values);
 
@@ -41,3 +38,9 @@ class PlaybackConnection : public QObject {
     QString m_error;
     quint64 m_serial = 0;
 };
+
+/**
+ * 连接同一用户的唯一服务；没有运行时按需拉起后台 helper，
+ * 并校验协议版本，避免新版界面连到旧版服务。
+ */
+bool connectPlaybackService(PlaybackConnection &connection, const QString &root, QString &error);

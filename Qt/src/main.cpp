@@ -9,9 +9,7 @@
 #include "LinuxGraphics.h"
 #include "RhiScene.h"
 #ifndef Q_OS_IOS
-#include "EngineHolder.h"
 #include "PlaybackConnection.h"
-#include "PlaybackSessionWindow.h"
 #endif
 #ifdef Q_OS_MACOS
 #include "InterfaceWindowMac.h"
@@ -39,7 +37,6 @@
 #include <QStandardPaths>
 #include <QTimer>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #ifndef Q_OS_IOS
 #include <memory>
@@ -292,6 +289,19 @@ static void applyRenderScaleSetting() {
         qputenv("RHINE_RENDER_SCALE", QByteArray::number(qBound(50, percent, 100)));
     }
 }
+
+/** 服务请求打开界面：恢复最小化状态并请求激活，不改变窗口归属。 */
+static void activateWindow(QWindow *window) {
+    if (!window) {
+        return;
+    }
+    const auto states = window->windowStates() & ~Qt::WindowMinimized;
+    window->setWindowStates(states);
+    window->setVisible(true);
+    window->setWindowStates(states);
+    window->raise();
+    window->requestActivate();
+}
 /**
  * 建立应用身份、Qt 引擎和原生窗口。
  * 离线测试与正式播放沿用同一入口，资源只从独立应用读取。
@@ -428,29 +438,11 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    // 性能模式：界面挂在独立播放服务上，窗口可挂起为静态页并释放业务引擎。
-    // 设置页默认开启（面板不存在或不是 off 都视为开启）；关闭后回到单进程路径。
-    const bool serviceMode =
-#ifndef Q_OS_IOS
-        !offline && (playbackGuiTest || AppStorage::settings().value("panel/performance-mode").toString() !=
-                                            QStringLiteral("off"))
-#else
-        false
-#endif
-        ;
-    QQmlApplicationEngine engine;
-    Engine *backend = nullptr;
-    FrameProfiler *profiler = nullptr;
-    std::unique_ptr<Engine> directEngine;
-    std::unique_ptr<FrameProfiler> directProfiler;
-#ifndef Q_OS_IOS
+    // 桌面版：音频、账号与播放队列由独立后台服务持有，界面进程只负责渲染。
+    // 服务随界面启动并与其生命周期绑定：界面退出或崩溃都会停止播放并结束服务。
     std::unique_ptr<PlaybackConnection> playback;
-    std::unique_ptr<EngineHolder> engineHolder;
-    if (serviceMode) {
-        // 性能模式下窗口会隐藏到托盘，界面进程必须比最后一个窗口活得久；
-        // Qt 默认会在最后一个窗口关闭时退出进程，Windows/Linux 上界面进程会因此消失。
-        // 退出只走服务托盘或界面里的显式退出，和单进程路径的 DesktopTray 保持一致。
-        QGuiApplication::setQuitOnLastWindowClosed(false);
+#ifndef Q_OS_IOS
+    if (!offline) {
         playback = std::make_unique<PlaybackConnection>();
         QString error;
         if (!connectPlaybackService(*playback, root, error)) {
@@ -465,25 +457,19 @@ int main(int argc, char **argv) {
         if (attached["existing"].toBool()) {
             return 0;
         }
-        // 界面进程明确退出（非崩溃）即停止播放并结束后台服务；崩溃时 aboutToQuit 不会执行。
-        QObject::connect(&application, &QCoreApplication::aboutToQuit, playback.get(),
-                         [raw = playback.get()] { raw->call("quit"); });
-        engineHolder =
-            std::make_unique<EngineHolder>(root, offline, engine.rootContext(), playback.get(), profilePath);
-        engineHolder->start();
-        backend = engineHolder->engine();
-        profiler = engineHolder->profiler();
+        // 服务在界面连接断开时自行停止，退出流程里不再发送可能阻塞的同步命令。
+        QObject::connect(playback.get(), &PlaybackConnection::quitRequested, &application,
+                         &QCoreApplication::quit, Qt::QueuedConnection);
+        QTimer::singleShot(0, playback.get(), [raw = playback.get()] { raw->call("interface.ready"); });
     }
 #endif
-    if (!serviceMode) {
-        directEngine = std::make_unique<Engine>(root, offline);
-        directProfiler = std::make_unique<FrameProfiler>(directEngine.get(), profilePath);
-        QObject::connect(directEngine.get(), &Engine::performanceRequested, directProfiler.get(),
-                         &FrameProfiler::toggleVisible);
-        backend = directEngine.get();
-        profiler = directProfiler.get();
-        backend->start();
-    }
+    auto backend = std::make_unique<Engine>(root, offline, nullptr, playback.get());
+    auto profiler = std::make_unique<FrameProfiler>(backend.get(), profilePath);
+    QObject::connect(backend.get(), &Engine::performanceRequested, profiler.get(),
+                     &FrameProfiler::toggleVisible);
+    backend->start();
+    // 声明顺序决定析构顺序：QML 引擎必须晚于业务引擎，才能先销毁 QML 对象。
+    QQmlApplicationEngine engine;
     qmlRegisterType<RhiScene>("Rhine.Native", 1, 0, "RhiScene");
     qmlRegisterType<Hud>("Rhine.Native", 1, 0, "Hud");
     qmlRegisterUncreatableType<Engine>("Rhine.Native", 1, 0, "Engine", "Provided by application");
@@ -499,12 +485,12 @@ int main(int argc, char **argv) {
     const auto families = QFontDatabase::applicationFontFamilies(fontId);
     engine.rootContext()->setContextProperty("rhineFontFamily",
                                              families.isEmpty() ? QString("sans-serif") : families.first());
-    engine.rootContext()->setContextProperty("rhine", backend);
-    engine.rootContext()->setContextProperty("profiler", profiler);
+    engine.rootContext()->setContextProperty("rhine", backend.get());
+    engine.rootContext()->setContextProperty("profiler", profiler.get());
     if (!offline && RHINE_RELEASE_BUILD) {
-        QTimer::singleShot(8000, backend, [backend] {
-            if (backend->host.preference("auto-update") != "off") {
-                backend->host.updater.check();
+        QTimer::singleShot(8000, backend.get(), [raw = backend.get()] {
+            if (raw->host.preference("auto-update") != "off") {
+                raw->host.updater.check();
             }
         });
     }
@@ -524,10 +510,6 @@ int main(int argc, char **argv) {
     const bool fgCandidate = !test && !args.contains("--capture") && !fgLayerDisabled &&
                              hasNativeWindowSystem &&
                              PresentationShell::supportsBackend(RhineGraphics::activeBackend());
-#ifdef Q_OS_WIN
-    // 首次显示窗口前就监听 Explorer 的就绪消息，FG 与默认窗口共用同一个任务栏所有者。
-    WindowsTaskbar taskbar(backend, nullptr, playback.get());
-#endif
     // 排障：接管与否只看这一行。之前出现过"设了 RHINE_FG_LAYER=on 才接管"的怪现象，
     // 把每个输入的实测值打出来，比逐条读代码猜快得多。
     qWarning().noquote() << "FG gate: candidate" << fgCandidate << "layerDisabled" << fgLayerDisabled
@@ -544,10 +526,13 @@ int main(int argc, char **argv) {
         // 反过来的话窗口先被关闭，驱动 WSI 会对已销毁的 wl_surface 做 roundtrip，
         // 退出时 SIGABRT/SIGSEGV（实测两条都复现过）。Win32 的 HWND、X11 的 Window
         // 是同一类问题，所以这条顺序修在公共路径，不进平台分支。
-        QObject::connect(&engine, &QQmlEngine::quit, shell.get(), &PresentationShell::requestQuit);
+        QObject::connect(&engine, &QQmlEngine::quit, shell.get(), [raw = shell.get()]() {
+            raw->shutdown();
+            QCoreApplication::quit();
+        });
         if (shell->start() && shell->run() == 0) {
 #ifdef Q_OS_IOS
-            configureIOSWindow(shell->window(), backend);
+            configureIOSWindow(shell->window(), backend.get());
             // 自检在 UIKit 完成启动后运行；排队回退，确保退出呈现回调后才释放 GPU 资源。
             QObject::connect(
                 shell.get(), &PresentationShell::startupFailed, &application,
@@ -564,55 +549,46 @@ int main(int argc, char **argv) {
                     }
                     auto *fallbackWindow = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
                     backend->setWindow(fallbackWindow);
-                    fallbackWindow->installEventFilter(backend);
-                    configureIOSWindow(fallbackWindow, backend);
+                    fallbackWindow->installEventFilter(backend.get());
+                    configureIOSWindow(fallbackWindow, backend.get());
                     profiler->attach(fallbackWindow);
                     QObject::connect(
-                        fallbackWindow, &QQuickWindow::sceneGraphInvalidated, backend,
-                        [backend] { backend->recordResourceRelease(); }, Qt::DirectConnection);
+                        fallbackWindow, &QQuickWindow::sceneGraphInvalidated, backend.get(),
+                        [raw = backend.get()] { raw->recordResourceRelease(); }, Qt::DirectConnection);
                 },
                 Qt::QueuedConnection);
 #endif
-            // 性能模式下窗口与服务共享生命周期：关窗只隐藏，恢复与遮挡由服务驱动。
 #ifndef Q_OS_IOS
-            std::unique_ptr<PlaybackSessionWindow> session;
-            if (serviceMode) {
-                session = std::make_unique<PlaybackSessionWindow>(playback.get(), shell->window(),
-                                                                  shell.get(), engineHolder.get());
-#ifdef Q_OS_MACOS
-                // 业务窗口属于自己的桌面和调度组，不能继承呈现层的跨桌面行为。
-                bindInterfaceToDesktop(shell->window());
-#endif
-                // 进入原生事件循环后才报告就绪，避免 AppKit 尚未完成启动时收到激活命令。
-                QTimer::singleShot(0, playback.get(), [&playback] { playback->call("interface.ready"); });
-            }
             if (playbackGuiTest) {
                 qInfo("PLAYBACK_GUI_READY");
                 if (args.contains("--playback-test-quit")) {
                     QTimer::singleShot(700, &application, &QCoreApplication::quit);
+                } else if (args.contains("--playback-test-close")) {
+                    // 真实窗口关闭路径：验证关窗即退出，并由服务断连检测回收音频进程。
+                    auto *target = shell->window();
+                    QTimer::singleShot(700, target, [target] {
+                        qInfo("PLAYBACK_GUI_CLOSE_REQUESTED");
+                        target->close();
+                    });
                 }
             }
+            if (playback) {
+                QObject::connect(playback.get(), &PlaybackConnection::activateRequested, shell->window(),
+                                 [window = shell->window()] { activateWindow(window); },
+                                 Qt::QueuedConnection);
+            }
 #endif
-            // FG 使用独立的 QWindow，也必须保留任务栏控制；托盘只在单进程路径由界面持有。
+            // FG 使用独立的 QWindow，也必须保留任务栏控制和关闭后驻留托盘的行为。
 #ifdef Q_OS_WIN
-            taskbar.bindWindow(shell->window());
+            WindowsTaskbar taskbar(backend.get(), shell->window());
 #endif
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
             std::unique_ptr<DesktopTray> tray;
-            if (!serviceMode) {
-                tray = std::make_unique<DesktopTray>(shell->window(), &application);
-            }
+            tray = std::make_unique<DesktopTray>(shell->window(), &application);
 #endif
             QObject::connect(&application, &QCoreApplication::aboutToQuit, shell.get(),
                              [raw = shell.get()] { raw->shutdown(); });
-            const auto exitCode = application.exec();
-#ifndef Q_OS_IOS
-            if (serviceMode) {
-                // aboutToQuit 已原子保存界面状态；进程退出由系统回收图形上下文。
-                std::_Exit(exitCode);
-            }
-#endif
-            return exitCode;
+            return application.exec();
         }
         qWarning().noquote() << "FG: 呈现层启动失败，回退默认路径：" << shell->lastError();
         RhineFg::publishInactive(shell->lastError());
@@ -631,41 +607,45 @@ int main(int argc, char **argv) {
     }
     graphics.setPipelineCacheSaveFile(pipelineCache);
     window->setGraphicsConfiguration(graphics);
-    taskbar.bindWindow(window);
+    WindowsTaskbar taskbar(backend.get(), window);
     window->show();
 #endif
     backend->setWindow(window);
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    // 性能模式下托盘归后台服务所有；界面只在单进程路径持有驻留入口。
     std::unique_ptr<DesktopTray> tray;
-    if (!serviceMode) {
-        tray = std::make_unique<DesktopTray>(window, &application);
-    }
+    tray = std::make_unique<DesktopTray>(window, &application);
 #endif
 #ifdef Q_OS_IOS
-    configureIOSWindow(window, backend);
+    configureIOSWindow(window, backend.get());
 #endif
-    window->installEventFilter(backend);
+    window->installEventFilter(backend.get());
     profiler->attach(window);
 #ifndef Q_OS_IOS
-    // 呈现层未能接管时的界面回归入口：进程仍需完成握手并响应测试动作，
-    // 但本平台没有静态页与挂起能力，服务端生命周期验收会跳过窗口部分。
     if (playbackGuiTest) {
         qInfo("PLAYBACK_GUI_READY");
         if (args.contains("--playback-test-quit")) {
             QTimer::singleShot(700, &application, &QCoreApplication::quit);
+        } else if (args.contains("--playback-test-close")) {
+            QTimer::singleShot(700, window, [window] {
+                qInfo("PLAYBACK_GUI_CLOSE_REQUESTED");
+                window->close();
+            });
         }
+    }
+    if (playback) {
+        QObject::connect(playback.get(), &PlaybackConnection::activateRequested, window,
+                         [window] { activateWindow(window); }, Qt::QueuedConnection);
     }
 #endif
     // 短暂切换窗口继续复用 GPU；隐藏或最小化超过两秒才释放图形设备和可重建缓存。
     auto backgroundRelease = new QTimer(window);
     backgroundRelease->setSingleShot(true);
     backgroundRelease->setInterval(2000);
-    QObject::connect(backgroundRelease, &QTimer::timeout, window, [backend, window] {
+    QObject::connect(backgroundRelease, &QTimer::timeout, window, [raw = backend.get(), window] {
         if (window->isVisible() && window->visibility() != QWindow::Minimized) {
             return;
         }
-        backend->trimMemory();
+        raw->trimMemory();
         window->setPersistentSceneGraph(false);
         window->setPersistentGraphics(false);
         window->releaseResources();
@@ -681,8 +661,8 @@ int main(int argc, char **argv) {
                          }
                      });
     QObject::connect(
-        window, &QQuickWindow::sceneGraphInvalidated, backend,
-        [backend] { backend->recordResourceRelease(); }, Qt::DirectConnection);
+        window, &QQuickWindow::sceneGraphInvalidated, backend.get(),
+        [raw = backend.get()] { raw->recordResourceRelease(); }, Qt::DirectConnection);
     if (args.contains("--capture")) {
         const auto index = args.indexOf("--capture");
         const auto path = args.value(index + 1);
@@ -691,10 +671,10 @@ int main(int argc, char **argv) {
         if (path.isEmpty()) {
             return 1;
         }
-        auto poll = new QTimer(backend);
+        auto poll = new QTimer(backend.get());
         poll->setInterval(200);
         bool *reviewed = new bool(false);
-        QObject::connect(poll, &QTimer::timeout, backend, [&, path, captureMode, poll, reviewed] {
+        QObject::connect(poll, &QTimer::timeout, backend.get(), [&, path, captureMode, poll, reviewed] {
             if (!backend->ready()) {
                 return;
             }

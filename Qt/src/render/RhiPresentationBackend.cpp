@@ -1,9 +1,5 @@
 #include "PresentationBackend.h"
 #include "PresentationWindow.h"
-#ifdef Q_OS_MACOS
-#include "../InterfaceWindowMac.h"
-#endif
-#include <QByteArray>
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -52,62 +48,11 @@ class RhiPresentationBackend final : public PresentationBackend {
         }
 #endif
         m_vsync = vsync;
-        return resumeDevice();
+        return createDevice();
 #else
         Q_UNUSED(logicalSize);
         Q_UNUSED(vsync);
         m_error = QStringLiteral("此构建没有 Metal 后端");
-        return false;
-#endif
-    }
-
-    bool supportsStaticImage() const override {
-#ifdef Q_OS_MACOS
-        return true;
-#else
-        return false;
-#endif
-    }
-
-    bool suspendToImage(const QByteArray &image) override {
-#ifdef Q_OS_MACOS
-        release();
-        m_pass.reset();
-        m_swapchain.reset();
-        m_rhi.reset();
-        if (!showInterfaceStaticImage(m_window.get(), image)) {
-            m_error = QStringLiteral("静态图片解码失败");
-            resumeDevice();
-            return false;
-        }
-        return true;
-#else
-        Q_UNUSED(image);
-        return false;
-#endif
-    }
-
-    bool resumeDevice() override {
-#if defined(Q_OS_DARWIN) && QT_CONFIG(metal)
-        QRhiMetalInitParams parameters;
-        m_rhi.reset(QRhi::create(QRhi::Metal, &parameters));
-        if (!m_rhi) {
-            m_error = QStringLiteral("Metal QRhi 创建失败");
-            return false;
-        }
-        m_swapchain.reset(m_rhi->newSwapChain());
-        m_swapchain->setWindow(m_window.get());
-        if (!m_vsync) {
-            m_swapchain->setFlags(QRhiSwapChain::NoVSync);
-        }
-        m_pass.reset(m_swapchain->newCompatibleRenderPassDescriptor());
-        m_swapchain->setRenderPassDescriptor(m_pass.get());
-#ifdef Q_OS_MACOS
-        clearInterfaceStaticImage(m_window.get());
-#endif
-        // 隐藏窗口可先重建设备，交换链等第一次 expose 再建立。
-        return !m_window->isExposed() || resize({}, true);
-#else
         return false;
 #endif
     }
@@ -202,6 +147,28 @@ class RhiPresentationBackend final : public PresentationBackend {
     }
 
   private:
+    bool createDevice() {
+#if defined(Q_OS_DARWIN) && QT_CONFIG(metal)
+        QRhiMetalInitParams parameters;
+        m_rhi.reset(QRhi::create(QRhi::Metal, &parameters));
+        if (!m_rhi) {
+            m_error = QStringLiteral("Metal QRhi 创建失败");
+            return false;
+        }
+        m_swapchain.reset(m_rhi->newSwapChain());
+        m_swapchain->setWindow(m_window.get());
+        if (!m_vsync) {
+            m_swapchain->setFlags(QRhiSwapChain::NoVSync);
+        }
+        m_pass.reset(m_swapchain->newCompatibleRenderPassDescriptor());
+        m_swapchain->setRenderPassDescriptor(m_pass.get());
+        // 隐藏窗口可先建设备，交换链等第一次 expose 再建立。
+        return !m_window->isExposed() || resize({}, true);
+#else
+        return false;
+#endif
+    }
+
     std::unique_ptr<QWindow> m_window;
     std::unique_ptr<QRhi> m_rhi;
     std::unique_ptr<QRhiSwapChain> m_swapchain;

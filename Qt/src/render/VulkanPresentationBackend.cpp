@@ -9,9 +9,6 @@
 #include <QWindow>
 #include <rhi/qrhi_platform.h>
 #include <vector>
-#ifdef Q_OS_WIN
-#include "WindowsStaticImage.h"
-#endif
 
 namespace RhineRender {
 namespace {
@@ -19,9 +16,6 @@ namespace {
 class VulkanPresentationBackend final : public PresentationBackend {
   public:
     ~VulkanPresentationBackend() override {
-#ifdef Q_OS_WIN
-        m_staticImage.reset();
-#endif
         destroyDevice();
         m_window.reset();
         m_instance.reset();
@@ -65,50 +59,7 @@ class VulkanPresentationBackend final : public PresentationBackend {
         }
 
         m_vsync = vsync;
-#ifdef Q_OS_WIN
-        m_staticImage = std::make_unique<WindowsStaticImage>(m_window.get());
-#endif
-        return resumeDevice();
-    }
-    bool supportsStaticImage() const override {
-#ifdef Q_OS_WIN
-        return true;
-#else
-        return false;
-#endif
-    }
-
-    /** 静态页交给 HWND 的 GDI 绘制，挂起时不再创建 Qt Quick 窗口或复用 Vulkan 设备。 */
-    bool suspendToImage(const QByteArray &image) override {
-#ifdef Q_OS_WIN
-        if (!m_staticImage->setImage(image)) {
-            m_error = QStringLiteral("静态图片解码失败");
-            return false;
-        }
-        destroyDevice();
-        m_staticImage->repaint();
-        return true;
-#else
-        Q_UNUSED(image);
-        return false;
-#endif
-    }
-
-    /** 为同一原生窗口创建全新设备和交换链；失败时继续保留静态图片。 */
-    bool resumeDevice() override {
-        if (m_rhi) {
-            return true;
-        }
-        if (!createDevice()) {
-            destroyDevice();
-            return false;
-        }
-#ifdef Q_OS_WIN
-        if (m_staticImage) {
-            m_staticImage->clear();
-        }
-#endif
-        return true;
+        return createDevice();
     }
     QWindow *window() const override {
         return m_window.get();
@@ -353,9 +304,6 @@ class VulkanPresentationBackend final : public PresentationBackend {
         }
         return true;
     }
-#ifdef Q_OS_WIN
-    std::unique_ptr<WindowsStaticImage> m_staticImage;
-#endif
     bool m_vsync = true;
     std::unique_ptr<QVulkanInstance> m_instance;
     std::unique_ptr<QWindow> m_window;

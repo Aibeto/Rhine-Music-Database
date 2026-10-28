@@ -628,10 +628,6 @@ void NativeHud::action(QString value) {
     } else if (value == "detail-autoplay") {
         const bool enabled = m_host->preference("detail-autoplay") == "on";
         m_host->setPreference("detail-autoplay", enabled ? "off" : "on");
-    } else if (value == "performance-mode") {
-        // 后台服务在启动时接管界面，开关只写配置，重启后生效。
-        const bool enabled = m_host->preference("performance-mode") != "off";
-        m_host->setPreference("performance-mode", enabled ? "off" : "on");
     } else if (value == "close-behavior") {
         // 关闭行为在点击窗口关闭按钮时读取
         const bool toTray = m_host->preference("close-behavior") == "tray";

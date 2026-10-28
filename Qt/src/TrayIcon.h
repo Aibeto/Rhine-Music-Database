@@ -4,7 +4,7 @@
 #include <QPainter>
 #include <QPixmap>
 
-/** 菜单栏/托盘共用的单色图标；后台服务与界面进程按各自平台各自绘制一次。 */
+/** 菜单栏/托盘图标；界面进程按平台绘制一次。 */
 inline QIcon rhineTrayIcon() {
 #ifdef Q_OS_MACOS
     QPixmap image(44, 44);

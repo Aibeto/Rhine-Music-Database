@@ -6,7 +6,7 @@ class NativeApplication : public QObject {
   public:
     NativeApplication(Host *host, Glyphs *glyphs, NativeScene *scene, QJsonObject content,
                       QObject *parent = nullptr);
-    bool initialize(const QJsonObject &resumeState = {});
+    void initialize();
     QJsonObject sessionState() const;
     bool restoreSessionState(const QJsonObject &saved);
     void saveSession();

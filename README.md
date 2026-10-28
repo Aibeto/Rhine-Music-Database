@@ -53,10 +53,8 @@ chmod +x 'RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage'
 macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BACKEND=windows` 可临时对照原生后端。
 各平台播放都会跟随系统默认输出设备
 
-桌面播放默认由独立后台服务管理（设置 → 性能与诊断 → 性能模式，默认开启，重启生效）。关闭到菜单栏、
-最小化或被其他应用遮挡时，受控呈现层会卸载界面引擎并改为预渲染的静态欢迎帧，音频、队列和系统媒体键
-继续由后台服务工作；恢复时在同一窗口重建界面，不会重建窗口、音频源或切换桌面。关闭或未启用性能模式时
-仍为单进程路径。
+桌面播放由独立后台服务管理音频、队列与账号；服务生命周期与界面进程绑定，
+界面正常退出或崩溃都会停止播放并结束服务。渲染、窗口与托盘始终由界面进程负责。
 
 图形后端在 Windows 与 Linux 上优先使用 Vulkan，不可用时回退 OpenGL；macOS 固定使用 Metal。
 `RHINE_GRAPHICS=vulkan|opengl|auto` 可手动指定，`QSG_RHI_BACKEND` 的优先级更高。

@@ -194,9 +194,3 @@ void platformBackgroundService() {
     isBackgroundService = true;
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 }
-
-QJsonObject platformBackgroundIdentity() {
-    return {{"identifier", QString::fromNSString(NSBundle.mainBundle.bundleIdentifier)},
-            {"agent", [NSBundle.mainBundle.infoDictionary[@"LSUIElement"] boolValue] == YES},
-            {"accessory", NSApp.activationPolicy == NSApplicationActivationPolicyAccessory}};
-}

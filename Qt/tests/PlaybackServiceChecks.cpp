@@ -1,5 +1,4 @@
 #include "PlaybackConnection.h"
-#include "DesktopPlaybackControls.h"
 #include <QAudioDevice>
 #include <QCoreApplication>
 #include <QCryptographicHash>
@@ -18,9 +17,6 @@
 #include <QUrl>
 #include <functional>
 #include <memory>
-
-bool runWindowTransitionChecks();
-bool runEngineResumeChecks(const QString &resources);
 
 namespace {
 bool waitFor(const std::function<bool()> &ready, int timeoutMs = 10000) {
@@ -59,9 +55,6 @@ bool writeWave(const QString &path) {
  * 所有数据和套接字均限定在本轮临时目录。
  */
 bool runPlaybackServiceChecks(const QString &sourceResources, const QString &executable, const QString &gui) {
-    if (!runWindowTransitionChecks() || !runEngineResumeChecks(sourceResources)) {
-        return false;
-    }
     QTemporaryDir directory;
     if (!directory.isValid() || !writeWave(directory.path() + "/silence.wav")) {
         return false;
@@ -137,6 +130,22 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
                   return connection->snapshot()["state"].toObject()["position"].toDouble() > 0;
               }),
               "service consumes real audio before GUI starts");
+        connection->call("player.pause", {{"paused", true}});
+        check(waitFor([&] {
+                  connection->call("hello");
+                  return !connection->snapshot()["state"].toObject()["requested"].toBool();
+              }),
+              "pause reaches the playback service");
+        connection->call("player.toggle");
+        check(waitFor([&] {
+                  connection->call("hello");
+                  return connection->snapshot()["state"].toObject()["requested"].toBool();
+              }),
+              "resume reaches the playback service");
+    } else {
+        connection->call("player.pause", {{"paused", true}});
+        check(!connection->snapshot()["state"].toObject()["requested"].toBool(),
+              "pause remains available without an audio device");
     }
     auto launchGui = [&](QProcess &process, const QStringList &extra) {
         auto environment = QProcessEnvironment::systemEnvironment();
@@ -175,36 +184,21 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
                      connection->snapshot()["interfacePid"].toInteger() == panel.processId();
           }),
           "GUI attaches to the playback service");
-    // 模拟 GUI 崩溃仍只结束本轮启动的界面，服务和音频应继续。
+    // 服务生命周期与界面绑定：界面进程结束（含崩溃）就必须停止播放并退出。
     panel.kill();
     panel.waitForFinished();
-    check(waitFor([&] {
-              connection->call("hello");
-              return !connection->snapshot()["interfaceConnected"].toBool();
-          }),
-          "audio service observes GUI crash without exiting");
-    if (output) {
-        // 渲染引擎已随 GUI 退出，任务栏控制仍须能直接驱动后台服务。
-        DesktopPlaybackControls controls(resources, connection.get());
-        check(waitFor([&] { return controls.state()["canPlay"].toBool(); }),
-              "taskbar controls remain available without the GUI engine");
-        controls.trigger("toggle");
-        check(waitFor([&] {
-                  connection->call("hello");
-                  return !connection->snapshot()["state"].toObject()["requested"].toBool();
-              }),
-              "taskbar pause reaches the service after GUI crash");
-        controls.trigger("toggle");
-        check(waitFor([&] {
-                  connection->call("hello");
-                  return connection->snapshot()["state"].toObject()["requested"].toBool();
-              }),
-              "taskbar resume reaches the service after GUI crash");
-    } else {
-        connection->call("player.pause", {{"paused", true}});
-        check(!connection->snapshot()["state"].toObject()["requested"].toBool(),
-              "pause remains available without an audio device");
+    check(service.waitForFinished(10000) && service.exitCode() == 0,
+          "playback service exits with the GUI process");
+    if (service.state() != QProcess::NotRunning) {
+        service.kill();
+        service.waitForFinished();
     }
+    // 新一轮验证界面正常退出：服务同样随界面结束，不依赖界面主动发送命令。
+    service.start(executable, {"--resources", resources, "--gui", gui, "--offline-test", directory.path()});
+    check(service.waitForStarted(), "playback service restarts");
+    PlaybackConnection probe;
+    check(waitFor([&] { return probe.connectToService(endpoint, 50); }),
+          "restarted playback service accepts connections");
     QProcess exitInterface;
     launchGui(exitInterface, {"--playback-test-quit"});
     check(exitInterface.waitForStarted() && exitInterface.waitForFinished(10000) &&

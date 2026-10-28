@@ -27,7 +27,6 @@ class PlaybackService : public QObject {
     QLocalServer m_server;
     QHash<QLocalSocket *, Client> m_clients;
     QPointer<QLocalSocket> m_gui;
-    QJsonObject m_guiRenderState;
     InterfaceSession m_interfaceSession;
     QTimer m_poll;
     QTimer m_save;

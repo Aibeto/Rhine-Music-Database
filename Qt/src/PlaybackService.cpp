@@ -1,6 +1,5 @@
 #include "PlaybackService.h"
 #include "AppStorage.h"
-#include "DesktopVisibility.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
@@ -31,16 +30,8 @@ InterfaceLaunch interfaceLaunch(const QString &root, const QString &executable, 
 PlaybackService::PlaybackService(QString root, QString guiExecutable, bool offline, QObject *parent)
     : QObject(parent), m_host(root, offline, nullptr, true), m_api(&m_host), m_player(&m_host, &m_api),
       m_interfaceSession(interfaceLaunch(root, guiExecutable, offline)) {
-    if (offline) {
-        m_interfaceSession.setPresenceQuery(
-            [](const QString &, qint64, const QRect &) { return DesktopPresence{}; });
-    }
     connect(&m_interfaceSession, &InterfaceSession::activationRequested, this,
             [this] { send(m_gui, {{"event", "activate"}}); });
-    connect(&m_interfaceSession, &InterfaceSession::restorationRequested, this,
-            [this] { send(m_gui, {{"event", "restore"}}); });
-    connect(&m_interfaceSession, &InterfaceSession::suspensionRequested, this,
-            [this] { send(m_gui, {{"event", "suspend"}}); });
     connect(&m_interfaceSession, &InterfaceSession::stateChanged, this, &PlaybackService::publish);
     auto provider = m_host.preference("provider");
     if (!QStringList{"netease", "qq", "kugou", "local"}.contains(provider)) {
@@ -73,13 +64,19 @@ PlaybackService::PlaybackService(QString root, QString guiExecutable, bool offli
             m_clients.insert(socket, {});
             connect(socket, &QLocalSocket::readyRead, this, [this, socket] { read(socket); });
             connect(socket, &QLocalSocket::disconnected, this, [this, socket] {
-                if (m_gui == socket) {
+                const bool guiDisconnected = m_gui == socket;
+                if (guiDisconnected) {
                     m_gui.clear();
                     m_interfaceSession.detach();
                 }
                 m_clients.remove(socket);
                 socket->deleteLater();
-                // GUI 断开后清理浏览缓存；播放地址、队列和账号继续有效。
+                if (guiDisconnected) {
+                    // 服务生命周期与界面绑定：界面正常退出或崩溃都立即停止播放并结束服务。
+                    QTimer::singleShot(0, this, &PlaybackService::shutdown);
+                    return;
+                }
+                // 其他客户端断开后清理浏览缓存；播放地址、队列和账号继续有效。
                 if (m_clients.isEmpty()) {
                     m_host.trimMemory({});
                     m_host.enablePlaybackDiagnostics(false);
@@ -163,7 +160,6 @@ void PlaybackService::publish() {
     auto snapshot = m_player.playbackSnapshot();
     snapshot["provider"] = m_api.provider;
     snapshot["accountEpoch"] = m_host.epoch;
-    snapshot["metadataRevision"] = m_host.metadataVersion();
     snapshot["selectionSerial"] = m_selectionSerial;
     snapshot["selectedTrack"] = m_selectedTrack;
     snapshot["servicePid"] = double(QCoreApplication::applicationPid());
@@ -172,12 +168,6 @@ void PlaybackService::publish() {
     snapshot["interfaceWanted"] = interface.wanted;
     snapshot["interfacePid"] = double(interface.processId);
     snapshot["interfaceReady"] = interface.ready;
-    snapshot["desktopCovered"] = interface.covered;
-    snapshot["interfaceWorkspaceActive"] = interface.workspaceActive;
-    snapshot["interfaceRestoreRequiresUser"] = interface.restoreRequiresUser;
-    snapshot["interfaceFullscreen"] = interface.fullscreen;
-    snapshot["interfaceSuspended"] = interface.suspended;
-    snapshot["interfaceRendering"] = m_guiRenderState;
     snapshot["credentials"] = QJsonObject{{"netease", m_host.hasCredential("netease")},
                                           {"qq", m_host.hasCredential("qq")},
                                           {"kugou", m_host.hasCredential("kugou")}};
@@ -230,53 +220,8 @@ void PlaybackService::dispatch(QLocalSocket *socket, const QJsonObject &request)
             m_interfaceSession.attach(arguments["pid"].toInteger());
             result["existing"] = false;
         }
-    } else if (method == "interface.screen" && m_gui == socket) {
-        m_interfaceSession.setScreen(arguments["screen"].toString(),
-                                     QRect(arguments["x"].toInt(), arguments["y"].toInt(),
-                                           arguments["width"].toInt(), arguments["height"].toInt()));
     } else if (method == "interface.ready" && m_gui == socket) {
         m_interfaceSession.ready();
-    } else if (method == "interface.resumed" && m_gui == socket) {
-        m_interfaceSession.resumed();
-    } else if (method == "interface.fullscreen" && m_gui == socket) {
-        m_interfaceSession.setFullscreen(arguments["value"].toBool());
-    } else if (method == "interface.renderState" && m_gui == socket) {
-        m_guiRenderState = arguments;
-        publish();
-    } else if (method == "interface.release" && m_gui == socket) {
-        m_interfaceSession.release(arguments["automatic"].toBool());
-    } else if (method == "test.coverage" && m_host.offline) {
-        const auto covered = arguments["covered"].toBool();
-        m_interfaceSession.setPresenceQuery([covered](const QString &, qint64, const QRect &) {
-            DesktopPresence presence;
-            presence.covered = covered;
-            return presence;
-        });
-    } else if (method == "test.presence" && m_host.offline) {
-        DesktopPresence presence;
-        presence.covered = arguments["covered"].toBool();
-        presence.workspaceActive = arguments["workspaceActive"].toBool(true);
-        presence.stagedAway = arguments["stagedAway"].toBool();
-        presence.automaticRestoreAllowed = arguments["automaticRestoreAllowed"].toBool(true);
-        if (arguments["native"].toBool()) {
-            m_interfaceSession.setPresenceQuery({});
-        } else {
-            m_interfaceSession.setPresenceQuery(
-                [presence](const QString &, qint64, const QRect &) { return presence; });
-        }
-    } else if (method == "test.nativeCoverage" && m_host.offline) {
-        const auto presence = m_interfaceSession.nativePresence(arguments["interfacePid"].toInteger(-1),
-                                                                arguments["fullscreen"].toBool());
-        result["covered"] = presence.covered;
-        result["workspaceActive"] = presence.workspaceActive;
-        result["stagedAway"] = presence.stagedAway;
-        result["automaticRestoreAllowed"] = presence.automaticRestoreAllowed;
-        result["foregroundPid"] = double(platformDesktopForegroundPid());
-#ifdef Q_OS_MACOS
-        result["backgroundIdentity"] = platformBackgroundIdentity();
-#endif
-    } else if (method == "test.closeWindow" && m_host.offline) {
-        send(m_gui, {{"event", "close-window"}});
     } else if (method == "quit") {
         QTimer::singleShot(0, this, &PlaybackService::shutdown);
     } else if (method == "show") {

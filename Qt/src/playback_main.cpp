@@ -1,11 +1,8 @@
 #include "AppIdentity.h"
 #include "AppStorage.h"
 #include "PlaybackService.h"
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-#include "ServiceTray.h"
-#endif
-#include <QApplication>
 #include <QDir>
+#include <QGuiApplication>
 #include <QFileInfo>
 #include <QIcon>
 #include <QLockFile>
@@ -15,7 +12,7 @@
 void platformBackgroundService();
 #endif
 
-/** 后台入口仅初始化桌面托盘、音频和本地 IPC，禁止在此创建渲染引擎。 */
+/** 后台入口仅初始化音频与本地 IPC，禁止在此创建窗口、托盘或渲染引擎。 */
 int main(int argc, char **argv) {
 #ifdef Q_OS_WIN
     const auto storageError = AppStorage::initializePortable(AppStorage::executableDirectory());
@@ -34,7 +31,7 @@ int main(int argc, char **argv) {
         qputenv("QT_PLUGIN_PATH", plugins.absolutePath().toUtf8());
     }
 #endif
-    QApplication application(argc, argv);
+    QGuiApplication application(argc, argv);
     QCoreApplication::setApplicationVersion(AppUpdater::currentVersion());
     QCoreApplication::setOrganizationName(AppIdentity::Organization);
     QCoreApplication::setOrganizationDomain(AppIdentity::Id);
@@ -78,15 +75,6 @@ int main(int argc, char **argv) {
     if (arguments.contains("--show-interface")) {
         QTimer::singleShot(0, &service, &PlaybackService::showInterface);
     }
-#if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
-    // 托盘入口只在有系统托盘实现的桌面平台创建；Linux 无托盘时关闭窗口后
-    // 仍可从再次启动界面（attach 会激活原窗口）恢复。
-    std::unique_ptr<ServiceTray> tray;
-    if (!test) {
-        tray = std::make_unique<ServiceTray>([&service] { service.showInterface(); },
-                                             [&service] { service.shutdown(); });
-    }
-#endif
     QObject::connect(&application, &QCoreApplication::aboutToQuit, &service, &PlaybackService::shutdown);
     return application.exec();
 }

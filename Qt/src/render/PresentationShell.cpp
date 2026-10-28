@@ -57,23 +57,11 @@ quint64 bindingKey(const QRhiTexture *a, const QRhiTexture *b) {
 
 PresentationShell::PresentationShell(QQmlEngine &engine, Engine &backend, QString backendName,
                                      QObject *parent)
-    : QObject(parent), m_quitTransition(
-                           [this] {
-                               shutdown();
-                               QCoreApplication::quit();
-                           },
-                           this),
-      m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
-}
-
-/** QML 快捷键与原生关闭统一等待当前回调返回，避免退出时删除正在执行的信号对象。 */
-void PresentationShell::requestQuit() {
-    m_quitTransition.request();
+    : QObject(parent), m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
 }
 
 /** 停调度并按 GPU 引用顺序释放资源；原生窗口留到析构，避免在自身事件处理中销毁。 */
 void PresentationShell::shutdown() {
-    m_quitTransition.cancel();
     if (m_stopped) {
         return;
     }
@@ -86,18 +74,14 @@ void PresentationShell::shutdown() {
     }
     RhineFg::setEnabled(false);
 #ifdef Q_OS_DARWIN
-    if (m_backend) {
-        m_backend->metalFxInputs = {};
-    }
+    m_backend->metalFxInputs = {};
 #endif
     if (m_rhi) {
         m_rhi->finish();
     }
     releaseSwapchainResources();
     m_fg.reset();
-    disconnectBackend();
-    releaseHost();
-    m_suspended = false;
+    m_host.reset();
     delete m_pipelineBindings;
     m_pipelineBindings = nullptr;
     for (auto *resource : std::as_const(m_ownedResources)) {
@@ -108,9 +92,7 @@ void PresentationShell::shutdown() {
         m_presenter->release();
     }
     RhineFg::clear();
-    if (m_backend) {
-        m_backend->setWindow(nullptr);
-    }
+    m_backend->setWindow(nullptr);
     m_engine->rootContext()->setContextProperty(QStringLiteral("rhineHostWindow"),
                                                 QVariant::fromValue(static_cast<QWindow *>(nullptr)));
 }
@@ -145,9 +127,6 @@ bool PresentationShell::supportsBackend(const QString &name) {
 }
 
 bool PresentationShell::requested() const {
-    if (!m_backend || m_suspended) {
-        return false;
-    }
 #ifdef Q_OS_DARWIN
     return m_backend->renderConfiguration.snapshot().interpolation;
 #else
@@ -229,14 +208,12 @@ bool PresentationShell::initializeLayers() {
     // 只在这里打开每帧输入通道：RhiScene 的渲染器只在 tap 打开时才发布。
 #ifdef Q_OS_DARWIN
     // Main.qml 未加载时仍需接上原窗口的资源统计清理，否则隐藏后会残留旧计数。
-    if (m_backend) {
-        m_sceneInvalidated = QObject::connect(
-            m_host->sceneWindow(), &QQuickWindow::sceneGraphInvalidated, m_backend,
-            [this] { m_backend->recordResourceRelease(); }, Qt::DirectConnection);
-        const bool temporalAvailable = RhineRender::MetalFxTemporal::supported(m_rhi);
-        m_backend->renderConfiguration.setNativeTemporalAvailable(temporalAvailable);
-        RhineFg::capabilityMutable().temporalAvailable = temporalAvailable;
-    }
+    QObject::connect(
+        m_host->sceneWindow(), &QQuickWindow::sceneGraphInvalidated, m_backend,
+        [this] { m_backend->recordResourceRelease(); }, Qt::DirectConnection);
+    const bool temporalAvailable = RhineRender::MetalFxTemporal::supported(m_rhi);
+    m_backend->renderConfiguration.setNativeTemporalAvailable(temporalAvailable);
+    RhineFg::capabilityMutable().temporalAvailable = temporalAvailable;
     m_fg = RhineRender::createMetalFxFrameGenerator(m_rhi);
     m_fgAvailable = bool(m_fg);
 #else
@@ -247,206 +224,10 @@ bool PresentationShell::initializeLayers() {
 #endif
 #ifdef Q_OS_DARWIN
     RhineFg::setEnabled(false);
-    if (m_backend) {
-        m_backend->metalFxInputs = {};
-    }
+    m_backend->metalFxInputs = {};
 #else
     RhineFg::setEnabled(m_fgAvailable);
 #endif
-    return true;
-}
-
-/** 绑定业务引擎的更新信号；引擎在挂起时会被整体销毁，恢复后重新绑定。 */
-void PresentationShell::connectBackend() {
-    if (!m_backend) {
-        return;
-    }
-    connect(m_backend, &Engine::sceneUpdated, this, [this] {
-        if (m_host) {
-            m_host->markSceneDirty();
-        }
-        scheduleNext();
-    });
-    connect(m_backend, &Engine::hudUpdated, this, [this] {
-        if (m_host) {
-            m_host->markOverlayDirty();
-        }
-        scheduleNext();
-    });
-}
-
-void PresentationShell::disconnectBackend() {
-    if (m_backend) {
-        m_backend->disconnect(this);
-    }
-}
-
-/** 释放当前离屏宿主；静态层与正常层共用这一条路径。 */
-void PresentationShell::releaseHost() {
-    // 离屏 UI 窗口即将销毁，先解除输入法对它的引用，避免平台上下文留下悬空焦点对象
-    if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
-        inputWindow->setInputWindow(nullptr);
-    }
-    if (m_sceneInvalidated) {
-        QObject::disconnect(m_sceneInvalidated);
-        m_sceneInvalidated = {};
-    }
-    m_host.reset();
-}
-
-void PresentationShell::setBackend(Engine *backend) {
-    if (m_backend == backend) {
-        return;
-    }
-    disconnectBackend();
-    m_backend = backend;
-    if (!m_backend || !m_window) {
-        return;
-    }
-    m_backend->setWindow(m_window);
-    m_window->installEventFilter(m_backend);
-    connectBackend();
-#ifdef Q_OS_DARWIN
-    if (m_rhi) {
-        m_backend->renderConfiguration.setNativeTemporalAvailable(
-            RhineRender::MetalFxTemporal::supported(m_rhi));
-    }
-#endif
-}
-
-bool PresentationShell::suspendToStatic() {
-    if (!m_started || m_failed || m_suspended || !m_rhi) {
-        return m_suspended;
-    }
-    QByteArray staticImage;
-    if (m_presenter->supportsStaticImage()) {
-        QFile imageFile(resolveQmlUrl(QStringLiteral("welcome.png")).replace("qrc:", ":"));
-        if (!imageFile.open(QIODevice::ReadOnly)) {
-            m_error = QStringLiteral("无法读取静态图片");
-            return false;
-        }
-        staticImage = imageFile.readAll();
-    }
-    // 插值上下文与真实场景绑定，挂起时一并释放。
-    if (m_fg) {
-        m_fg->release();
-    }
-#ifdef Q_OS_DARWIN
-    if (m_backend) {
-        m_backend->metalFxInputs = {};
-    }
-#endif
-    m_rhi->finish();
-    // 合成管线与 SRB 缓存引用的是旧层的纹理，换宿主前必须作废。
-    releaseSwapchainResources();
-    releaseHost();
-
-    if (m_presenter->supportsStaticImage()) {
-        m_timer->stop();
-        if (m_releaseTimer) {
-            m_releaseTimer->stop();
-        }
-        m_fg.reset();
-        RhineFg::clear();
-        delete m_pipelineBindings;
-        m_pipelineBindings = nullptr;
-        for (auto *resource : std::as_const(m_ownedResources)) {
-            delete resource;
-        }
-        m_ownedResources.clear();
-        m_compositeUbo = nullptr;
-        m_sampler = nullptr;
-        m_pipelineBase = nullptr;
-        if (!m_presenter->suspendToImage(staticImage)) {
-            m_error = m_presenter->lastError();
-            m_rhi = m_presenter->rhi();
-            if (m_rhi && initializeLayers()) {
-                m_forcePresent = true;
-                scheduleNext();
-            }
-            return false;
-        }
-        m_rhi = nullptr;
-        m_suspended = true;
-        m_staticFramePresented = true;
-        m_pendingRealFrame = false;
-        m_engine->collectGarbage();
-        m_engine->clearComponentCache();
-        return true;
-    }
-
-    auto host = std::make_unique<SceneLayerHost>();
-    host->requestRender = [this] { scheduleNext(); };
-    if (!host->startStatic(*m_engine, QUrl(resolveQmlUrl(QStringLiteral("Static.qml"))), m_rhi,
-                           m_presenter->vulkanInstance())) {
-        m_error = QStringLiteral("静态页建立失败：%1").arg(host->lastError());
-        return false;
-    }
-    host->resize(m_size);
-    host->setPixelRatio(m_dpr);
-    // 真实 UI 的离屏窗口马上被替换掉，先断开输入法焦点
-    if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
-        inputWindow->setInputWindow(nullptr);
-    }
-    m_host = std::move(host);
-    m_suspended = true;
-    m_staticFramePresented = false;
-    m_pendingRealFrame = false;
-    m_forcePresent = true;
-    scheduleNext();
-    return true;
-}
-
-bool PresentationShell::resumeFromStatic() {
-#ifdef Q_OS_DARWIN
-    bool restored = false;
-    RhineRender::drainMetalResources([this, &restored] { restored = resumeInternal(); });
-    return restored;
-#else
-    return resumeInternal();
-#endif
-}
-
-bool PresentationShell::resumeInternal() {
-    if (!m_suspended) {
-        return true;
-    }
-    if (!m_backend) {
-        m_error = QStringLiteral("恢复真实界面前没有绑定业务引擎");
-        return false;
-    }
-    if (!m_rhi) {
-        if (!m_presenter->resumeDevice()) {
-            m_error = m_presenter->lastError();
-            return false;
-        }
-        m_rhi = m_presenter->rhi();
-        m_needRecreate = true;
-    }
-    m_rhi->finish();
-    releaseSwapchainResources();
-    releaseHost();
-    // 新引擎和新设备的帧序号不能沿用旧场景的调度、失败及插值状态。
-    m_failed = false;
-    m_fgArmed = false;
-    m_lastTapSerial = 0;
-    m_lastEngineSteps = 0;
-    m_framesSinceRecreate = 0;
-    m_recreateStreak = 0;
-    m_frameClock.invalidate();
-    m_stepClock.invalidate();
-    m_stepEndNs = 0;
-    m_suspended = false;
-    if (!initializeLayers()) {
-        // 恢复失败时退回静态页，窗口至少要继续显示有效内容。
-        m_suspended = false;
-        suspendToStatic();
-        return false;
-    }
-    m_pendingRealFrame = false;
-    m_forcePresent = true;
-    m_staticFramePresented = false;
-    scheduleNext();
     return true;
 }
 
@@ -612,15 +393,12 @@ void PresentationShell::syncSizes() {
     // 弹窗右列、播放条右半边这些按 width 相对定位的内容全被画到离屏层外面，看起来
     // 就是"UI 少了一整块"；同时 fit() 不再截断，文字也变长。
     // Engine::resize() 对相同尺寸会早退，所以这里每帧调用没有额外开销。
-    if (m_backend) {
-        m_backend->resize(m_size.width(), m_size.height());
-    }
+    m_backend->resize(m_size.width(), m_size.height());
 }
 
 const RhineFg::FrameInputs &PresentationShell::currentFrameInputs() const {
 #ifdef Q_OS_DARWIN
-    static const RhineFg::FrameInputs emptyInputs;
-    return m_backend ? m_backend->metalFxInputs : emptyInputs;
+    return m_backend->metalFxInputs;
 #else
     return RhineFg::latest();
 #endif
@@ -664,7 +442,7 @@ bool PresentationShell::armFrameGeneration() {
 }
 
 bool PresentationShell::recordFrameGeneration(QRhiCommandBuffer *cb) {
-    if (!m_fg || !m_fgArmed || m_suspended) {
+    if (!m_fg || !m_fgArmed) {
         return false;
     }
 
@@ -767,7 +545,7 @@ void PresentationShell::publishStats(bool interpolatedThisStep) {
     m_stats.rendered = m_renderedFrames;
     m_stats.renderSize = inputs.renderSize;
 #ifdef Q_OS_DARWIN
-    if (m_stats.renderSize.isEmpty() && m_backend) {
+    if (m_stats.renderSize.isEmpty()) {
         const auto telemetry = m_backend->renderTelemetry.snapshot();
         m_stats.renderSize = {telemetry.value("renderWidth").toInt(),
                               telemetry.value("renderHeight").toInt()};
@@ -844,9 +622,7 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
     // FG 的算法命令必须和合成落在同一个离屏帧里：先插值、再合成、最后注入信号量，
     // 三者由同一次提交保证顺序与可见性。
     const bool interpolated = allowInterpolation && recordFrameGeneration(cb);
-    // 静态页只有 UI 层：把它同时当作底图，合成公式里 ui.a=1 会完全盖住底图。
-    QRhiTexture *base =
-        m_suspended ? m_host->overlayTexture() : (interpolated ? m_fg->output() : m_host->sceneTexture());
+    QRhiTexture *base = interpolated ? m_fg->output() : m_host->sceneTexture();
     m_probe.restart();
     const bool composed = composite(cb, base, m_host->overlayTexture(), frame.imageIndex);
     m_stats.compositeMs = blend(m_stats.compositeMs, tookMs());
@@ -883,15 +659,6 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
 }
 
 void PresentationShell::step() {
-#ifdef Q_OS_DARWIN
-    // 自管 QRhi 绕过 Qt Quick 渲染线程，必须自行为每帧排空 Metal 临时对象。
-    RhineRender::drainMetalResources([this] { stepFrame(); });
-#else
-    stepFrame();
-#endif
-}
-
-void PresentationShell::stepFrame() {
 #ifdef Q_OS_IOS
     if (QGuiApplication::applicationState() != Qt::ApplicationActive) {
         return;
@@ -913,7 +680,7 @@ void PresentationShell::stepFrame() {
     if (!m_window->isVisible() || !m_window->isExposed() || m_window->visibility() == QWindow::Minimized) {
         return;
     }
-    const bool idle = m_backend && m_backend->performance().value(QStringLiteral("idle")).toBool();
+    const bool idle = m_backend->performance().value(QStringLiteral("idle")).toBool();
     const bool interpolationWanted = requested();
     syncSizes();
 
@@ -935,14 +702,9 @@ void PresentationShell::stepFrame() {
     }
 
     // 引擎计时推进不等于画面改变。两层都无更新且没有待呈现帧时让事件循环休眠。
-    const auto engineSteps =
-        m_backend ? m_backend->performance().value(QStringLiteral("steps")).toULongLong() : 0;
-    const bool engineAdvanced = !m_suspended && m_backendName == "vulkan" && engineSteps != m_lastEngineSteps;
-    // 静态页的离屏层会持续上报 renderRequested；挂起后只在首次、尺寸变化或显式请求时重绘，
-    // 否则会以显示刷新率空转并持续增长图形内存。
-    const bool staticIdle = m_suspended && m_staticFramePresented && !m_forcePresent;
-    if (staticIdle ||
-        (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent && !m_pendingRealFrame)) {
+    const auto engineSteps = m_backend->performance().value(QStringLiteral("steps")).toULongLong();
+    const bool engineAdvanced = m_backendName == "vulkan" && engineSteps != m_lastEngineSteps;
+    if (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent && !m_pendingRealFrame) {
         ++m_skippedSteps;
         publishStats(false);
         if (m_backendName == "vulkan") {
@@ -980,7 +742,7 @@ void PresentationShell::stepFrame() {
         return;
     }
 
-    if (m_backendName == "vulkan" && !m_suspended) {
+    if (m_backendName == "vulkan") {
         armFrameGeneration();
     }
     RhineRender::PresentationBackend::Frame frame;
@@ -1046,11 +808,6 @@ void PresentationShell::stepFrame() {
     publishStats(interpolated);
     m_forcePresent = false;
     reportStats();
-    // 静态页只需要在内容真正变化时重绘；请求已经送达，交回事件循环。
-    if (m_suspended) {
-        m_staticFramePresented = true;
-        return;
-    }
     // 新更新和待呈现的真实帧继续排队；其余情况等待下一次内容更新。
     if (m_backendName == "vulkan") {
         scheduleNext(idle ? 100 : 0);
@@ -1097,7 +854,7 @@ void PresentationShell::scheduleNext(int delayMs) {
         return;
     }
 #endif
-    if (!m_timer || m_stopped || m_failed || (m_suspended && !m_rhi)) {
+    if (!m_timer || m_stopped || m_failed) {
         return;
     }
     if (m_stepClock.isValid()) {
@@ -1119,9 +876,7 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
         ;
     if (event->type() == QEvent::Show || event->type() == QEvent::Hide ||
         event->type() == QEvent::WindowStateChange || event->type() == QEvent::Expose) {
-        if (m_backend) {
-            m_backend->setVisible(visible);
-        }
+        m_backend->setVisible(visible);
         if (visible) {
             if (m_releaseTimer) {
                 m_releaseTimer->stop();
@@ -1140,10 +895,12 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
     }
     switch (event->type()) {
     case QEvent::Close:
-        // 关闭可能来自 QML 按钮；先拦截原生销毁，再在输入栈退出后拆交换链并结束进程。
-        event->ignore();
-        requestQuit();
-        return true;
+        // 与 Ctrl+Q 同一条退出顺序：先把交换链/呈现层拆掉，再让事件循环退出。
+        // 反过来（只 quit()）实测进程根本不退：呈现层还活着，析构里的排空卡死。
+        qWarning().noquote() << "FG: 窗口关闭 → 先拆呈现层再退出事件循环";
+        shutdown();
+        QCoreApplication::quit();
+        return false;
     case QEvent::Expose:
         if (m_window->isExposed()) {
             m_needRecreate = true;
@@ -1247,16 +1004,6 @@ void PresentationShell::ensureOverlayFocus(QQuickWindow *overlay) {
 }
 
 bool PresentationShell::start() {
-#ifdef Q_OS_DARWIN
-    bool started = false;
-    RhineRender::drainMetalResources([this, &started] { started = startInternal(); });
-    return started;
-#else
-    return startInternal();
-#endif
-}
-
-bool PresentationShell::startInternal() {
     if (!supportsBackend(m_backendName)) {
         m_error = QStringLiteral("这个构建未编入所选呈现后端");
         return false;
@@ -1272,7 +1019,14 @@ bool PresentationShell::startInternal() {
     m_timer = new QTimer(this);
     m_timer->setTimerType(Qt::PreciseTimer);
     connect(m_timer, &QTimer::timeout, this, &PresentationShell::step);
-    connectBackend();
+    connect(m_backend, &Engine::sceneUpdated, this, [this] {
+        m_host->markSceneDirty();
+        scheduleNext();
+    });
+    connect(m_backend, &Engine::hudUpdated, this, [this] {
+        m_host->markOverlayDirty();
+        scheduleNext();
+    });
 
 #ifdef Q_OS_DARWIN
     m_releaseTimer = new QTimer(this);
@@ -1368,8 +1122,7 @@ bool PresentationShell::startInternal() {
                                  << m_acquireTimeoutCount << "outOfDate" << m_outOfDateCount << "visible"
                                  << (m_window && m_window->isVisible()) << "pendingReal" << m_pendingRealFrame
                                  << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1) << "dirty"
-                                 << (m_host ? m_host->contentDirty() : false) << "force" << m_forcePresent
-                                 << "suspended" << m_suspended;
+                                 << (m_host ? m_host->contentDirty() : false) << "force" << m_forcePresent;
         });
         diag->start();
     }
@@ -1461,7 +1214,6 @@ QVariantMap PresentationShell::renderState() const {
             {"interpolated", qulonglong(m_interpolatedFrames)},
             {"timerActive", m_timer && m_timer->isActive()},
             {"graphicsDevice", m_rhi != nullptr},
-            {"nativeStaticImage", m_suspended && !m_rhi},
 #ifdef Q_OS_DARWIN
             {"renderer", m_backend ? m_backend->renderTelemetry.snapshot() : QVariantMap{}},
 #endif
@@ -1500,9 +1252,7 @@ QImage PresentationShell::grabFrame(bool interpolated) {
     }
     // 读回目标为 RGBA8，交换链可能是 BGRA8，不能复用两者的 render pass 管线。
     releaseSwapchainResources();
-    auto base = m_suspended ? m_host->overlayTexture()
-                            : (interpolated && m_fg && !m_fg->lastFrameReset() ? m_fg->output()
-                                                                               : m_host->sceneTexture());
+    auto base = interpolated && m_fg && !m_fg->lastFrameReset() ? m_fg->output() : m_host->sceneTexture();
     const bool composed = composite(commands, base, m_host->overlayTexture(), 0, target.get());
     QRhiReadbackResult result;
     auto updates = m_rhi->nextResourceUpdateBatch();

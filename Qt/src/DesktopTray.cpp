@@ -10,7 +10,10 @@
 namespace {
 // 未保存过关闭行为时按退出播放器处理；只有显式选择托盘才隐藏窗口。
 bool closesToTray() {
-    return AppStorage::settings().value("panel/close-behavior").toString() == QLatin1String("tray");
+    // 设置由后台服务写入同一个配置文件；读取前同步，避免用本进程缓存的旧值决定关闭方式。
+    auto settings = AppStorage::settings();
+    settings.sync();
+    return settings.value("panel/close-behavior").toString() == QLatin1String("tray");
 }
 } // namespace
 

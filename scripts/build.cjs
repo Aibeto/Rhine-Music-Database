@@ -466,7 +466,7 @@ function deployLinuxRuntime(qt, app, binary) {
         recursive: true,
     });
     const qtLibraries = linuxQtLibraryDirectory(binary);
-    // 两个进程分别进入依赖闭包，后台托盘所需的 Widgets 也必须随包交付。
+    // 两个进程分别进入依赖闭包，后台服务用到的 Qt 库也必须随包交付。
     const sources = [binary, path.join(path.dirname(binary), 'RhinePlaybackService')];
     const pluginSource = linuxQtQuery(qt, 'QT_INSTALL_PLUGINS');
     // Wayland 平台插件依赖 shell 集成与装饰插件，必须整组跟随部署。
@@ -680,7 +680,7 @@ function sharedObjects(directory) {
 
 /**
  * 写入 AppImage 根目录的入口文件
- * 普通启动由服务维持挂载，带参数的命令仍交给 GUI；资源继续按 AppDir 前缀查找。
+ * AppRun 只补运行环境变量并转交参数，程序自身仍按 AppDir 前缀查找资源。
  */
 function prepareLinuxAppDir(app) {
     const desktop = 'rhine-music-database.desktop';
@@ -708,18 +708,16 @@ function prepareLinuxAppDir(app) {
         appRun,
         [
             '#!/bin/sh',
-            '# AppImage 入口：服务维持挂载，测试与工具参数原样转交。',
+            '# AppImage 入口：只补运行环境，参数原样转交。',
             'set -eu',
             'here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)',
             'export LD_LIBRARY_PATH="$here/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"',
             'export QT_PLUGIN_PATH="$here/usr/plugins"',
             'export QML_IMPORT_PATH="$here/usr/qml"',
             'export QT_QPA_PLATFORM_PLUGIN_PATH="$here/usr/plugins/platforms"',
-            '# 无参数启动由服务维持 AppImage 挂载，GUI 退出后音源和 Node 仍可从包内读取。',
-            'if [ "$#" -eq 0 ]; then',
-            '    exec "$here/usr/bin/RhinePlaybackService" --resources "$here/usr/bin/resources" --gui "$here/usr/bin/RhineMusicDatabase" --show-interface',
-            'fi',
-            'exec "$here/usr/bin/RhineMusicDatabase" "$@"',
+            'exit_code=0',
+            '"$here/usr/bin/RhineMusicDatabase" "$@" || exit_code=$?',
+            'exit "$exit_code"',
             '',
         ].join('\n'),
     );

@@ -11,11 +11,6 @@
 #include <cmath>
 
 namespace RhineRender {
-void drainMetalResources(const std::function<void()> &work) {
-    @autoreleasepool {
-        work();
-    }
-}
 
 #if RHINE_HAS_METALFX
 namespace {
