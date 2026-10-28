@@ -155,7 +155,9 @@ Its source and licenses are preserved in the packaged dependency directory.
 
 Linux 部署包随附自编的 FFmpeg：Qt 6 Multimedia 的 FFmpeg 后端只用于音频解码，而发行版 libavcodec
 动态依赖 x265、aom、SvtAv1Enc 等编码器库，因此本仓库按 `scripts/prepare-linux-ffmpeg.cjs` 自编一份，
-只保留解码与解复用能力，关闭编码器、复用器、avdevice、avfilter 与命令行工具，不自动探测外部库。
+只保留音频能力：解码器按 `vendor/ffmpeg/decoders-linux.json` 的音频白名单启用（HEVC、H.264、VP9、
+AV1 等视频解码器不编译），解复用器保持全开以识别各类容器，parser 与 bitstream filter 只留音频相关
+部分；关闭编码器、复用器、avdevice、avfilter、硬件加速与命令行工具，不自动探测外部库。
 
 构建不启用 `--enable-gpl`，也不启用任何非自由组件，产物为 **LGPL-2.1-or-later**（脚本在 configure
 之后断言这一点）。因此不链接 x264/x265/aom/dav1d 等 GPL 或体积巨大的第三方库。Qt 后端以共享库方式

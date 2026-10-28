@@ -1,8 +1,10 @@
 // Linux 随包提供自编的 FFmpeg：发行版 libavcodec 动态依赖 x265/aom/SvtAv1Enc 等
 // 编码器库（合计约 55 MB），而应用只用 Qt 的 FFmpeg 后端解码音频，不需要任何编码器。
-// 裁剪口径与 scripts/prepare-ios-ffmpeg.cjs 保持一致：保留全部解码与解复用能力，
-// 关闭编码器、复用器、avdevice、avfilter 与命令行工具，且不自动探测外部库，
-// 因此不会链接 x264/x265/aom/dav1d 等 GPL 或体积巨大的第三方库。
+// 裁剪口径：只保留音频能力。编码器、复用器、avdevice、avfilter、命令行工具全部关闭，
+// 解码器按 vendor/ffmpeg/decoders-linux.json 白名单启用（视频/字幕解码器一律不编，
+// 其中 hevc/h264/vp9/av1 是 libavcodec 里体积最大的几块）；parser 与 bitstream filter
+// 同样只留音频相关的部分。不自动探测外部库，因此不会链接 x264/x265/aom/dav1d。
+// 解复用器保持全开：容器识别是打开文件的第一步，漏一个就直接播不了，而积压只有约 2 MB。
 //
 // 许可：不启用 --enable-gpl、不启用任何非自由组件时，FFmpeg 以 LGPL-2.1-or-later 构建。
 // 脚本会在 configure 之后断言这一点，构建产物随包分发时同时保留许可与来源记录。
@@ -74,6 +76,54 @@ function prepareSourceTree() {
     };
 }
 
+// 解码器白名单：只有音频解码器，清单由源码的类型标注生成（见文件内 $comment）。
+// RHINE_FFMPEG_EXTRA_DECODERS=a,b 可临时追加，用于上线后发现漏格式时免改脚本。
+const decoderManifest = require('../vendor/ffmpeg/decoders-linux.json').decoders;
+const extraDecoders = (process.env.RHINE_FFMPEG_EXTRA_DECODERS || '')
+    .split(',')
+    .map((name) => name.trim())
+    .filter(Boolean);
+const decoders = [...new Set([...decoderManifest, ...extraDecoders])];
+// 音频 parser：裸流（ADTS/LATM、裸 MP3 帧、FLAC、DTS 等）与网络流的分帧依赖它。
+const parsers = [
+    'aac',
+    'aac_latm',
+    'ac3',
+    'adx',
+    'amr',
+    'cook',
+    'dca',
+    'dolby_e',
+    'dvaudio',
+    'flac',
+    'ftr',
+    'g723_1',
+    'g729',
+    'gsm',
+    'misc4',
+    'mlp',
+    'mpegaudio',
+    'opus',
+    'sbc',
+    'sipr',
+    'tak',
+    'vorbis',
+    'xma',
+];
+// avformat 在播放路径上可能自动插入的音频 bitstream filter。
+// 不含 extract_extradata：它的 codec_ids 只有视频（AV1/H.264/HEVC/MPEG 系列/VC1/VVC），
+// 纯音频流永远走不到，留着会白白拖进整套 cbs_* 码流解析模块。
+const bsfs = [
+    'null',
+    'aac_adtstoasc',
+    'dca_core',
+    'eac3_core',
+    'opus_metadata',
+    'pcm_rechunk',
+    'truehd_core',
+    'dts2pts',
+];
+
 // 构建参数：shared 便于随包替换；关闭一切与音频解码无关的部分。
 // --disable-x86asm 免去构建机需要 nasm，音频解码不依赖汇编加速。
 const configureArguments = [
@@ -87,6 +137,13 @@ const configureArguments = [
     '--disable-muxers',
     '--disable-avdevice',
     '--disable-avfilter',
+    '--disable-hwaccels',
+    '--disable-decoders',
+    `--enable-decoder=${decoders.join(',')}`,
+    '--disable-parsers',
+    `--enable-parser=${parsers.join(',')}`,
+    '--disable-bsfs',
+    `--enable-bsf=${bsfs.join(',')}`,
     '--disable-x86asm',
     // 库都在 AppDir 的 usr/lib，运行时按 $ORIGIN 相互查找，不落到构建机的安装目录。
     // 写成 $$ORIGIN：configure 原样写入 config.mak，由 make 展开成 $ORIGIN。
@@ -118,6 +175,35 @@ function assertLgpl() {
     }
 }
 
+/**
+ * 断言构建结果只含音频解码能力
+ * 白名单写错（或 configure 依赖把视频解码器带进来）会让体积悄悄回到 14 MB 量级，
+ * 在构建期拦住比事后看包体积更可靠。
+ */
+function assertAudioOnly() {
+    const file = path.join(build, 'config_components.h');
+    if (!fs.existsSync(file)) {
+        console.warn('Cannot confirm the decoder selection; check configure output');
+        return;
+    }
+    const content = fs.readFileSync(file, 'utf8');
+    const enabled = new Set(
+        [...content.matchAll(/#define CONFIG_([A-Z0-9_]+)_DECODER 1/g)].map((m) => m[1].toLowerCase()),
+    );
+    const leftovers = ['hevc', 'h264', 'vp9', 'av1', 'vvc', 'mpeg4', 'mpeg2video', 'vc1'].filter((name) =>
+        enabled.has(name),
+    );
+    if (leftovers.length > 0) {
+        throw new Error(`video decoders are still enabled: ${leftovers.join(', ')}`);
+    }
+    const required = ['mp3', 'aac', 'alac', 'flac', 'vorbis', 'opus', 'ape', 'wavpack', 'pcm_s16le'];
+    const missing = required.filter((name) => !enabled.has(name));
+    if (missing.length > 0) {
+        throw new Error(`audio decoders are missing: ${missing.join(', ')}`);
+    }
+    console.log(`FFmpeg decoders: ${enabled.size} enabled, video decoders disabled`);
+}
+
 function main() {
     const { tree, provenance } = prepareSourceTree();
     const stamp = path.join(install, '.build.json');
@@ -135,6 +221,7 @@ function main() {
     fs.mkdirSync(build, { recursive: true });
     run(path.join(tree, 'configure'), [`--prefix=${install}`, ...configureArguments], build);
     assertLgpl();
+    assertAudioOnly();
     run('make', ['-j', process.env.RHINE_BUILD_JOBS || String(os.cpus().length)], build);
     run('make', ['install'], build);
     // 随包保留来源与构建参数，满足 LGPL 的源码可得性要求。
