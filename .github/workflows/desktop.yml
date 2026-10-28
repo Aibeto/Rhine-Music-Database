@@ -60,6 +60,9 @@ jobs:
           # 三者都以 submodule 记录，缺 SDK 时 cmake 会静默跳过 FSR 目标，
           # 因此必须显式递归检出，否则 CI 测不到 FSR 代码路径。
           submodules: false
+      # third_party/ffmpeg 不在 CI 检出：它只服务本机开发（快速克隆、离线构建），
+      # CI 直接用 vendor/ffmpeg/source.json 锁定的发布包，浅克隆一个上百 MB 的仓库
+      # 并不比下载 15 MB 源码包快。构建脚本会校验子模块提交，缺失时自动回退发布包。
       - name: Check out enabled graphics dependencies
         shell: bash
         run: git submodule update --init --recursive FidelityFX-SDK third_party/glslang
@@ -188,6 +191,10 @@ jobs:
           # 这里只为兼容手动验证，noble 已按 t64 改名，缺失不算失败。
           sudo apt-get install --yes --no-install-recommends libfuse2t64 || \
             sudo apt-get install --yes --no-install-recommends libfuse2 || true
+          # DwarFS 镜像由 uruntime 通过 FUSE 挂载，手动跑产物时需要 fuse3。
+          sudo apt-get install --yes --no-install-recommends fuse3 || \
+            sudo apt-get install --yes --no-install-recommends libfuse3-3t64 || \
+            sudo apt-get install --yes --no-install-recommends libfuse3-3 || true
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.12.0'
@@ -229,7 +236,8 @@ jobs:
             echo "RHINE_NODE_BINARY=$RUNNER_TEMP/$distribution/bin/node" >> "$GITHUB_ENV"
             echo "RHINE_NODE_LICENSE=$RUNNER_TEMP/$distribution/LICENSE" >> "$GITHUB_ENV"
           fi
-      # appimagetool 由构建脚本按锁定版本自动下载并校验 SHA256，无需预装。
+      # Linux 打包用的 mkdwarfs 与 uruntime 由构建脚本按锁定版本自动下载并校验 SHA256，
+      # 无需预装；设置 RHINE_APPIMAGE_FS=squashfs 时改用 appimagetool，同样按锁定版本下载。
       - name: Build and deploy
         run: npm run build
         env:

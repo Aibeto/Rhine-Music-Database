@@ -5,5 +5,13 @@
     "download": "https://ffmpeg.org/releases/ffmpeg-9.0.1.tar.xz",
     "sha256": "cf38e0e28c7e5605942c4a77755349b0145804a397af37eb1fb4c77cb237f635",
     "license": "licenses/FFmpeg/COPYING.LGPLv2.1",
-    "build": "scripts/prepare-ios-ffmpeg.cjs"
+    "build": "scripts/prepare-ios-ffmpeg.cjs",
+    "build-linux": "scripts/prepare-linux-ffmpeg.cjs",
+    "submodule": {
+        "path": "third_party/ffmpeg",
+        "url": "https://github.com/FFmpeg/FFmpeg.git",
+        "tag": "n9.0.1",
+        "commit": "bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa",
+        "modifications": false
+    }
 }

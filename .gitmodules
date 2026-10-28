@@ -42,3 +42,18 @@
 	path = third_party/glslang/External/spirv-tools/external/spirv-headers
 	url = https://github.com/KhronosGroup/SPIRV-Headers.git
 	pinned-commit = 496543121ce6419f23d6fa5d7194ba66c36212d2
+
+# FFmpeg（LGPL-2.1-or-later）。Linux 包随附自编的仅解码版本，见 scripts/prepare-linux-ffmpeg.cjs。
+# 只作为快速克隆使用：源码保持上游原样，不做任何修改，构建一律在 output/ 下 out-of-tree 进行。
+# 提交与 pinned-commit 不一致或工作树有改动时，脚本回退到 vendor/ffmpeg/source.json 里的发布包。
+#
+# git submodule add -b <标签> 在浅克隆下无法检出标签（它会去找 origin/<标签> 分支），
+# 因此按下面两步手动检出：
+#   git submodule update --init --depth 1 third_party/ffmpeg
+#   git -C third_party/ffmpeg fetch --depth 1 origin tag n9.0.1
+#   git -C third_party/ffmpeg checkout --detach FETCH_HEAD
+[submodule "third_party/ffmpeg"]
+	path = third_party/ffmpeg
+	url = https://github.com/FFmpeg/FFmpeg.git
+	branch = n9.0.1
+	pinned-commit = bf1b838f2ab88b4f8fd83443325c782ea0e0f7fa
