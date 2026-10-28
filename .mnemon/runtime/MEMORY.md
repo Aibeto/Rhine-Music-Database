@@ -6,4 +6,4 @@ Rhine 帧率测量口径：以「内容帧/s」（节拍诊断的 render/s = Eng
 §
 Rhine 构建/磁盘陷阱：./build.sh 每次都会附带 AppImage 打包（appimagetool），反复构建会堆满磁盘导致 ENOSPC、工具全部无法执行。日常验证改用 cmake --build output/qt-build --target RhineMusicDatabase -j8。清理：rm -rf /tmp/appimage_extracted_* output/RhineMusicDatabase.AppDir output/*.AppImage。
 §
-Rhine 性能工作产物的存放位置：脚本在仓库 tools/perf/（bench2.sh、press.py、holdkey.py、ts.py、analyze2.py、make_baseline.py、README.md）；诊断结论见 Mnemon 文档《Rhine 渲染性能诊断与改动记录（perf/render-precision）》，脚手架说明见《Rhine 帧率测量脚手架》。/tmp/mb 下的旧副本可弃。
+Rhine 性能工作产物：测量脚手架已入库到 tools/perf/（bench2.sh、press.py、holdkey.py、ts.py、analyze2.py、make_baseline.py、README.md；bench2.sh:15 用 $(dirname "$0")/../.. 定位仓库根，输出目录取 BENCH_OUT，默认 /tmp/mb）。scripts/check-repository.cjs 要求公开树 .md 集合完全等于 documentation 数组、且每个文件顶层目录在 sourceDirectories 白名单内，已新增 tools 目录与 tools/perf/README.md 两个白名单项。.mnemon/ 是本机记忆状态：已 git rm --cached（文件留在磁盘），忽略规则只能放 .git/info/exclude（该文件原本就有 /.mnemon/），受控 .gitignore 禁止改动。npm run format 的 sourceRoots 不含 tools/，脚手架不参与格式检查。~/rhine-perf/ 只是可删的旧镜像。

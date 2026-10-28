@@ -30,11 +30,18 @@
       "importance": "critical"
     },
     {
-      "content": "Rhine 性能工作产物的存放位置：脚本在仓库 tools/perf/（bench2.sh、press.py、holdkey.py、ts.py、analyze2.py、make_baseline.py、README.md）；诊断结论见 Mnemon 文档《Rhine 渲染性能诊断与改动记录（perf/render-precision）》，脚手架说明见《Rhine 帧率测量脚手架》。/tmp/mb 下的旧副本可弃。",
+      "content": "Rhine 性能工作产物：测量脚手架已入库到 tools/perf/（bench2.sh、press.py、holdkey.py、ts.py、analyze2.py、make_baseline.py、README.md；bench2.sh:15 用 $(dirname \"$0\")/../.. 定位仓库根，输出目录取 BENCH_OUT，默认 /tmp/mb）。scripts/check-repository.cjs 要求公开树 .md 集合完全等于 documentation 数组、且每个文件顶层目录在 sourceDirectories 白名单内，已新增 tools 目录与 tools/perf/README.md 两个白名单项。.mnemon/ 是本机记忆状态：已 git rm --cached（文件留在磁盘），忽略规则只能放 .git/info/exclude（该文件原本就有 /.mnemon/），受控 .gitignore 禁止改动。npm run format 的 sourceRoots 不含 tools/，脚手架不参与格式检查。~/rhine-perf/ 只是可删的旧镜像。",
       "created_at": "2026-10-28T16:04:52.821Z",
-      "updated_at": "2026-10-28T16:04:52.821Z",
+      "updated_at": "2026-10-28T16:26:12.284Z",
       "target": "memory",
       "importance": "normal"
+    },
+    {
+      "content": "用户要求：未经明确指示不得执行 git commit 或 git push（也不得自行推送以修 CI）。改动只留在工作区/暂存区，由用户自己审查后再决定提交；需要远端验证时先问。",
+      "created_at": "2026-10-28T16:20:15.614Z",
+      "updated_at": "2026-10-28T16:20:15.614Z",
+      "target": "user",
+      "importance": "critical"
     }
   ]
 }

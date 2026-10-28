@@ -228,6 +228,7 @@ curl -LO https://nodejs.org/dist/v26.11.1/node-v26.11.1-linux-x64.tar.xz
 mkdir -p output/node
 tar -xJf node-v26.11.1-linux-x64.tar.xz -C output/node
 # rm ./node-v26.11.1-linux-x64.tar.xz
+npm install
 npm ci
 env RHINE_NODE_BINARY=$PWD/output/node/node-v26.11.1-linux-x64/bin/node \
     RHINE_NODE_LICENSE=$PWD/output/node/node-v26.11.1-linux-x64/LICENSE \
