@@ -53,8 +53,7 @@ class SceneLayerHost {
     bool resumeGraphics();
 
     /** 重建离屏目标。换 target 会触发 Qt 重新初始化渲染目标，所以只在这里做，不要每帧换。 */
-    // Linux Vulkan 可传入 WSI 返回的实际像素尺寸；其余路径继续按逻辑尺寸和 DPR 分配。
-    void resize(QSize size, QSize surfacePixels = {});
+    void resize(QSize size);
 
     /** 3D 层渲染结果（不透明，带应用底色），供 FG 做超分/插值。 */
     QRhiTexture *sceneTexture() const;
@@ -131,14 +130,12 @@ class SceneLayerHost {
     bool loadLayer(Layer &layer, QQmlEngine &engine, const QUrl &url, const char *name);
     bool renderLayer(Layer &layer, const char *name);
     void applyLayerGeometry(Layer &layer);
-    void syncSceneBufferSize();
     void teardown();
 
     Layer m_scene;
     Layer m_overlay;
     QRhi *m_rhi = nullptr;
     QSize m_size;
-    QSize m_surfacePixels;
     qreal m_ratio = 1.0;
     /// 首帧必须渲染，所以初值为真；renderFrame() 成功后清零。
     QWindow *m_visibleWindow = nullptr;

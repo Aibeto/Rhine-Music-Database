@@ -6,7 +6,6 @@
 #include <QQmlEngine>
 #include <QQuickGraphicsDevice>
 #include <QQuickItem>
-#include <QQuickRhiItem>
 #include <QQuickRenderControl>
 #include <QQuickRenderTarget>
 #include <QQuickWindow>
@@ -274,9 +273,6 @@ bool SceneLayerHost::loadLayer(Layer &layer, QQmlEngine &engine, const QUrl &url
 }
 
 QSize SceneLayerHost::pixelSize() const {
-    if (!m_surfacePixels.isEmpty()) {
-        return m_surfacePixels;
-    }
     return QSize(qMax(1, qRound(m_size.width() * m_ratio)), qMax(1, qRound(m_size.height() * m_ratio)));
 }
 
@@ -320,21 +316,6 @@ void SceneLayerHost::applyLayerGeometry(Layer &layer) {
     }
 }
 
-/** Linux Vulkan 的 3D 内部纹理直接跟随离屏像素尺寸，避免 Qt 优先读取宿主 DPR 后降采样。 */
-void SceneLayerHost::syncSceneBufferSize() {
-#ifdef Q_OS_LINUX
-    if (!m_scene.rootItem || m_rhi->backend() != QRhi::Vulkan) {
-        return;
-    }
-    const auto pixels = pixelSize();
-    const auto items = m_scene.rootItem->findChildren<QQuickRhiItem *>();
-    for (auto *item : items) {
-        item->setFixedColorBufferWidth(qMax(1, qRound(item->width() * pixels.width() / m_size.width())));
-        item->setFixedColorBufferHeight(qMax(1, qRound(item->height() * pixels.height() / m_size.height())));
-    }
-#endif
-}
-
 bool SceneLayerHost::renderLayer(Layer &layer, const char *name) {
     QQuickRenderControl *control = layer.control.get();
     if (!control || !layer.renderTarget) {
@@ -345,9 +326,6 @@ bool SceneLayerHost::renderLayer(Layer &layer, const char *name) {
     // beginFrame()/endFrame() 之间（QQuickRenderControl 文档的更新步骤示例）。
     layer.dirty = false;
     control->polishItems();
-    if (&layer == &m_scene) {
-        syncSceneBufferSize();
-    }
     control->beginFrame();
     // beginFrame() 不返回状态；command buffer 为空是最直接的失败信号（例如设备丢失）。
     if (!control->commandBuffer()) {
@@ -428,7 +406,7 @@ QQuickItem *SceneLayerHost::overlayRootItem() const {
     return m_overlay.rootItem;
 }
 
-void SceneLayerHost::resize(QSize size, QSize surfacePixels) {
+void SceneLayerHost::resize(QSize size) {
     if (!m_valid) {
         qWarning().noquote() << "SceneLayerHost: resize() 在宿主未就绪时被调用，已忽略";
         return;
@@ -437,7 +415,7 @@ void SceneLayerHost::resize(QSize size, QSize surfacePixels) {
         qWarning().noquote() << "SceneLayerHost: resize() 收到空尺寸，已忽略";
         return;
     }
-    if (size == m_size && surfacePixels == m_surfacePixels) {
+    if (size == m_size) {
         return;
     }
 
@@ -445,7 +423,6 @@ void SceneLayerHost::resize(QSize size, QSize surfacePixels) {
     releaseLayerTargets(m_scene);
     releaseLayerTargets(m_overlay);
     m_size = size;
-    m_surfacePixels = surfacePixels;
     applyLayerGeometry(m_scene);
     applyLayerGeometry(m_overlay);
     if (m_suspended) {
@@ -498,6 +475,5 @@ void SceneLayerHost::teardown() {
         layer->depthStencil = nullptr;
     }
     m_rhi = nullptr;
-    m_surfacePixels = {};
     m_valid = false;
 }
