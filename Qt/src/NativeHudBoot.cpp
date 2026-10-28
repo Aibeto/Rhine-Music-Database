@@ -1,41 +1,143 @@
 #include "NativeHud.h"
+#include <QPainterPath>
 #include <QRegularExpression>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <numbers>
 
 namespace {
+// 保持逐曲线 512 次采样，避免绘图库长度近似改变描边时序。
+constexpr int ContourSamples = 512;
+
 const QString contour =
     "M295 73C295 41 273 15 240 15C221 15 207 23 192 38C186 43 181 47 176 52C127 96 103 128 70 128C38 128 15 "
     "101 15 70C15 39 37 15 70 15C103 15 127 48 156 75C182 99 208 128 240 128C273 128 295 105 295 73Z";
 
-// 保持逐曲线 512 次采样，避免绘图库长度近似改变描边时序。
-double contourLength() {
-    QVector<double> values;
-    auto matches = QRegularExpression("[-+]?[0-9]*\\.?[0-9]+").globalMatch(contour);
-    while (matches.hasNext()) {
-        values.append(matches.next().captured().toDouble());
-    }
-    QPointF point(values.at(0), values.at(1));
-    const auto first = point;
-    double length = 0;
-    for (int index = 2; index < values.size(); index += 6) {
-        const auto start = point;
-        const QPointF a(values.at(index), values.at(index + 1));
-        const QPointF b(values.at(index + 2), values.at(index + 3));
-        const QPointF end(values.at(index + 4), values.at(index + 5));
-        for (int sample = 1; sample <= 512; ++sample) {
-            const auto time = sample / 512.0;
+struct ContourPiece {
+    QPointF from;
+    QPointF controlA;
+    QPointF controlB;
+    QPointF to;
+    double begin = 0;
+    double end = 0;
+};
+
+// 曲线段顺序与 contour 路径中的 C 指令一一对应。
+constexpr double ContourPoints[9][6] = {
+    {295, 41, 273, 15, 240, 15}, {221, 15, 207, 23, 192, 38},  {186, 43, 181, 47, 176, 52},
+    {127, 96, 103, 128, 70, 128}, {38, 128, 15, 101, 15, 70},  {15, 39, 37, 15, 70, 15},
+    {103, 15, 127, 48, 156, 75}, {182, 99, 208, 128, 240, 128}, {273, 128, 295, 105, 295, 73},
+};
+
+/** 把轮廓拆成带弧长区间的曲线段，供按绘制进度截取真实的开路径。 */
+QVector<ContourPiece> buildContourPieces() {
+    QVector<ContourPiece> pieces;
+    double accumulated = 0;
+    QPointF cursor(295, 73);
+    for (const auto &points : ContourPoints) {
+        ContourPiece piece;
+        piece.from = cursor;
+        piece.controlA = QPointF(points[0], points[1]);
+        piece.controlB = QPointF(points[2], points[3]);
+        piece.to = QPointF(points[4], points[5]);
+        piece.begin = accumulated;
+        for (int sample = 1; sample <= ContourSamples; ++sample) {
+            const auto time = sample / double(ContourSamples);
             const auto inverse = 1 - time;
-            const auto next = start * (inverse * inverse * inverse) + a * (3 * inverse * inverse * time) +
-                              b * (3 * inverse * time * time) + end * (time * time * time);
-            length += std::hypot(next.x() - point.x(), next.y() - point.y());
-            point = next;
+            const auto next = piece.from * (inverse * inverse * inverse) +
+                              piece.controlA * (3 * inverse * inverse * time) +
+                              piece.controlB * (3 * inverse * time * time) + piece.to * (time * time * time);
+            accumulated += std::hypot(next.x() - cursor.x(), next.y() - cursor.y());
+            cursor = next;
+        }
+        piece.end = accumulated;
+        pieces.append(piece);
+        cursor = piece.to;
+    }
+    return pieces;
+}
+
+const QVector<ContourPiece> &contourPieces() {
+    static const auto pieces = buildContourPieces();
+    return pieces;
+}
+
+double contourSize() {
+    const auto &pieces = contourPieces();
+    return pieces.isEmpty() ? 0 : pieces.last().end;
+}
+
+QString numberText(double value) {
+    return QString::number(value, 'g', 10);
+}
+
+/** 在参数区间 [from, to] 上切出与原曲线几何一致的四点子曲线。 */
+std::array<QPointF, 4> subContour(const ContourPiece &piece, double from, double to) {
+    const auto mix = [](QPointF a, QPointF b, double t) { return a + (b - a) * t; };
+    const auto a1 = mix(piece.from, piece.controlA, from);
+    const auto a2 = mix(piece.controlA, piece.controlB, from);
+    const auto a3 = mix(piece.controlB, piece.to, from);
+    const auto b1 = mix(a1, a2, from);
+    const auto b2 = mix(a2, a3, from);
+    const auto head = mix(b1, b2, from);
+    const auto local = from >= 1 ? 1.0 : (to - from) / (1 - from);
+    const auto d1 = mix(head, b2, local);
+    const auto d2 = mix(b2, a3, local);
+    const auto d3 = mix(a3, piece.to, local);
+    const auto e1 = mix(d1, d2, local);
+    const auto e2 = mix(d2, d3, local);
+    return {head, d1, e1, mix(e1, e2, local)};
+}
+
+/**
+ * 按绘制进度截取轮廓并输出 SVG 子路径。
+ * 虚线数组会在闭合子路径的起点处让两段平头端点正面相接，抗锯齿叠加后形成发丝缝；
+ * 这里改为输出跨过闭合点的连续开路径，由同一条描边一次成环，不再产生端点。
+ * 循环固定为「曲线段 × 两圈」，输入任意都只有 18 次迭代。
+ */
+QString contourSegment(double startFraction, double lengthFraction) {
+    if (lengthFraction >= 0.999999) {
+        return contour;
+    }
+    const auto &pieces = contourPieces();
+    const auto size = contourSize();
+    if (pieces.isEmpty() || size <= 0 || lengthFraction <= 0) {
+        return {};
+    }
+    const auto epsilon = 1e-9 * size;
+    auto begin = std::fmod(startFraction * size, size);
+    if (begin < 0) {
+        begin += size;
+    }
+    const auto end = begin + std::clamp(lengthFraction, 0.0, 1.0) * size;
+    QString path;
+    for (int lap = 0; lap < 2; ++lap) {
+        for (const auto &piece : pieces) {
+            const auto shift = lap * size;
+            const auto low = std::max(begin, shift + piece.begin);
+            const auto high = std::min(end, shift + piece.end);
+            const auto span = piece.end - piece.begin;
+            if (high <= low + epsilon || span <= 0) {
+                continue;
+            }
+            const auto from = std::clamp((low - shift - piece.begin) / span, 0.0, 1.0);
+            const auto to = std::clamp((high - shift - piece.begin) / span, 0.0, 1.0);
+            if (to <= from) {
+                continue;
+            }
+            // 相邻子曲线首尾相接，合并进同一子路径，不产生额外端点。
+            const auto points = subContour(piece, from, to);
+            if (path.isEmpty()) {
+                path += "M" + numberText(points[0].x()) + " " + numberText(points[0].y());
+            }
+            path += "C" + numberText(points[1].x()) + " " + numberText(points[1].y()) + " " +
+                    numberText(points[2].x()) + " " + numberText(points[2].y()) + " " +
+                    numberText(points[3].x()) + " " + numberText(points[3].y());
         }
     }
-    return length + std::hypot(point.x() - first.x(), point.y() - first.y());
+    return path;
 }
-const double contourSize = contourLength();
 }
 
 void NativeHud::logo(double x, double y, double width) {
@@ -79,10 +181,11 @@ void NativeHud::boot(double width) {
         alpha(number("logoOpacity"));
         translate(518 + logo["offsetX"].toDouble(), 463);
         scale(296.0 / 310, 296.0 / 310);
-        const auto fraction = std::clamp(logo["length"].toDouble(), 0.000001, 1.0);
-        op({"path", contour, logo["strokeWidth"], ink(),
-            QJsonArray{fraction * contourSize, (1 - fraction) * contourSize},
-            -logo["start"].toDouble() * contourSize});
+        const auto fraction = std::clamp(logo["length"].toDouble(), 0.0, 1.0);
+        const auto segment = contourSegment(logo["start"].toDouble(), fraction);
+        if (!segment.isEmpty()) {
+            op({"path", segment, logo["strokeWidth"], ink(), QJsonArray{}, 0});
+        }
         const auto symbolScale = logo["symbolScale"].toDouble();
         if (symbolScale > 0) {
             save();

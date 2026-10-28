@@ -94,7 +94,9 @@ double track(const Curve &keys, double time, bool stationaryEnds) {
 }
 
 double extraction(double time) {
-    return 0.4 * smooth((time - 25.58) / 0.82) + 2.95 * smooth((time - 27.55) / 1.3);
+    // 末段补齐至详情页 4.05 的抬升高度，避免切换模式后再次移动。
+    return 0.4 * smooth((time - 25.58) / 0.82) + 2.95 * smooth((time - 27.55) / 1.3) +
+           0.7 * smooth((time - 29) / 5);
 }
 double cinematicField(double row, double lane, double time, double center, double focus) {
     const auto handoff = smooth((time - 24.95) / 0.45);

@@ -17,9 +17,13 @@ double NativeScene::field(double row, double lane) const {
     if (found != m_fieldCache.cend()) {
         return *found;
     }
-    const auto value =
-        m_cinema ? SceneMotion::cinematicField(row, lane, m_cinema->time, m_shoulder.value, m_laneFocus.value)
-                 : m_field.sample(row, lane);
+    auto value = m_field.sample(row, lane);
+    if (m_cinema) {
+        const auto cinematic =
+            SceneMotion::cinematicField(row, lane, m_cinema->time, m_shoulder.value, m_laneFocus.value);
+        // 抽取完成后连同周围档案一起收束到常态场景，避免高度基准在模式切换时变化。
+        value = lerp(cinematic, value, SceneMotion::smooth((m_cinema->time - 29) / 5));
+    }
     m_fieldCache.insert(key, value);
     return value;
 }
@@ -116,13 +120,15 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
         m_rail = {m_dragTrack->row, 0};
     }
     if (cinema) {
-        m_rail = {};
+        // 在仍由镜头跟随主体时完成世界坐标归中，切换后不再横向滑入或沿轨道跳动。
+        const auto archiveHandoff = SceneMotion::smooth((shot - 29) / 5);
+        m_rail = {(-2.17 - chosen.z) * archiveHandoff, 0};
         m_actor.lift = {SceneMotion::extraction(shot), 0};
         m_shoulder.value = selectedRow;
         m_laneFocus = {double(selectedLane), 0};
-        m_columnCamera = {chosen.x, 0};
+        m_columnCamera = {chosen.x * archiveHandoff, 0};
     }
-    const auto trackX = cinema ? 0 : m_columnCamera.value;
+    const auto trackX = m_columnCamera.value;
     m_pulses.removeIf([time](const Pulse &pulse) { return time - pulse.time >= 3.2; });
     const bool aligningCopy = std::any_of(m_returning.cbegin(), m_returning.cend(),
                                           [](const Actor &actor) { return actor.returnY.has_value(); });
@@ -173,7 +179,7 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
     m_decryption.update(seconds, m_detail > 0.78 && m_actor.lift.value > 3.3, false,
                         cinema ? std::optional<double>(shot + 5) : std::nullopt);
     m_actor.quality = SceneMotion::smooth(m_actor.lift.value / 0.4);
-    m_actor.clarity = m_reduced ? m_targetDetail : m_decryption.clarity;
+    m_actor.clarity = m_reduced && !cinema ? m_targetDetail : m_decryption.clarity;
     const auto entry = cinema ? SceneMotion::smooth((shot - 21.9) / 0.86) : m_reveal;
     const auto entranceTime = std::clamp((shot - 21.92) / 0.75, 0.0, 1.0);
     const auto entryZ = cinema ? -23 * std::pow(1 - entranceTime, 2) : -28 * (1 - entry);

@@ -16,14 +16,14 @@ QJsonObject NativeScene::sample(double time, bool advance) {
     advance = advance && !m_captureOnly;
     m_clock = time;
     const auto elapsed = m_freeze.value_or(time - m_bootStart);
+    if (m_mode == "boot" && elapsed >= 35) {
+        setMode("detail");
+    }
     std::optional<Cinema> cinema;
     if (m_mode == "boot") {
         cinema = Cinema{elapsed, SceneMotion::ease((elapsed - 22) / 0.4),
                         0.55 * SceneMotion::ease((elapsed - 27.3) / 1.65) +
                             0.45 * SceneMotion::ease((elapsed - 29) / 5)};
-    }
-    if (m_mode == "boot" && elapsed >= 35) {
-        setMode("detail");
     }
     if (advance && !m_sceneFreeze && (!cinema || elapsed >= 21.9)) {
         update(time, cinema);

@@ -587,7 +587,7 @@ class Renderer {
                 d["depthWrite"] = !selectedShell;
                 double opacity = 1;
                 if (selectedShell) {
-                    opacity = f["mode"] == "detail" ? 0.20 : 0.62;
+                    opacity = detailMode ? 0.20 : 0.62;
                     if (f["viewer"].toBool()) {
                         opacity = 0.14;
                     }
@@ -1222,10 +1222,12 @@ class Renderer {
             }
         }
         updateMusic(item, cover);
-        detailMode = frame["mode"].toString() == "detail" || frame["viewer"].toBool();
+        // 开场抽出的就是详情主体，跨模式时保持同一套玻璃、主光和实例状态。
+        const auto mode = frame["mode"].toString();
+        detailMode = mode == "detail" || mode == "boot" || frame["viewer"].toBool();
         auto draws = musicDraws(frame);
         // 保留可见与归位唱片资源，复用材质绑定和实例缓冲。
-        auto data = prepare(draws, frame["mode"].toString() == "detail");
+        auto data = prepare(draws, mode == "detail" || mode == "boot");
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
             for (const auto &draw : data) {
                 std::fprintf(
