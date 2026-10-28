@@ -296,6 +296,10 @@ GPU 耗时/占用未采集，同步和提交的 CPU 时间不代表 GPU 执行�
   `MusicBridge/lyrics-format.cjs` 单独采用 MPL-2.0，固定版本与许可随包保留。
 - **[Lyrimuse](https://github.com/Yudaotor/lyrimuse)**：统一时间轴、歌词同步与录音版本匹配思路参考。
 
+## AI 声明
+
+本项目在开发过程中广泛使用了 AI 辅助，仍可能存在细微或不易察觉的问题。如遇到问题，欢迎通过 Issue 反馈。
+
 ## 开源许可
 
 本项目保留 [MIT License](LICENSE) 与原作者版权声明。第三方字体、Qt 和依赖分别遵循各自许可证；相关许可随部署包保留。
