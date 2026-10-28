@@ -58,6 +58,7 @@
 int makeIcon(const QString &directory);
 #ifndef Q_OS_IOS
 bool runPlaybackServiceChecks(const QString &resources, const QString &executable, const QString &gui);
+bool runWindowTransitionChecks();
 #endif
 #ifdef Q_OS_WIN
 #include "WindowsTaskbar.h"
@@ -423,7 +424,8 @@ int main(int argc, char **argv) {
 #endif
         const auto service = PlaybackConnection::serviceExecutable();
         // 进程生命周期回归先于会话回归，使用原始隔离环境。
-        if (!runPlaybackServiceChecks(root, service, application.applicationFilePath())) {
+        if (!runWindowTransitionChecks() ||
+            !runPlaybackServiceChecks(root, service, application.applicationFilePath())) {
             return 1;
         }
 #endif
@@ -526,10 +528,7 @@ int main(int argc, char **argv) {
         // 反过来的话窗口先被关闭，驱动 WSI 会对已销毁的 wl_surface 做 roundtrip，
         // 退出时 SIGABRT/SIGSEGV（实测两条都复现过）。Win32 的 HWND、X11 的 Window
         // 是同一类问题，所以这条顺序修在公共路径，不进平台分支。
-        QObject::connect(&engine, &QQmlEngine::quit, shell.get(), [raw = shell.get()]() {
-            raw->shutdown();
-            QCoreApplication::quit();
-        });
+        QObject::connect(&engine, &QQmlEngine::quit, shell.get(), &PresentationShell::requestQuit);
         if (shell->start() && shell->run() == 0) {
 #ifdef Q_OS_IOS
             configureIOSWindow(shell->window(), backend.get());
@@ -573,9 +572,9 @@ int main(int argc, char **argv) {
                 }
             }
             if (playback) {
-                QObject::connect(playback.get(), &PlaybackConnection::activateRequested, shell->window(),
-                                 [window = shell->window()] { activateWindow(window); },
-                                 Qt::QueuedConnection);
+                QObject::connect(
+                    playback.get(), &PlaybackConnection::activateRequested, shell->window(),
+                    [window = shell->window()] { activateWindow(window); }, Qt::QueuedConnection);
             }
 #endif
             // FG 使用独立的 QWindow，也必须保留任务栏控制和关闭后驻留托盘的行为。
@@ -633,8 +632,9 @@ int main(int argc, char **argv) {
         }
     }
     if (playback) {
-        QObject::connect(playback.get(), &PlaybackConnection::activateRequested, window,
-                         [window] { activateWindow(window); }, Qt::QueuedConnection);
+        QObject::connect(
+            playback.get(), &PlaybackConnection::activateRequested, window,
+            [window] { activateWindow(window); }, Qt::QueuedConnection);
     }
 #endif
     // 短暂切换窗口继续复用 GPU；隐藏或最小化超过两秒才释放图形设备和可重建缓存。

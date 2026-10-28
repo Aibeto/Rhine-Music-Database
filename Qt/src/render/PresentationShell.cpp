@@ -57,11 +57,39 @@ quint64 bindingKey(const QRhiTexture *a, const QRhiTexture *b) {
 
 PresentationShell::PresentationShell(QQmlEngine &engine, Engine &backend, QString backendName,
                                      QObject *parent)
-    : QObject(parent), m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
+    : QObject(parent), m_quitTransition(
+                           [this] {
+                               shutdown();
+                               QCoreApplication::quit();
+                           },
+                           this),
+      m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
+}
+
+/** 关闭请求先停止呈现；Windows 立即隐藏但保留 HWND，待输入回调退出后再清理 GPU。 */
+void PresentationShell::requestQuit() {
+    if (m_quitRequested || m_stopped) {
+        return;
+    }
+    m_quitRequested = true;
+    if (m_timer) {
+        m_timer->stop();
+    }
+    if (m_releaseTimer) {
+        m_releaseTimer->stop();
+    }
+#ifdef Q_OS_WIN
+    // 隐藏只改变可见性，原生窗口与 Vulkan surface 必须保留到交换链清理完成。
+    if (m_window) {
+        m_window->hide();
+    }
+#endif
+    m_quitTransition.request();
 }
 
 /** 停调度并按 GPU 引用顺序释放资源；原生窗口留到析构，避免在自身事件处理中销毁。 */
 void PresentationShell::shutdown() {
+    m_quitTransition.cancel();
     if (m_stopped) {
         return;
     }
@@ -81,6 +109,11 @@ void PresentationShell::shutdown() {
     }
     releaseSwapchainResources();
     m_fg.reset();
+    // 离屏 QML 即将销毁，先断开更新与输入法焦点，避免清理期间重新访问旧宿主。
+    m_backend->disconnect(this);
+    if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
+        inputWindow->setInputWindow(nullptr);
+    }
     m_host.reset();
     delete m_pipelineBindings;
     m_pipelineBindings = nullptr;
@@ -664,7 +697,7 @@ void PresentationShell::step() {
         return;
     }
 #endif
-    if (m_stopped || m_failed || !m_window || !m_host) {
+    if (m_stopped || m_quitRequested || m_failed || !m_window || !m_host) {
         return;
     }
     if (!m_frameClock.isValid()) {
@@ -854,7 +887,7 @@ void PresentationShell::scheduleNext(int delayMs) {
         return;
     }
 #endif
-    if (!m_timer || m_stopped || m_failed) {
+    if (!m_timer || m_stopped || m_quitRequested || m_failed) {
         return;
     }
     if (m_stepClock.isValid()) {
@@ -895,12 +928,10 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
     }
     switch (event->type()) {
     case QEvent::Close:
-        // 与 Ctrl+Q 同一条退出顺序：先把交换链/呈现层拆掉，再让事件循环退出。
-        // 反过来（只 quit()）实测进程根本不退：呈现层还活着，析构里的排空卡死。
-        qWarning().noquote() << "FG: 窗口关闭 → 先拆呈现层再退出事件循环";
-        shutdown();
-        QCoreApplication::quit();
-        return false;
+        // 消费关闭事件以保留原生窗口；GPU 清理必须等待发起关闭的 QML 回调返回。
+        event->ignore();
+        requestQuit();
+        return true;
     case QEvent::Expose:
         if (m_window->isExposed()) {
             m_needRecreate = true;

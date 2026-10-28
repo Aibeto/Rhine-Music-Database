@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../DeferredWindowTransition.h"
 #include "../fg/FgStats.h"
 #include "../fg/FgFrameTap.h"
 #include "PresentationBackend.h"
@@ -72,6 +73,7 @@ class PresentationShell : public QObject {
      * 幂等，析构路径会再调用一次。
      */
     void shutdown();
+    void requestQuit();
 
     bool start();
 
@@ -141,6 +143,8 @@ class PresentationShell : public QObject {
     /// 把 m_stats 的最新内容发给性能面板。
     void publishStats(bool interpolatedThisStep);
 
+    DeferredWindowTransition m_quitTransition;
+    bool m_quitRequested = false;
     QQmlEngine *m_engine = nullptr;
     Engine *m_backend = nullptr;
 

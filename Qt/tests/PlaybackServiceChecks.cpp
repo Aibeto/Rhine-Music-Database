@@ -193,26 +193,33 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
         service.kill();
         service.waitForFinished();
     }
-    // 新一轮验证界面正常退出：服务同样随界面结束，不依赖界面主动发送命令。
-    service.start(executable, {"--resources", resources, "--gui", gui, "--offline-test", directory.path()});
-    check(service.waitForStarted(), "playback service restarts");
-    PlaybackConnection probe;
-    check(waitFor([&] { return probe.connectToService(endpoint, 50); }),
-          "restarted playback service accepts connections");
-    QProcess exitInterface;
-    launchGui(exitInterface, {"--playback-test-quit"});
-    check(exitInterface.waitForStarted() && exitInterface.waitForFinished(10000) &&
-              exitInterface.exitCode() == 0,
-          "explicit GUI quit exits the interface");
-    if (exitInterface.state() != QProcess::NotRunning) {
-        exitInterface.kill();
-        exitInterface.waitForFinished();
-    }
-    check(service.waitForFinished(10000) && service.exitCode() == 0,
-          "explicit quit stops helper and playback");
-    if (service.state() != QProcess::NotRunning) {
-        service.kill();
-        service.waitForFinished();
+    // 分别验证显式退出与真实关窗，服务都应随 GUI 断连结束。
+    for (const auto &action :
+         {QStringLiteral("--playback-test-quit"), QStringLiteral("--playback-test-close")}) {
+        service.start(executable,
+                      {"--resources", resources, "--gui", gui, "--offline-test", directory.path()});
+        check(service.waitForStarted(), "playback service restarts");
+        PlaybackConnection probe;
+        check(waitFor([&] { return probe.connectToService(endpoint, 50); }),
+              "restarted playback service accepts connections");
+        QProcess exitInterface;
+        launchGui(exitInterface, {action});
+        const bool exited = exitInterface.waitForStarted() && exitInterface.waitForFinished(10000) &&
+                            exitInterface.exitCode() == 0;
+        check(exited, "quit and window close exit the interface");
+        if (!exited) {
+            qCritical() << action << exitInterface.readAll();
+        }
+        if (exitInterface.state() != QProcess::NotRunning) {
+            exitInterface.kill();
+            exitInterface.waitForFinished();
+        }
+        check(service.waitForFinished(10000) && service.exitCode() == 0,
+              "quit and window close stop helper and playback");
+        if (service.state() != QProcess::NotRunning) {
+            service.kill();
+            service.waitForFinished();
+        }
     }
     if (!ok) {
         qCritical().noquote() << service.readAll();

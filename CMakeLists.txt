@@ -180,6 +180,8 @@ set(RHINE_APP_SOURCES
     Qt/src/Platform.cpp
     Qt/src/Engine.cpp
     Qt/src/Engine.h
+    Qt/src/DeferredWindowTransition.cpp
+    Qt/src/DeferredWindowTransition.h
     Qt/src/Hud.cpp
     Qt/src/Hud.h
     Qt/src/RhiScene.cpp
@@ -367,7 +369,8 @@ target_link_libraries(
             Qt6::Multimedia)
 # 平台分支只处理原生能力、部署身份及链接依赖。
 if(NOT IOS)
-    target_sources(RhineMusicDatabase PRIVATE Qt/tests/PlaybackServiceChecks.cpp)
+    target_sources(RhineMusicDatabase PRIVATE Qt/tests/PlaybackServiceChecks.cpp
+                                              Qt/tests/WindowTransitionChecks.cpp)
     if(WIN32 OR (APPLE AND NOT IOS))
         find_package(Qt6 6.12 REQUIRED COMPONENTS Widgets)
         target_sources(RhineMusicDatabase PRIVATE Qt/src/DesktopTray.cpp Qt/src/DesktopTray.h)
