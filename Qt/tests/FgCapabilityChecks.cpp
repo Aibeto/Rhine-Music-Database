@@ -174,10 +174,16 @@ bool settingsRowStates()
     ok &= check(!ui.clickable, "降级且带原因时不能点");
     ok &= check(ui.value == QStringLiteral("交换链图像格式不支持"), "降级应展示真实原因");
 
-    // 5. 能力齐备却没接管（RHINE_FG_LAYER=off）：置灰，不误导用户去写偏好。
+    // 5. 能力齐备但本次进程没接管呈现层 —— 这是**正常状态**：fg=off 启动时呈现层
+    //    本来就不接管（Qt 默认路径的内容帧实测高 35%）。此时必须可点，否则开关永远打不开。
     ui = frameGenerationUi(true, false, false, QString(), true, false);
-    ok &= check(!ui.clickable, "没接管时不能点");
-    ok &= check(ui.value == QStringLiteral("呈现层未接管"), "没接管应写明状态");
+    ok &= check(ui.clickable, "偏好为关且未接管时必须仍可点开");
+    ok &= check(ui.value == QStringLiteral("关闭"), "偏好为关时显示关闭");
+
+    // 5b. 偏好已开但本次启动没接管：可点（允许改回去），并提示重启才生效。
+    ui = frameGenerationUi(true, false, false, QString(), true, true);
+    ok &= check(ui.clickable, "偏好为开但未接管时仍应可点");
+    ok &= check(ui.value == QStringLiteral("已开启 · 重启生效"), "应提示重启生效");
 
     // 6. 接管失败留下原因：置灰并把原因显示出来。
     ui = frameGenerationUi(true, false, false, QStringLiteral("交换链创建失败"), true, true);
