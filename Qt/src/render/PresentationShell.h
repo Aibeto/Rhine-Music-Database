@@ -206,6 +206,9 @@ class PresentationShell : public QObject {
     bool m_fgArmed = false;
     bool m_needRecreate = false;
     quint64 m_lastEngineSteps = 0;
+    // 内容代次：区分"引擎前进"与"画面真的变了"（RHINE_PRESENT_CONTENT_ONLY=1 使用）。
+    quint64 m_lastEngineHud = 0;
+    quint64 m_lastEngineScene = 0;
     /// 有一步正在排队时收到的唤醒：当前步结束后补跑，避免丢 tick（丢一次就少一帧）。
     bool m_wakePending = false;
     bool m_started = false;

@@ -957,7 +957,20 @@ void PresentationShell::stepFrame() {
     // 引擎计时推进不等于画面改变。两层都无更新且没有待呈现帧时让事件循环休眠。
     const auto engineSteps =
         m_backend ? m_backend->performance().value(QStringLiteral("steps")).toULongLong() : 0;
-    const bool engineAdvanced = !m_suspended && m_backendName == "vulkan" && engineSteps != m_lastEngineSteps;
+    // 内容代次精细化：引擎"步进"不等于"画面变了"。m_steps 每拍都涨，但 HUD 命令
+    // 列表与场景内容只在真正变化时才涨 hudUpdates/sceneUpdates。用这两个代次判断
+    // 是否需要上屏，才能既不丢帧也不做无内容变化的重复上屏。
+    // RHINE_PRESENT_CONTENT_ONLY=1 启用（默认仍用旧的 engineAdvanced 判据）。
+    static const bool contentOnly =
+        qEnvironmentVariableIntValue("RHINE_PRESENT_CONTENT_ONLY") == 1;
+    const auto engineHud =
+        m_backend ? m_backend->performance().value(QStringLiteral("hudUpdates")).toULongLong() : 0;
+    const auto engineScene =
+        m_backend ? m_backend->performance().value(QStringLiteral("sceneUpdates")).toULongLong() : 0;
+    const bool contentAdvanced = contentOnly
+                                     ? (engineHud != m_lastEngineHud || engineScene != m_lastEngineScene)
+                                     : (engineSteps != m_lastEngineSteps);
+    const bool engineAdvanced = !m_suspended && m_backendName == "vulkan" && contentAdvanced;
     // 静态页的离屏层会持续上报 renderRequested；挂起后只在首次、尺寸变化或显式请求时重绘，
     // 否则会以显示刷新率空转并持续增长图形内存。
     const bool staticIdle = m_suspended && m_staticFramePresented && !m_forcePresent;
@@ -987,6 +1000,8 @@ void PresentationShell::stepFrame() {
         return;
     }
     m_lastEngineSteps = engineSteps;
+    m_lastEngineHud = engineHud;
+    m_lastEngineScene = engineScene;
     m_consecutiveSkips = 0;
 
     // 上一步留下的真实帧还没上屏：这一步只做它的呈现。
