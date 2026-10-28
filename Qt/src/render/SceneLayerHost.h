@@ -52,7 +52,8 @@ class SceneLayerHost {
      * 只建立 UI 层并载入一张静态页（性能模式挂起时使用）。
      * 3D 层不创建、不渲染，sceneTexture() 返回空；overlayTexture() 即静态画面。
      */
-    bool startStatic(QQmlEngine &engine, const QUrl &url, QRhi *rhi, QVulkanInstance *vulkanInstance = nullptr);
+    bool startStatic(QQmlEngine &engine, const QUrl &url, QRhi *rhi,
+                     QVulkanInstance *vulkanInstance = nullptr);
 
     bool isStaticOnly() const {
         return m_staticOnly;
@@ -64,7 +65,8 @@ class SceneLayerHost {
     bool resumeGraphics();
 
     /** 重建离屏目标。换 target 会触发 Qt 重新初始化渲染目标，所以只在这里做，不要每帧换。 */
-    void resize(QSize size);
+    // surfacePixels 非空时以交换链的实际物理尺寸为准，避免再次按窗口 DPR 推算。
+    void resize(QSize size, QSize surfacePixels = {});
 
     /** 3D 层渲染结果（不透明，带应用底色），供 FG 做超分/插值。 */
     QRhiTexture *sceneTexture() const;
@@ -87,10 +89,10 @@ class SceneLayerHost {
     QSize size() const {
         return m_size;
     }
-    /// 离屏目标的**物理像素**尺寸 = 逻辑尺寸 × 设备像素比。
+    /// 离屏目标的物理像素尺寸，优先使用实际 surface，否则按逻辑尺寸 × 设备像素比计算。
     /// QML 仍按逻辑像素排版，只有光栅化面积变大；两者搞混就会出现"高 DPI 下发糊"。
     QSize pixelSize() const;
-    /// 设置纹理的物理像素密度，不改变 QML 排版和输入坐标。
+    /// 设置纹理的物理像素密度；指定了实际 surface 尺寸时由 surface 决定密度。
     void setPixelRatio(qreal ratio);
     qreal pixelRatio() const {
         return m_ratio;
@@ -154,6 +156,7 @@ class SceneLayerHost {
     bool m_staticOnly = false;
     QRhi *m_rhi = nullptr;
     QSize m_size;
+    QSize m_surfacePixels;
     qreal m_ratio = 1.0;
     /// 首帧必须渲染，所以初值为真；renderFrame() 成功后清零。
     QWindow *m_visibleWindow = nullptr;

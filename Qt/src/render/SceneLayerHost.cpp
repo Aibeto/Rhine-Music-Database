@@ -65,6 +65,13 @@ bool SceneLayerHost::fail(const QString &message) {
 bool SceneLayerHost::start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
                            QVulkanInstance *vulkanInstance, QWindow *visibleWindow) {
     m_visibleWindow = visibleWindow;
+#ifdef Q_OS_LINUX
+    // Qt 优先取 renderWindow 的 DPR；Linux Vulkan 的 surface 尺寸可能与该读数不同。
+    // 让离屏层使用目标自身的 DPR，排版和输入仍保持逻辑坐标。
+    if (rhi && rhi->backend() == QRhi::Vulkan) {
+        m_visibleWindow = nullptr;
+    }
+#endif
     // 失败时立刻回收半成品：调用方会回退到默认路径，本对象可能被直接丢弃，
     // 不能把还挂着 QRhi 引用的窗口/纹理留给析构时机不确定的路径。
     if (!startInternal(engine, scene3dUrl, overlayUrl, rhi, vulkanInstance)) {
@@ -117,7 +124,8 @@ bool SceneLayerHost::createLayerWindow(Layer &layer, QRhi *rhi, QVulkanInstance 
             requestRender();
         }
     };
-    QObject::connect(layer.control.get(), &QQuickRenderControl::renderRequested, layer.window.get(), invalidate);
+    QObject::connect(layer.control.get(), &QQuickRenderControl::renderRequested, layer.window.get(),
+                     invalidate);
     QObject::connect(layer.control.get(), &QQuickRenderControl::sceneChanged, layer.window.get(), invalidate);
 
     // 两个窗口都不 show()：RenderControl 下没有原生窗口，show() 会破坏离屏语义。
@@ -330,11 +338,14 @@ bool SceneLayerHost::loadLayer(Layer &layer, QQmlEngine &engine, const QUrl &url
 }
 
 QSize SceneLayerHost::pixelSize() const {
+    if (!m_surfacePixels.isEmpty()) {
+        return m_surfacePixels;
+    }
     return QSize(qMax(1, qRound(m_size.width() * m_ratio)), qMax(1, qRound(m_size.height() * m_ratio)));
 }
 
 void SceneLayerHost::setPixelRatio(qreal ratio) {
-    if (!m_valid) {
+    if (!m_valid || !m_surfacePixels.isEmpty()) {
         return;
     }
     ratio = qBound(1.0, ratio, 4.0);
@@ -471,7 +482,7 @@ QQuickItem *SceneLayerHost::overlayRootItem() const {
     return m_overlay.rootItem;
 }
 
-void SceneLayerHost::resize(QSize size) {
+void SceneLayerHost::resize(QSize size, QSize surfacePixels) {
     if (!m_valid) {
         qWarning().noquote() << "SceneLayerHost: resize() 在宿主未就绪时被调用，已忽略";
         return;
@@ -480,7 +491,7 @@ void SceneLayerHost::resize(QSize size) {
         qWarning().noquote() << "SceneLayerHost: resize() 收到空尺寸，已忽略";
         return;
     }
-    if (size == m_size) {
+    if (size == m_size && surfacePixels == m_surfacePixels) {
         return;
     }
 
@@ -488,6 +499,12 @@ void SceneLayerHost::resize(QSize size) {
     releaseLayerTargets(m_scene);
     releaseLayerTargets(m_overlay);
     m_size = size;
+    m_surfacePixels = surfacePixels;
+    if (!surfacePixels.isEmpty()) {
+        // 分数缩放会分别取整宽高，使用较大比例避免任一方向低于 surface 的采样密度。
+        m_ratio =
+            qMax(qreal(surfacePixels.width()) / size.width(), qreal(surfacePixels.height()) / size.height());
+    }
     applyLayerGeometry(m_scene);
     applyLayerGeometry(m_overlay);
     if (m_suspended) {
@@ -540,6 +557,7 @@ void SceneLayerHost::teardown() {
         layer->depthStencil = nullptr;
     }
     m_rhi = nullptr;
+    m_surfacePixels = {};
     m_staticOnly = false;
     m_valid = false;
 }

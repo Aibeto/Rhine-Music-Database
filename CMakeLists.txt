@@ -573,6 +573,21 @@ if(MSVC)
 endif()
 add_test(NAME qt_input_method_regression COMMAND RhineInputMethodRegression)
 set_tests_properties(qt_input_method_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+qt_add_executable(RhineSceneLayerSizeRegression Qt/tests/SceneLayerSizeChecks.cpp
+                  Qt/src/render/SceneLayerHost.cpp)
+set_target_properties(RhineSceneLayerSizeRegression PROPERTIES QT_QML_MODULE_NO_IMPORT_SCAN TRUE)
+target_include_directories(RhineSceneLayerSizeRegression PRIVATE Qt/src)
+target_link_libraries(RhineSceneLayerSizeRegression PRIVATE Qt6::Quick Qt6::GuiPrivate)
+if(MSVC)
+    target_compile_options(RhineSceneLayerSizeRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_scene_layer_size_regression COMMAND RhineSceneLayerSizeRegression)
+set_tests_properties(qt_scene_layer_size_regression
+                     PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=rhi")
+add_test(NAME qt_scene_layer_size_hidpi_regression COMMAND RhineSceneLayerSizeRegression)
+set_tests_properties(
+    qt_scene_layer_size_hidpi_regression
+    PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen;QT_QUICK_BACKEND=rhi;QT_SCALE_FACTOR=2")
 qt_add_executable(RhineAudioPlaybackRegression Qt/tests/AudioPlaybackChecks.cpp)
 target_link_libraries(RhineAudioPlaybackRegression PRIVATE Qt6::Core Qt6::Multimedia)
 if(MSVC)
