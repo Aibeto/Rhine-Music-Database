@@ -451,11 +451,6 @@ bool PresentationShell::resumeInternal() {
 }
 
 QSize PresentationShell::pixelSize() const {
-#ifdef Q_OS_LINUX
-    if (m_backendName == "vulkan" && m_presenter && !m_presenter->extent().isEmpty()) {
-        return m_presenter->extent();
-    }
-#endif
     return QSize(qMax(1, qRound(m_size.width() * m_dpr)), qMax(1, qRound(m_size.height() * m_dpr)));
 }
 
@@ -552,10 +547,7 @@ void PresentationShell::releaseSwapchainResources() {
 bool PresentationShell::recreateSwapchain() {
     // 强制重建：OutOfDate 的交换链即使窗口尺寸没变也已经不可用，不能走 resize() 里
     // "尺寸没变就返回"的捷径——以前就是被这条捷径吞掉，acquire 于是永远 OutOfDate。
-    // 请求值始终由窗口计算，不能用上一条交换链的实际尺寸请求下一条交换链。
-    const QSize requestedSize(qMax(1, qRound(m_size.width() * m_dpr)),
-                              qMax(1, qRound(m_size.height() * m_dpr)));
-    if (!m_presenter->resize(requestedSize, true)) {
+    if (!m_presenter->resize(pixelSize(), true)) {
         m_error = QStringLiteral("交换链重建失败：%1").arg(m_presenter->lastError());
         return false;
     }
@@ -593,13 +585,7 @@ void PresentationShell::syncSizes() {
         if (!qFuzzyCompare(windowDpr, m_windowDpr)) {
             m_windowDpr = windowDpr;
             m_dpr = windowDpr;
-#ifdef Q_OS_LINUX
-            if (m_backendName != "vulkan") {
-                m_host->setPixelRatio(m_dpr);
-            }
-#else
             m_host->setPixelRatio(m_dpr);
-#endif
             m_needRecreate = true;
             m_forcePresent = true;
             qInfo().noquote() << "FG: 窗口设备像素比" << windowDpr << "离屏层实际比例" << m_dpr << "物理像素"
@@ -612,13 +598,7 @@ void PresentationShell::syncSizes() {
     }
     if (windowSize != m_size) {
         m_size = windowSize;
-#ifdef Q_OS_LINUX
-        if (m_backendName != "vulkan") {
-            m_host->resize(m_size);
-        }
-#else
         m_host->resize(m_size);
-#endif
         // 交换链是应用自己持有的，尺寸变了必须显式重建。
         m_needRecreate = true;
     }
@@ -948,17 +928,6 @@ void PresentationShell::stepFrame() {
         scheduleNext();
         return;
     }
-#ifdef Q_OS_LINUX
-    if (m_backendName == "vulkan") {
-        // 交换链重建成功之后再更新两层；currentExtent 可以覆盖请求尺寸，甚至在 DPR 未变时改变。
-        const QSize surfacePixels = m_presenter->extent();
-        if (m_host->size() != m_size || m_host->pixelSize() != surfacePixels) {
-            qInfo() << "Linux Vulkan: 同步离屏目标到 surface" << surfacePixels << "逻辑尺寸" << m_size
-                    << "窗口 DPR" << m_windowDpr;
-        }
-        m_host->resize(m_size, surfacePixels);
-    }
-#endif
     if (!ensureSwapchainResources() || !ensureCompositeResources()) {
         qWarning().noquote() << "FG:" << m_error;
         scheduleNext();
