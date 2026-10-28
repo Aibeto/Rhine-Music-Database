@@ -645,6 +645,130 @@ function resolveAppImageTool(architecture) {
     return tool;
 }
 
+/**
+ * 下载并校验锁定版本的可执行文件
+ * 校验和随版本固定，构建机不需要预装，换版本时必须同步更新。
+ */
+function downloadPinnedExecutable(directory, name, url, checksum) {
+    fs.mkdirSync(directory, {
+        recursive: true,
+    });
+    const file = path.join(directory, name);
+    if (!fs.existsSync(file)) {
+        run('curl', ['--fail', '--location', '--retry', '3', '--output', file, url]);
+        const digest = spawnSync('sha256sum', [file], {
+            encoding: 'utf8',
+        }).stdout.split(' ')[0];
+        if (digest !== checksum) {
+            fs.rmSync(file, {
+                force: true,
+            });
+            throw new Error(`${name} checksum mismatch: ${digest}`);
+        }
+        fs.chmodSync(file, 0o755);
+    }
+    return file;
+}
+
+// DwarFS 打包用到的两个上游工具，同样按版本锁定。
+// uruntime 取 -lite 变体：它只内嵌 MIT 许可的 dwarfs 读取器，
+// 而完整变体会把 GPL-3.0 的 mkdwarfs 一起塞进运行时。
+const uruntimeVersion = 'v0.7.1';
+const uruntimeChecksums = {
+    x86_64: 'f19d2a58b5f7cb372b8a88b1e9414fd118d8da6d2c555cf3e7c0bac9373b8af9',
+    // aarch64: 'bfcb5d2198d675419207345219766182cffa2515754ff813267118277156a07d',
+};
+const mkdwarfsVersion = '0.15.8';
+const mkdwarfsChecksums = {
+    x86_64: '0ed66df82f9bb6671c1f898404ff4d57c263460078d46dbac8efb9d8eec271b7',
+    // aarch64: 'f21cbc33840bbffe410c7043fab85e0d1b4eee86d77bcc0fbf3a51b94fc4b222',
+};
+
+/**
+ * 取得可用的 mkdwarfs
+ * 优先 MKDWARFS 指定的可执行文件，其次系统 PATH，最后下载锁定的 dwarfs-universal。
+ * dwarfs-universal 按 argv[0] 的工具名分派，所以落地文件名必须是 mkdwarfs。
+ */
+function resolveDwarfsTool(architecture) {
+    if (process.env.MKDWARFS) {
+        return process.env.MKDWARFS;
+    }
+    const system = spawnSync('mkdwarfs', ['--version'], {
+        encoding: 'utf8',
+    });
+    if (!system.error) {
+        return 'mkdwarfs';
+    }
+    return downloadPinnedExecutable(
+        path.join('output', 'dwarfs'),
+        'mkdwarfs',
+        `https://github.com/mhx/dwarfs/releases/download/v${mkdwarfsVersion}` +
+            `/dwarfs-universal-${mkdwarfsVersion}-Linux-${architecture}`,
+        mkdwarfsChecksums[architecture],
+    );
+}
+
+/** 取得 AppImage 运行时：DwarFS 镜像由 uruntime 挂载，squashfs 由 appimagetool 自带。 */
+function resolveDwarfsRuntime(architecture) {
+    if (process.env.URUNTIME) {
+        return process.env.URUNTIME;
+    }
+    return downloadPinnedExecutable(
+        path.join('output', 'dwarfs'),
+        `uruntime-${architecture}`,
+        `https://github.com/VHSgunzo/uruntime/releases/download/${uruntimeVersion}` +
+            `/uruntime-appimage-dwarfs-lite-${architecture}`,
+        uruntimeChecksums[architecture],
+    );
+}
+
+/**
+ * 生成 DwarFS 版 AppImage
+ * mkdwarfs 直接输出带运行时的完整文件，跨文件去重后体积明显小于 squashfs。
+ * -S 越大跨文件去重越充分，但随机读取要解压更多数据，启动变慢。
+ */
+const dwarfsCompressionOptions = (
+    process.env.RHINE_DWARFS_OPTIONS || 'zstd:level=22 -S26 -B2'
+).split(' ');
+
+function packageDwarfsAppImage(app, image, architecture) {
+    run(
+        resolveDwarfsTool(architecture),
+        [
+            '--force',
+            '--order=path',
+            '--set-owner',
+            '0',
+            '--set-group',
+            '0',
+            '--no-history',
+            '--no-create-timestamp',
+            '--header',
+            resolveDwarfsRuntime(architecture),
+            '--input',
+            app,
+            '-C',
+            dwarfsCompressionOptions[0],
+            ...dwarfsCompressionOptions.slice(1),
+            '--output',
+            image,
+        ],
+        {
+            ARCH: architecture,
+        },
+    );
+    fs.chmodSync(image, 0o755);
+    return image;
+}
+
+// 压缩参数：等级拉到上限，块大小提到 1 MiB（覆盖 appimagetool 预设的 128 KiB）。
+// appimagetool 自带的 mksquashfs 是静态构建的 squashfs-tools-ng，只编译了 zstd：
+// `mksquashfs: Compressor "xz" is not supported! Compressors available: zstd`。
+// 所以 xz 与只属于 xz 的 -Xbcj 过滤器在这里都不可用，改用 zstd 最高等级逼近 xz 的体积。
+// 每项按进程参数逐词传递，与命令行上逐个引用后的分词结果一致。
+const appImageCompression = 'zstd';
+const appImageSquashfsOptions = ['-Xcompression-level', '22', '-b', '1048576'];
+
 function packageAppImage(app) {
     const architecture = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
     const image = path.resolve(
@@ -653,8 +777,22 @@ function packageAppImage(app) {
     fs.rmSync(image, {
         force: true,
     });
+    pruneLinuxAppDir(app);
+    // 默认走 DwarFS：跨文件去重后体积明显更小。挂载需要 FUSE，
+    // 没有 FUSE 的机器上 uruntime 会退化成解包运行；RHINE_APPIMAGE_FS=squashfs 可回退。
+    if (process.env.RHINE_APPIMAGE_FS !== 'squashfs') {
+        return packageDwarfsAppImage(app, image, architecture);
+    }
+    // 透传参数用等号形式书写，避免以短横线开头的值被当作新选项。
+    const args = [
+        '--appimage-extract-and-run',
+        `--comp=${appImageCompression}`,
+        ...appImageSquashfsOptions.map((option) => `--mksquashfs-opt=${option}`),
+        app,
+        image,
+    ];
     // 无 FUSE 的机器（容器、CI）也能打包；有 FUSE 时行为一致。
-    run(resolveAppImageTool(architecture), ['--appimage-extract-and-run', app, image], {
+    run(resolveAppImageTool(architecture), args, {
         ARCH: architecture,
     });
     return image;
@@ -675,6 +813,52 @@ function sharedObjects(directory) {
         }
     }
     return found;
+}
+
+/**
+ * 递归列出目录下的全部文件
+ * 显式递归而不依赖 readdirSync 的 recursive 选项，兼容旧版 Node。
+ */
+function listFiles(directory) {
+    const found = [];
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+            found.push(...listFiles(full));
+        } else {
+            found.push(full);
+        }
+    }
+    return found;
+}
+
+// 发行版 Qt 的安装规则会把开发期文件一起装进前缀目录，运行时一律用不到。
+// 只删这些确定无用的部分：程序、Qt 与 FFmpeg 的共享库本身都是运行必需的。
+const linuxPrunedDirectories = [
+    'usr/include',
+    'usr/lib/cmake',
+    'usr/lib/pkgconfig',
+    'usr/share/man',
+    'usr/share/doc',
+    'usr/share/gtk-doc',
+];
+const linuxPrunedSuffixes = ['.a', '.la', '.prl'];
+
+/** 删除 AppDir 里的开发期文件，压缩前再清一次，避免部署顺序影响结果。 */
+function pruneLinuxAppDir(app) {
+    for (const relative of linuxPrunedDirectories) {
+        fs.rmSync(path.join(app, relative), {
+            recursive: true,
+            force: true,
+        });
+    }
+    for (const file of listFiles(path.join(app, 'usr'))) {
+        if (linuxPrunedSuffixes.some((suffix) => file.endsWith(suffix))) {
+            fs.rmSync(file, {
+                force: true,
+            });
+        }
+    }
 }
 
 /**

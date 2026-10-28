@@ -185,6 +185,10 @@ jobs:
           # 这里只为兼容手动验证，noble 已按 t64 改名，缺失不算失败。
           sudo apt-get install --yes --no-install-recommends libfuse2t64 || \
             sudo apt-get install --yes --no-install-recommends libfuse2 || true
+          # DwarFS 镜像由 uruntime 通过 FUSE 挂载，手动跑产物时需要 fuse3。
+          sudo apt-get install --yes --no-install-recommends fuse3 || \
+            sudo apt-get install --yes --no-install-recommends libfuse3-3t64 || \
+            sudo apt-get install --yes --no-install-recommends libfuse3-3 || true
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.12.0'
@@ -226,7 +230,8 @@ jobs:
             echo "RHINE_NODE_BINARY=$RUNNER_TEMP/$distribution/bin/node" >> "$GITHUB_ENV"
             echo "RHINE_NODE_LICENSE=$RUNNER_TEMP/$distribution/LICENSE" >> "$GITHUB_ENV"
           fi
-      # appimagetool 由构建脚本按锁定版本自动下载并校验 SHA256，无需预装。
+      # Linux 打包用的 mkdwarfs 与 uruntime 由构建脚本按锁定版本自动下载并校验 SHA256，
+      # 无需预装；设置 RHINE_APPIMAGE_FS=squashfs 时改用 appimagetool，同样按锁定版本下载。
       - name: Build and deploy
         run: npm run build
         env:
