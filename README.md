@@ -235,7 +235,7 @@ RHINE_RESOURCES=$PWD/output/resources ./output/qt-build/RhineMusicDatabase 2>&1
 RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineMusicDatabase
 ```
 
-`npm run build` 先按依赖闭包收集 Qt 库、平台插件、图像与 TLS 插件和 QML 模块到 `output/RhineMusicDatabase.AppDir`，再用 `mkdwarfs` 把 AppDir 打成 DwarFS 镜像，前面加上 `uruntime` 生成 `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`（见下节）。设置 `RHINE_APPIMAGE_FS=squashfs` 则改用 `appimagetool`：它需自行安装并出现在 `PATH` 中，也可用 `APPIMAGE_TOOL` 指定路径；没有 FUSE 时脚本自动改用 `--appimage-extract-and-run`，并统一透传 `-Xcompression-level 22`、`-b 1048576` 换取最小体积。squashfs 路的压缩算法只能用 `zstd`：appimagetool 自带的 mksquashfs 只编译了 zstd，`--comp xz` 会直接失败。
+`npm run build` 先按直接依赖（`DT_NEEDED`）收集 Qt 库、平台插件、图像与 TLS 插件和 QML 模块到 `output/RhineMusicDatabase.AppDir`，再用 `mkdwarfs` 把 AppDir 打成 DwarFS 镜像，前面加上 `uruntime` 生成 `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`（见下节）。设置 `RHINE_APPIMAGE_FS=squashfs` 则改用 `appimagetool`：它需自行安装并出现在 `PATH` 中，也可用 `APPIMAGE_TOOL` 指定路径；没有 FUSE 时脚本自动改用 `--appimage-extract-and-run`，并统一透传 `-Xcompression-level 22`、`-b 1048576` 换取最小体积。squashfs 路的压缩算法只能用 `zstd`：appimagetool 自带的 mksquashfs 只编译了 zstd，`--comp xz` 会直接失败。
 
 随包的 Node 必须是官方独立分发包：构建脚本会检查 `ldd` 结果，只依赖 glibc 运行库的构建才会被打进 AppImage，发行版自己的 `/usr/bin/node` 动态链接了系统 ICU 等库，会被拒绝。
 
