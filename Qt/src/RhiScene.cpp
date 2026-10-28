@@ -467,8 +467,11 @@ class Renderer {
             create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, sampleCount, rtFlags), true));
         auto resolved = sampleCount > 1 ? texture(size, QRhiTexture::RGBA16F, rtFlags, true) : nullptr;
         // 单采样时额外挂一张运动矢量目标，供插帧/时域直接读取，省掉第二趟几何。
-        motionVectors = sampleCount > 1 ? nullptr
-                                        : create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1, rtFlags), true));
+        // 注意：OpenGL 后端只有一个 draw buffer，片元着色器必须改用不带 location=1 的变体
+        // （opticalSurfaceNoMrt.frag），见 pipeline()。附件本身两个后端都挂着。
+        motionVectors = sampleCount > 1
+                            ? nullptr
+                            : create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1, rtFlags), true));
         color = makeTarget(attachment, depth, resolved, motionVectors);
         target = {};
         if (needsReadbackTarget) {
@@ -799,8 +802,14 @@ class Renderer {
         }
         auto p = own(rhi->newGraphicsPipeline(), true);
         const bool geo = kind == "surface";
+        // OpenGL 后端：场景目标只有一个 draw buffer，片元着色器不能声明 location=1 的第二个输出，
+        // 否则驱动会丢弃整块 fragment 结果（实测 3D 层全黑）。Vulkan 走 MRT 单趟。
+        const bool surfaceMrt = geo && motionVectors != nullptr &&
+                                rhi->backend() != QRhi::OpenGLES2;
+        const QString fragmentName =
+            (geo && !surfaceMrt) ? QStringLiteral("surfaceNoMrt") : kind;
         p->setShaderStages({{QRhiShaderStage::Vertex, shader(geo ? "geometry.vert" : "quad.vert")},
-                            {QRhiShaderStage::Fragment, shader(kind + ".frag")}});
+                            {QRhiShaderStage::Fragment, shader(fragmentName + ".frag")}});
         if (geo) {
             QRhiVertexInputLayout layout;
             layout.setBindings({{32}, {144, QRhiVertexInputBinding::PerInstance}});
@@ -835,7 +844,7 @@ class Renderer {
         }
         // MRT：场景目标除颜色外还挂着运动矢量附件，必须为**每个**颜色附件声明 blend。
         // 只声明一个时 location=1 的写出会被静默丢弃（表现为运动矢量恒为 0）。
-        if (kind == "surface" && motionVectors) {
+        if (surfaceMrt) {
             p->setTargetBlends({b, QRhiGraphicsPipeline::TargetBlend{}});
         } else {
             p->setTargetBlends({b});

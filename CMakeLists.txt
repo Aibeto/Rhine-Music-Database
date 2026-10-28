@@ -359,7 +359,8 @@ qt_add_shaders(
     Qt/shaders/enhancement/opticalWarp.frag
     Qt/shaders/enhancement/opticalWarpEarly.frag
     Qt/shaders/enhancement/opticalWarpLate.frag
-    Qt/shaders/enhancement/opticalWarpDebug.frag)
+    Qt/shaders/enhancement/opticalWarpDebug.frag
+    Qt/shaders/enhancement/opticalSurfaceNoMrt.frag)
 target_compile_definitions(RhineMusicDatabase PRIVATE RHINE_APPLICATION_ID="${RHINE_APPLICATION_ID}"
                                                       $<$<CONFIG:Debug>:QT_QML_DEBUG>)
 target_link_libraries(
