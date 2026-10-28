@@ -123,6 +123,17 @@ void InterfaceSession::stop() {
     m_monitor.stop();
 }
 
+/** 把调用方解析出的后端钉进重建环境：新进程按它选后端，和请求方看到的一致。 */
+void InterfaceSession::overrideBackend(const QString &backend) {
+    // QSG_RHI_BACKEND 优先级高于 RHINE_GRAPHICS，留着会盖掉刚写进去的值。
+    m_launch.environment.remove(QStringLiteral("QSG_RHI_BACKEND"));
+    if (backend.isEmpty()) {
+        m_launch.environment.remove(QStringLiteral("RHINE_GRAPHICS"));
+        return;
+    }
+    m_launch.environment.insert(QStringLiteral("RHINE_GRAPHICS"), backend);
+}
+
 void InterfaceSession::setPresenceQuery(PresenceQuery query) {
     m_query = std::move(query);
     updateVisibility();

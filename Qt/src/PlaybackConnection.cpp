@@ -141,6 +141,8 @@ void PlaybackConnection::readMessages() {
             emit suspendRequested();
         } else if (message["event"] == "close-window") {
             emit closeWindowRequested();
+        } else if (message["event"] == "restart") {
+            emit restartRequested();
         } else if (message["event"] == "diagnostic") {
             emit diagnosticEvent(message["name"].toString(), message["values"].toObject());
         }

@@ -28,6 +28,10 @@ class PlaybackService : public QObject {
     QHash<QLocalSocket *, Client> m_clients;
     QPointer<QLocalSocket> m_gui;
     QJsonObject m_guiRenderState;
+    /// 当前界面进程启动时解析出的图形后端；与本次启动的解析结果不同即需要重建界面。
+    QString m_guiBackend;
+    bool m_restartingInterface = false;
+    QElapsedTimer m_interfaceRestartClock;
     InterfaceSession m_interfaceSession;
     QTimer m_poll;
     QTimer m_save;

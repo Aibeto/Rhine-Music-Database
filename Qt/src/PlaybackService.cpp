@@ -73,9 +73,18 @@ PlaybackService::PlaybackService(QString root, QString guiExecutable, bool offli
             m_clients.insert(socket, {});
             connect(socket, &QLocalSocket::readyRead, this, [this, socket] { read(socket); });
             connect(socket, &QLocalSocket::disconnected, this, [this, socket] {
+                const bool restarting = m_gui == socket && m_restartingInterface;
                 if (m_gui == socket) {
                     m_gui.clear();
+                    m_guiBackend.clear();
                     m_interfaceSession.detach();
+                }
+                if (restarting) {
+                    // 旧界面退出是切换后端触发的：立刻按新配置拉起新界面，
+                    // 否则用户只会看到窗口消失，比后端没换更糟。
+                    // 这里不解除 m_restartingInterface——旧界面的 quit 可能还在路上，
+                    // 要等到新界面 attach（那时才说明重建成功）再解除。
+                    m_interfaceSession.show();
                 }
                 m_clients.remove(socket);
                 socket->deleteLater();
@@ -222,11 +231,29 @@ void PlaybackService::dispatch(QLocalSocket *socket, const QJsonObject &request)
                   {"version", QCoreApplication::applicationVersion()},
                   {"offlineTest", m_host.offline}};
     } else if (method == "attach") {
+        // 图形后端只在进程启动时生效，所以"切换后端后重新打开应用"必须换掉界面进程：
+        // 只激活旧窗口等于让设置静默失效，用户看到的后端会永远停在第一次启动的那个。
+        const auto backend = arguments["backend"].toString();
         if (m_gui && m_gui != socket) {
-            m_interfaceSession.show();
-            result["existing"] = true;
+            if (!m_host.offline && !backend.isEmpty() && !m_guiBackend.isEmpty() &&
+                backend != m_guiBackend) {
+                // 服务不持有外部启动的界面进程句柄，所以改为通知它自行退出，断开后再按新配置
+                // 重新拉起（见 disconnected 分支）。忽略旧界面的 quit 见 method == "quit"。
+                qInfo().noquote() << "图形后端" << m_guiBackend << "->" << backend << "：重建界面进程";
+                m_restartingInterface = true;
+                m_interfaceRestartClock.start();
+                m_interfaceSession.overrideBackend(backend);
+                send(m_gui, {{"event", "restart"}});
+                result["existing"] = true;
+                result["restarted"] = true;
+            } else {
+                m_interfaceSession.show();
+                result["existing"] = true;
+            }
         } else {
             m_gui = socket;
+            m_guiBackend = backend;
+            m_restartingInterface = false;
             m_interfaceSession.attach(arguments["pid"].toInteger());
             result["existing"] = false;
         }
@@ -278,7 +305,13 @@ void PlaybackService::dispatch(QLocalSocket *socket, const QJsonObject &request)
     } else if (method == "test.closeWindow" && m_host.offline) {
         send(m_gui, {{"event", "close-window"}});
     } else if (method == "quit") {
-        QTimer::singleShot(0, this, &PlaybackService::shutdown);
+        // 重建界面时旧界面走的是正常退出路径，这条 quit 不能把服务一起带走，
+        // 否则新界面还没起来播放就断了。超时兜底，避免异常残留永久忽略退出。
+        if (m_restartingInterface && m_interfaceRestartClock.elapsed() < 5000) {
+            qInfo() << "界面重建中：忽略旧界面的退出请求";
+        } else {
+            QTimer::singleShot(0, this, &PlaybackService::shutdown);
+        }
     } else if (method == "show") {
         showInterface();
     } else if (method == "host.request") {

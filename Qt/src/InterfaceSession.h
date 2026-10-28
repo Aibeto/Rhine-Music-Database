@@ -40,6 +40,10 @@ class InterfaceSession : public QObject {
     void resumed();
     void show();
     void stop();
+    /// 重建界面时把调用方解析出的图形后端显式传给新进程。
+    /// 配置与一次性覆盖（RHINE_GRAPHICS / QSG_RHI_BACKEND）两条路径都在这里收敛，
+    /// 否则新界面会重新解析回旧值，反复触发重建。
+    void overrideBackend(const QString &backend);
     void setPresenceQuery(PresenceQuery query);
     DesktopPresence nativePresence(qint64 processId = -1, bool fullscreen = false) const;
     const InterfaceState &state() const;
