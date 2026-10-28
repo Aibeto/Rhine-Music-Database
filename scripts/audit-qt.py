@@ -178,6 +178,11 @@ elif linux:
         missing = [line.split("=>")[0].strip() for line in output.splitlines() if "not found" in line]
         assert not missing, f"{binary.relative_to(app)} has unresolved libraries: {', '.join(missing)}"
     assert (app / "usr/plugins/platforms/libqxcb.so").is_file(), "Missing X11 platform plugin"
+    # X11 平台插件不自带 OpenGL 上下文；GLX/EGL 集成缺失时会在初始化 RHI 时直接退出。
+    xcb_gl = app / "usr/plugins/xcbglintegrations"
+    assert any(
+        (xcb_gl / name).is_file() for name in ("libqxcb-glx-integration.so", "libqxcb-egl-integration.so")
+    ), "Missing X11 OpenGL integration plugin"
     # Wayland 插件名随打包方式不同：发行版是 libqwayland.so，
     # 官方 Qt 包拆成 libqwayland-egl.so 与 libqwayland-generic.so，两者都接受。
     assert list((app / "usr/plugins/platforms").glob("libqwayland*.so")), "Missing Wayland platform plugin"

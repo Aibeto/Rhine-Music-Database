@@ -339,10 +339,11 @@ const linuxExcludedLibraries = new Set([
     'libharfbuzz.so.0',
     'libgraphite2.so.3',
     'libpng16.so.16',
+    // 厂商驱动通过 libGLX/libEGL 装载，这两个交给发行版，避免遮蔽专有驱动。
+    // libOpenGL 只做厂商中立的 GL 分发，且 Ubuntu 26.04 默认桌面不装 libopengl0，
+    // 而 Qt6Gui 直接依赖它，留给系统会在启动前就报缺库，因此随包分发。
     'libGL.so.1',
     'libGLX.so.0',
-    'libGLdispatch.so.0',
-    'libOpenGL.so.0',
     'libEGL.so.1',
     'libGLESv2.so.2',
     'libgbm.so.1',
@@ -361,8 +362,8 @@ const linuxExcludedLibraries = new Set([
     'libXcomposite.so.1',
     'libXdamage.so.1',
     'libxcb.so.1',
+    // xkbcommon 本体随发行版；它的 X11 配套库不属于必装集，缺了 X11 插件加载不了键位。
     'libxkbcommon.so.0',
-    'libxkbcommon-x11.so.0',
     'libwayland-client.so.0',
     'libwayland-cursor.so.0',
     'libwayland-egl.so.1',
@@ -370,9 +371,11 @@ const linuxExcludedLibraries = new Set([
     'libpulse.so.0',
     'libasound.so.2',
 ]);
-// xcb 扩展、Wayland 后端与音频服务跟随发行版，版本差异由用户系统统一升级。
+// xcb 核心与 XKB 扩展、Wayland 后端与音频服务跟随发行版，版本差异由用户系统统一升级。
+// xcb-util 系列（光标、输入法、render-util 等）不在此列：它们只在装有桌面的系统上出现，
+// 缺了会让 X11 插件退出，因此随包分发。
 const linuxExcludedPattern =
-    /^lib(?:xcb-|wayland-|drm[_-]|vulkan|GLESv|GLX|X11|Xext|Xrender|Xi\.|Xfixes|Xcursor|Xrandr|Xinerama|Xcomposite|Xdamage|Xau|Xdmcp|pulse|asound|nss|nspr|smime|softokn|freebl|plc|plds)/;
+    /^lib(?:wayland-|drm[_-]|vulkan|X11|Xext|Xrender|Xi\.|Xfixes|Xcursor|Xrandr|Xinerama|Xcomposite|Xdamage|Xau|Xdmcp|pulse|asound|nss|nspr|smime|softokn|freebl|plc|plds)/;
 
 function isExcludedLinuxLibrary(name) {
     return linuxExcludedLibraries.has(name) || linuxExcludedPattern.test(name);
@@ -477,6 +480,7 @@ function deployLinuxRuntime(qt, app, binary) {
         'multimedia',
         'networkinformation',
         'platforminputcontexts',
+        'xcbglintegrations',
         'wayland-shell-integration',
         'wayland-decoration-client',
         'wayland-graphics-integration-client',
