@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
+if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+    set(CMAKE_OSX_DEPLOYMENT_TARGET "14.4")
+endif()
 # 正式版本在构建前注入；开发版仅保留系统资源所需的数字占位。
 set(RHINE_VERSION
     "0.0.0"
