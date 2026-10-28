@@ -2,6 +2,7 @@
 #include "AppStorage.h"
 #include "Engine.h"
 #include "fg/FgCapability.h"
+#include "fg/FgConfig.h"
 #include "render/PresentationShell.h"
 #include "FrameProfiler.h"
 #include "GraphicsBackend.h"
@@ -521,8 +522,19 @@ int main(int argc, char **argv) {
     const auto platformName = QGuiApplication::platformName();
     const bool hasNativeWindowSystem =
         platformName != QStringLiteral("offscreen") && platformName != QStringLiteral("minimal");
+    // 插帧关闭时不接管呈现层（RHINE_FG_LAYER=on 可强制接管做对照）。
+    // 依据：全屏 2560x1440、主界面列表页长按 ↓ 的实测内容帧（引擎 render/s）——
+    //   接管呈现层 20.3/s（间隔均 51~74ms）vs Qt 默认路径 27.5/s（间隔均 33.8ms），
+    //   Qt 路径高 35%，已与 OpenGL 的 31.5/s 接近。
+    // 原因：呈现层在 fg=off 时唯一做的事就是"每帧重渲重上屏"，而它把两层离屏录制、
+    // 合成与 present 全压在 GUI 线程上（QQuickRenderControl 的 render() 在调用线程执行），
+    // 直接挤掉了引擎节拍。不开插帧时它没有收益，只有成本。
+    // 代价：切换插帧从此需要重启应用才生效（呈现层在启动时决定是否接管）。
+    const bool fgForced = qEnvironmentVariable("RHINE_FG_LAYER").compare("on", Qt::CaseInsensitive) == 0;
+    const bool interpolationWanted =
+        fgForced || RhineFg::parseBool(qgetenv("RHINE_FG"), false);
     const bool fgCandidate = !test && !args.contains("--capture") && !fgLayerDisabled &&
-                             hasNativeWindowSystem &&
+                             hasNativeWindowSystem && interpolationWanted &&
                              PresentationShell::supportsBackend(RhineGraphics::activeBackend());
 #ifdef Q_OS_WIN
     // 首次显示窗口前就监听 Explorer 的就绪消息，FG 与默认窗口共用同一个任务栏所有者。

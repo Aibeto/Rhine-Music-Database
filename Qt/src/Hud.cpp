@@ -46,10 +46,15 @@ void Hud::paint(QPainter *painter) {
     if (hudTiming) {
         paintClock.start();
     }
+    // 上限实验（RHINE_HUD_SKIP_PAINT=1）：完全跳过 HUD 绘制，量"文字栅格化免费"时的
+    // 帧率天花板。画面会缺 HUD，只用于测定收益上限，不作正常配置。
+    static const bool skipPaint = qEnvironmentVariableIntValue("RHINE_HUD_SKIP_PAINT") == 1;
     painter->save();
     painter->scale(height() / 1080, height() / 1080);
-    m_engine->glyphs()->commands(*painter, m_engine->commands(),
-                                 [this](QString key) { return m_engine->host.image(key); });
+    if (!skipPaint) {
+        m_engine->glyphs()->commands(*painter, m_engine->commands(),
+                                     [this](QString key) { return m_engine->host.image(key); });
+    }
     painter->restore();
     if (hudTiming) {
         paintMs = paintMs * 0.8 + double(paintClock.nsecsElapsed()) / 1e6 * 0.2;

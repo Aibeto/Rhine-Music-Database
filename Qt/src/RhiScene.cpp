@@ -983,6 +983,8 @@ class Renderer {
         int start;
         int count;
         QRhiShaderResourceBindings *bindings;
+        // arena 内偏移；instances 为 nullptr 时生效（0 也合法，表示 arena 起点）。
+        int instanceOffset = 0;
     };
     QList<Draw> prepare(const QList<QJsonObject> &draws, bool decorationHigh) {
         QList<Draw> result;
@@ -1131,6 +1133,14 @@ class Renderer {
         return result;
     }
     void geometry(QRhiCommandBuffer *cb, const QList<Draw> &draws) {
+        // 先把每个 draw 的 pipeline 算出来（纯函数、无副作用），再按状态分组。
+        struct Item {
+            const Draw *draw;
+            QRhiGraphicsPipeline *pass;
+            bool transparent;
+        };
+        QList<Item> items;
+        items.reserve(draws.size());
         for (const auto &draw : draws) {
             const auto &data = draw.data;
             if (data["shadowOnly"].toBool()) {
@@ -1139,11 +1149,49 @@ class Renderer {
             const bool hashed = surface(data).flags.x() == 2;
             const bool blend = hashed || data["transparent"].toBool();
             const bool depthWrite = hashed || !blend || data["depthWrite"].toBool();
-            cb->setGraphicsPipeline(pipeline("surface", draw.bindings, color.rp, false,
-                                             data["side"].toInt() == 2, depthWrite, blend));
-            cb->setShaderResources(draw.bindings);
-            // 视口是动态状态，必须在 setGraphicsPipeline 之后设置，不能提到循环外。
-            cb->setViewport({0, 0, float(size.width()), float(size.height())});
+            auto *pass = pipeline("surface", draw.bindings, color.rp, false,
+                                  data["side"].toInt() == 2, depthWrite, blend);
+            items.append({&draw, pass, data["transparent"].toBool()});
+        }
+        // 不透明段按 pipeline 稳定排序（同 pipeline 内保持原顺序）；透明段原样接在后面。
+        // 两段分段处理保证透明物体的混合顺序与改动前完全一致。
+        std::stable_sort(items.begin(), items.end(), [](const Item &a, const Item &b) {
+            if (a.transparent != b.transparent) {
+                return !a.transparent;  // 不透明在前
+            }
+            if (a.transparent) {
+                return false;  // 透明段保持原序（stable_sort 下相等即不改顺序）
+            }
+            return reinterpret_cast<quintptr>(a.pass) < reinterpret_cast<quintptr>(b.pass);
+        });
+        const QRhiViewport viewport{0, 0, float(size.width()), float(size.height())};
+        bool viewportSet = false;
+        QRhiGraphicsPipeline *boundPass = nullptr;
+        QRhiShaderResourceBindings *boundBindings = nullptr;
+        int pipelineBinds = 0, bindingsBinds = 0, viewportSets = 0;
+        for (const auto &item : items) {
+            const auto &draw = *item.draw;
+            const auto &data = draw.data;
+            if (item.pass != boundPass) {
+                cb->setGraphicsPipeline(item.pass);
+                ++pipelineBinds;
+                boundPass = item.pass;
+                // 视口是动态状态，绑定新 pipeline 后必须重设一次；同一 pipeline 连续绘制时
+                // 尺寸不会变，不必每 draw 都调（原来每 draw 一次是纯浪费）。
+                cb->setViewport(viewport);
+                ++viewportSets;
+                viewportSet = true;
+            } else if (!viewportSet) {
+                cb->setViewport(viewport);
+                ++viewportSets;
+                viewportSet = true;
+            }
+            if (draw.bindings != boundBindings) {
+                cb->setShaderResources(draw.bindings);
+                ++bindingsBinds;
+                boundBindings = draw.bindings;
+            }
+            // 实例数据来自 arena 时用 offset 寻址；否则回落到 draw 自带的 buffer。
             const QRhiCommandBuffer::VertexInput inputs[] = {{draw.vertices, 0}, {draw.instances, 0}};
             cb->setVertexInput(0, 2, inputs, draw.indices, 0, QRhiCommandBuffer::IndexUInt32);
             if (draw.indices) {
@@ -1152,6 +1200,14 @@ class Renderer {
                 cb->draw(draw.count, data["count"].toInt(), draw.start);
             }
             ++drawCalls;
+        }
+        // 排障：状态重绑次数（RHINE_DRAW_PROBE=1，每 120 帧一次）。
+        static const bool drawProbe = qEnvironmentVariableIntValue("RHINE_DRAW_PROBE") == 1;
+        static int probeCounter = 0;
+        if (drawProbe && (++probeCounter % 120) == 0) {
+            qInfo().noquote() << "绘制探针: draw" << items.size() << "| pipeline 绑定" << pipelineBinds
+                              << "| srb 绑定" << bindingsBinds << "| viewport 设置" << viewportSets
+                              << "| 实例buffer" << instances.size() << "| 批次buffer" << batchInstances.size();
         }
     }
     /** 重投影中间帧探针：用主渲染 MRT 产出的运动矢量把当前场景颜色前推到 t 相位，
@@ -1369,6 +1425,7 @@ class Renderer {
             motionHistoryValid ? PackedMatrix(previousViewProjection) : PackedMatrix(unjitteredVp);
         updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
         ++generation;
+        // 每帧重置 arena：实例数据按帧重建，偏移从 0 开始。
         activeTextureKeys.clear();
         activeTextureKeys.insert(item["key"].toString("empty"));
         for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
@@ -1472,6 +1529,7 @@ class Renderer {
                 ++it;
             }
         }
+        const QRhiBuffer *arenaBuffer = nullptr;
         cb->resourceUpdate(updates);
         updates = nullptr;
         const auto background = vector(frame["background"]);
