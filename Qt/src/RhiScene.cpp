@@ -4,6 +4,7 @@
 #endif
 #include "render/MotionPass.h"
 #include "render/ScenePostProcess.h"
+#include "fg/FgFrameTap.h"
 #include "fg/FgCapability.h"
 #include <cstdio>
 #include "DiscGeometry.h"
@@ -49,6 +50,8 @@ struct Globals {
     PackedMatrix emitterInverse;
     QVector4D opticalLight;
     QVector4D emissionColor;
+    PackedMatrix previousViewProjection;
+    PackedMatrix currentViewProjection;
 };
 struct Surface {
     QVector4D color, physical, optics, attenuation, extra, flags, darkColor, emission;
@@ -56,10 +59,12 @@ struct Surface {
 struct Instance {
     PackedMatrix model;
     QVector4D state;
+    // 上一帧模型矩阵：运动矢量随主渲染同一趟输出，不再需要第二趟几何。
+    PackedMatrix previousModel;
 };
-static_assert(sizeof(Globals) == 704);
+static_assert(sizeof(Globals) == 832);
 static_assert(sizeof(Surface) == 128);
-static_assert(sizeof(Instance) == 80);
+static_assert(sizeof(Instance) == 144);
 // 与主渲染路径一致：封面最高 1024²，带 mip 后单张约 5.3 MiB，预算需按此放宽。
 static constexpr qint64 MUSIC_TEXTURE_BUDGET_BYTES = 64 * 1024 * 1024;
 static QMatrix4x4 matrix(QJsonArray a, int offset = 0) {
@@ -162,6 +167,18 @@ class Renderer {
         quint64 used = 0;
     };
     QHash<int, BufferState> instances;
+    // 运动矢量 MRT 所需的上一帧状态：逐 draw 的实例矩阵与上一帧 VP。
+    QHash<int, QByteArray> previousInstanceMatrices;
+    QMatrix4x4 previousViewProjection;
+    QElapsedTimer frameClock;
+    bool motionHistoryValid = false;
+    QRhiTexture *motionVectors = nullptr;
+    // 重投影插帧探针（RHINE_WARP_PROBE=1）：把当前场景颜色按运动矢量前推到 t 相位。
+    // 与 FFX 插值不同，相位 t 可任意取（FFX 硬编码 0.5），且不需要第二趟几何。
+    Target warp;
+    QRhiShaderResourceBindings *warpBinding = nullptr;
+    QRhiTexture *warpSource = nullptr;
+    QRhiTexture *warpVectors = nullptr;
     QHash<QString, MaterialState> materials;
     QHash<QString, QRhiShaderResourceBindings *> postBindings;
     QHash<QString, QString> labelRevisions;
@@ -379,14 +396,20 @@ class Renderer {
         return buffer(QByteArray(reinterpret_cast<const char *>(vertices.data()), vertices.size() * 4),
                       QRhiBuffer::VertexBuffer);
     }
-    Target makeTarget(QRhiTexture *texture, QRhiTexture *depth = nullptr, QRhiTexture *resolve = nullptr) {
+    Target makeTarget(QRhiTexture *texture, QRhiTexture *depth = nullptr, QRhiTexture *resolve = nullptr,
+                      QRhiTexture *vectors = nullptr) {
         QRhiTextureRenderTargetDescription desc;
         if (texture) {
             QRhiColorAttachment attachment(texture);
             if (resolve) {
                 attachment.setResolveTexture(resolve);
             }
-            desc.setColorAttachments({attachment});
+            if (vectors) {
+                // 第二颜色附件：运动矢量与颜色同一趟栅格化输出。
+                desc.setColorAttachments({attachment, QRhiColorAttachment(vectors)});
+            } else {
+                desc.setColorAttachments({attachment});
+            }
         }
         desc.setDepthTexture(depth);
         auto rt = own(rhi->newTextureRenderTarget(desc), true);
@@ -443,7 +466,10 @@ class Renderer {
         auto attachment =
             create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, sampleCount, rtFlags), true));
         auto resolved = sampleCount > 1 ? texture(size, QRhiTexture::RGBA16F, rtFlags, true) : nullptr;
-        color = makeTarget(attachment, depth, resolved);
+        // 单采样时额外挂一张运动矢量目标，供插帧/时域直接读取，省掉第二趟几何。
+        motionVectors = sampleCount > 1 ? nullptr
+                                        : create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1, rtFlags), true));
+        color = makeTarget(attachment, depth, resolved, motionVectors);
         target = {};
         if (needsReadbackTarget) {
             // 读回目标固定为窗口尺寸：超采样只放大内部目标，合成通道按目标像素尺寸缩回。
@@ -777,7 +803,7 @@ class Renderer {
                             {QRhiShaderStage::Fragment, shader(kind + ".frag")}});
         if (geo) {
             QRhiVertexInputLayout layout;
-            layout.setBindings({{32}, {80, QRhiVertexInputBinding::PerInstance}});
+            layout.setBindings({{32}, {144, QRhiVertexInputBinding::PerInstance}});
             layout.setAttributes({{0, 0, QRhiVertexInputAttribute::Float3, 0},
                                   {0, 1, QRhiVertexInputAttribute::Float3, 12},
                                   {0, 2, QRhiVertexInputAttribute::Float2, 24},
@@ -785,7 +811,11 @@ class Renderer {
                                   {1, 4, QRhiVertexInputAttribute::Float4, 16},
                                   {1, 5, QRhiVertexInputAttribute::Float4, 32},
                                   {1, 6, QRhiVertexInputAttribute::Float4, 48},
-                                  {1, 7, QRhiVertexInputAttribute::Float4, 64}});
+                                  {1, 7, QRhiVertexInputAttribute::Float4, 64},
+                                  {1, 8, QRhiVertexInputAttribute::Float4, 80},
+                                  {1, 9, QRhiVertexInputAttribute::Float4, 96},
+                                  {1, 10, QRhiVertexInputAttribute::Float4, 112},
+                                  {1, 11, QRhiVertexInputAttribute::Float4, 128}});
             p->setVertexInputLayout(layout);
             p->setDepthTest(true);
             p->setDepthWrite(depthWrite);
@@ -803,7 +833,13 @@ class Renderer {
             b.srcAlpha = QRhiGraphicsPipeline::One;
             b.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
         }
-        p->setTargetBlends({b});
+        // MRT：场景目标除颜色外还挂着运动矢量附件，必须为**每个**颜色附件声明 blend。
+        // 只声明一个时 location=1 的写出会被静默丢弃（表现为运动矢量恒为 0）。
+        if (kind == "surface" && motionVectors) {
+            p->setTargetBlends({b, QRhiGraphicsPipeline::TargetBlend{}});
+        } else {
+            p->setTargetBlends({b});
+        }
         if (!pipelineLayouts.contains(kind)) {
             auto layout = own(rhi->newShaderResourceBindings(), true);
             const auto stages =
@@ -884,6 +920,19 @@ class Renderer {
             return state.buffer;
         }
         const auto matrices = matrixBytes(draw);
+        // 上一帧实例按平移列配对：列表滚动后顺序会变，按索引直接配对会给出错误速度。
+        QHash<QByteArray, int> previousTranslations;
+        const auto previousBytes = previousInstanceMatrices.value(draw["id"].toInt());
+        for (int index = 0; (index + 1) * 64 <= previousBytes.size(); ++index) {
+            previousTranslations.insert(previousBytes.mid(index * 64 + 48, 16), index);
+        }
+        QHash<int, int> previousMatched;
+        for (int index = 0; (index + 1) * 64 <= matrices.size(); ++index) {
+            const int match = previousTranslations.value(matrices.mid(index * 64 + 48, 16), -1);
+            if (match >= 0) {
+                previousMatched.insert(index, match);
+            }
+        }
         const auto native = nativeBuffers.value(draw["id"].toInt());
         const auto themes = draw["themes"].toArray();
         std::vector<Instance> values;
@@ -903,6 +952,14 @@ class Renderer {
             // 详情页背景仍是实例化的唱片墙，若按整帧置位会把这些卡片一起改掉。
             const bool hero = detailMode && !draw["instanced"].toBool();
             value.state = {n(draw, "quality"), n(draw, "clarity"), theme, hero ? 1.f : 0.f};
+            value.previousModel = PackedMatrix();
+            const auto previous = previousInstanceMatrices.value(draw["id"].toInt());
+            const int previousIndex = previousMatched.value(i, -1);
+            if (previousIndex >= 0 && (previousIndex + 1) * 64 <= previous.size()) {
+                memcpy(value.previousModel.elements, previous.constData() + previousIndex * 64, 64);
+            } else if ((i + 1) * 64 <= matrices.size()) {
+                memcpy(value.previousModel.elements, matrices.constData() + i * 64, 64);
+            }
             values.push_back(value);
         }
         const QByteArray bytes(reinterpret_cast<const char *>(values.data()),
@@ -1088,6 +1145,57 @@ class Renderer {
             ++drawCalls;
         }
     }
+    /** 重投影中间帧探针：用主渲染 MRT 产出的运动矢量把当前场景颜色前推到 t 相位，
+     *  零额外几何、相位可任意取，用来评估自研 4 倍插帧的成本与画面质量。 */
+    /** 重投影中间帧：用主渲染 MRT 产出的运动矢量把当前场景颜色回看到 t 相位，
+     *  零额外几何。相位走多份烘焙变体而不是 uniform——本机 Intel ANV 驱动在
+     *  同一管线同时绑定两个 std140 uniform block 时会在建管线阶段 SIGFPE。 */
+    void warpFrame(QRhiCommandBuffer *cb, QRhiTexture *source) {
+        if (!qEnvironmentVariableIsSet("RHINE_WARP_PROBE") || !source || !motionVectors ||
+            size.isEmpty()) {
+            return;
+        }
+        // 目标与绑定都按「尺寸 / 输入纹理」变化重建：场景目标在 resize 时会被换掉，
+        // 绑定里残留的旧指针会直接崩，所以显式比对三个输入。
+        const bool sizeChanged = !warp.texture || warp.texture->pixelSize() != size;
+        if (sizeChanged) {
+            warp.texture = create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1,
+                                                      QRhiTexture::RenderTarget)));
+            warp.rt = own(rhi->newTextureRenderTarget({QRhiColorAttachment(warp.texture)}));
+            auto descriptor = own(warp.rt->newCompatibleRenderPassDescriptor());
+            warp.rt->setRenderPassDescriptor(descriptor);
+            create(warp.rt);
+            warp.rp = warp.rt->renderPassDescriptor();
+            qWarning("重投影探针: 目标 %dx%d", size.width(), size.height());
+        }
+        if (sizeChanged || warpSource != source || warpVectors != motionVectors) {
+            const auto stages = QRhiShaderResourceBinding::VertexStage |
+                                QRhiShaderResourceBinding::FragmentStage;
+            warpBinding = bindings(
+                {QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer),
+                 QRhiShaderResourceBinding::sampledTexture(
+                     2, QRhiShaderResourceBinding::FragmentStage, source, linear),
+                 QRhiShaderResourceBinding::sampledTexture(
+                     3, QRhiShaderResourceBinding::FragmentStage, motionVectors, linear)});
+            warpSource = source;
+            warpVectors = motionVectors;
+        }
+        const auto phase = qEnvironmentVariableIsSet("RHINE_WARP_T")
+                               ? QString::fromLocal8Bit(qgetenv("RHINE_WARP_T"))
+                               : QStringLiteral("0.5");
+        const QString kind = phase == "0.25"   ? QStringLiteral("warpEarly")
+                             : phase == "0.75" ? QStringLiteral("warpLate")
+                             : phase == "debug" ? QStringLiteral("warpDebug")
+                                                : QStringLiteral("warp");
+        auto *pass = pipeline(kind, warpBinding, warp.rp);
+        cb->beginPass(warp.rt, Qt::black, {1, 0});
+        cb->setGraphicsPipeline(pass);
+        cb->setShaderResources(warpBinding);
+        cb->setViewport({0, 0, float(size.width()), float(size.height())});
+        cb->draw(3);
+        ++drawCalls;
+        cb->endPass();
+    }
     void composite(QRhiCommandBuffer *cb, QRhiRenderTarget *destination) {
 #ifndef Q_OS_DARWIN
         auto finalDestination = destination;
@@ -1122,7 +1230,12 @@ class Renderer {
 #ifdef Q_OS_DARWIN
         auto &binding = postBindings["final/" + QString::number(quintptr(sceneColor))];
 #else
-        auto &binding = postBindings["final"];
+        // RHINE_WARP_SHOW=1 时最终合成改读重投影结果，用于肉眼判断拉丝。
+        const bool showWarp = qEnvironmentVariableIsSet("RHINE_WARP_SHOW") && warp.texture &&
+                              qEnvironmentVariableIsSet("RHINE_WARP_PROBE");
+        auto &binding = postBindings[showWarp
+                                         ? "final/warp/" + QString::number(quintptr(warp.texture))
+                                         : QStringLiteral("final")];
 #endif
         if (!binding) {
             const auto stages =
@@ -1133,10 +1246,14 @@ class Renderer {
 #ifdef Q_OS_DARWIN
                                                            sceneColor,
 #else
-                                                           color.texture,
+                                                           showWarp ? warp.texture : color.texture,
 #endif
                                                            linear)});
         }
+#ifndef Q_OS_DARWIN
+        // 探针：最终合成前先产出一张重投影中间帧（默认关闭，RHINE_WARP_PROBE=1 才走）。
+        warpFrame(cb, color.texture);
+#endif
         cb->beginPass(destination, Qt::black, {1, 0});
         cb->setGraphicsPipeline(pipeline("finalFragment", binding, destination->renderPassDescriptor()));
         cb->setShaderResources(binding);
@@ -1150,6 +1267,29 @@ class Renderer {
             postProcess->resolve(cb, finalDestination, motionInputs);
         }
 #endif
+    }
+    /** 主渲染已经输出运动矢量，这里只把本帧输入交给 FG 宿主（不再有第二趟几何）。 */
+    void publishMotionInputs(const QJsonObject &frame) {
+        RhineFg::FrameInputs inputs;
+        inputs.depth = depth;
+        inputs.motionVectors = motionVectors;
+        inputs.renderSize = size;
+        inputs.displaySize = viewSize;
+        const auto jitter = frame["jitter"].toArray();
+        inputs.jitter =
+            jitter.size() == 2 ? QPointF(jitter[0].toDouble(), jitter[1].toDouble()) : QPointF();
+        inputs.reset = frame["temporalReset"].toBool();
+        inputs.frameTimeMs = frameClock.isValid() ? float(frameClock.nsecsElapsed()) / 1e6f : 16.6667f;
+        frameClock.start();
+        const auto projection = matrix(frame["projection"].toArray());
+        const float c = projection(2, 2);
+        const float translation = projection(2, 3);
+        if (std::abs(c - 1.f) > 1e-6f && std::abs(c + 1.f) > 1e-6f) {
+            inputs.nearPlane = translation / (c - 1.f);
+            inputs.farPlane = translation / (c + 1.f);
+        }
+        inputs.fovYRadians = 2.f * std::atan(1.f / projection(1, 1));
+        RhineFg::publish(inputs);
     }
     /** 同一份几何生成深度和运动矢量，供时域处理与呈现层使用。 */
     void velocityPass(QRhiCommandBuffer *cb, const QList<Draw> &draws, const QJsonObject &frame) {
@@ -1213,6 +1353,11 @@ class Renderer {
         const double dbgPostMs = double(dbgPre.nsecsElapsed()) / 1e6;
         dbgPre.restart();
         auto g = globals(frame);
+        // 速度用未抖动 VP（光栅位置仍带抖动），口径与 motion.vert 一致。
+        const auto unjitteredVp = matrix(frame["view"].toArray()) * matrix(frame["projection"].toArray());
+        g.currentViewProjection = PackedMatrix(unjitteredVp);
+        g.previousViewProjection =
+            motionHistoryValid ? PackedMatrix(previousViewProjection) : PackedMatrix(unjitteredVp);
         updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
         ++generation;
         activeTextureKeys.clear();
@@ -1341,7 +1486,14 @@ class Renderer {
             dbgFrames = 0;
         }
         cb->endPass();
-        velocityPass(cb, data, frame);
+        // 运动矢量已随主渲染输出（MRT），这里只发布输入并保存上一帧状态。
+        publishMotionInputs(frame);
+        previousViewProjection = unjitteredVp;
+        previousInstanceMatrices.clear();
+        for (const auto &draw : data) {
+            previousInstanceMatrices.insert(draw.data["id"].toInt(), matrixBytes(draw.data));
+        }
+        motionHistoryValid = true;
         composite(cb, finalTarget ? finalTarget : target.rt);
     }
 };

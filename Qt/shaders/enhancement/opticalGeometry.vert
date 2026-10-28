@@ -9,6 +9,10 @@ layout(location = 4) in vec4 model1;
 layout(location = 5) in vec4 model2;
 layout(location = 6) in vec4 model3;
 layout(location = 7) in vec4 state;
+layout(location = 8) in vec4 previousModel0;
+layout(location = 9) in vec4 previousModel1;
+layout(location = 10) in vec4 previousModel2;
+layout(location = 11) in vec4 previousModel3;
 layout(location = 0) out vec2 v_surfaceUv;
 layout(location = 1) out vec2 v_uv;
 layout(location = 2) out vec3 v_lightUv;
@@ -21,11 +25,20 @@ layout(location = 8) out float v_clarity;
 layout(location = 9) out vec3 v_world;
 layout(location = 10) out vec3 v_normal;
 layout(location = 11) out float v_mode;
+// 运动矢量与颜色同一趟输出：省掉整趟几何的第二次栅格化。
+layout(location = 12) out vec2 v_velocity;
 void main() {
     mat4 model = mat4(model0, model1, model2, model3);
     vec4 world = model * vec4(position, 1);
     vec4 eye = g.view * world;
     gl_Position = correction * g.projection * eye;
+    // 速度用未抖动的当前/上一帧 VP，避免把采样抖动误当几何运动（与 motion.vert 同口径）。
+    mat4 previousModel = mat4(previousModel0, previousModel1, previousModel2, previousModel3);
+    vec4 currentClip = correction * currentViewProjection * world;
+    vec4 previousClip = correction * previousViewProjection * previousModel * vec4(position, 1);
+    vec2 ndc = currentClip.xy / currentClip.w;
+    vec2 previousNdc = previousClip.xy / previousClip.w;
+    v_velocity = vec2(previousNdc.x - ndc.x, ndc.y - previousNdc.y) * 0.5;
     float face = getFace(normal);
     vec2 surfaceUv = vec2((position.x + 2.5) / 5.0, position.y / 3.7);
     if (face == 0.0 || face == 3.0) {

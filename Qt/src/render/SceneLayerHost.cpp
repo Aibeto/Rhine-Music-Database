@@ -50,7 +50,13 @@ const QColor kSceneClearColor(0xe7, 0xe7, 0xe1);
 
 } // namespace
 
-SceneLayerHost::SceneLayerHost() = default;
+SceneLayerHost::SceneLayerHost() {
+    if (qEnvironmentVariableIsSet("RHINE_LAYER_SAFETY_FRAMES")) {
+        m_safetyFrames = qEnvironmentVariableIntValue("RHINE_LAYER_SAFETY_FRAMES");
+        m_safetyCountdown = qMax(1, m_safetyFrames);
+    }
+    m_layerProbe = qEnvironmentVariableIsSet("RHINE_LAYER_PROBE");
+}
 
 SceneLayerHost::~SceneLayerHost() {
     teardown();
@@ -112,8 +118,12 @@ bool SceneLayerHost::createLayerWindow(Layer &layer, QRhi *rhi, QVulkanInstance 
     layer.window->setColor(clear);
 
     // 各层分别接收 Qt 的正式更新信号；回调只标脏与安排下一步，不递归渲染。
+    // Qt 的 renderRequested/sceneChanged 在本工程里是**噪音级**频率（实测每帧数十次），
+    // 用它标脏等于退回"每帧重渲"。这里只让它把下一帧排上队，标脏交给两处：
+    //   1) Engine 的真实内容信号 sceneUpdated / hudUpdated（PresentationShell 转发）
+    //   2) renderFrame() 里的周期性兜底（覆盖异步资源加载等无信号的情况）
     const auto invalidate = [this, &layer] {
-        layer.dirty = true;
+        ++m_dirtyQt;
         if (requestRender) {
             requestRender();
         }
@@ -459,13 +469,38 @@ bool SceneLayerHost::renderFrame() {
     if (!m_valid || !resumeGraphics()) {
         return false;
     }
-    // 非 Metal 后端每帧强制置脏。这条**不能去掉**：模型/纹理是异步加载的，
-    // 加载完成后引擎不一定发出带 visualChanged 的 sceneUpdated，一旦按脏标记剔除，
-    // 3D 房间几何就会永远不出现（实测：去掉后背景模型缺失，改回立即恢复）。
-    // 代价是每帧重渲 3D 层（约 6~9ms），这是拿帧率换正确的必要开销。
+    // GPU 探针（RHINE_GPU_PROBE=1）：把"CPU 花在录制"和"等 GPU 归还"分开。
+    // 每 30 帧抽一次：进入前先排空队列量出积压，交出本帧后再排空量出本帧 GPU 成本。
+    // 必须抽样：finish() 会打断流水，每帧都调会改变被测对象。
+    static const bool gpuProbe = qEnvironmentVariableIntValue("RHINE_GPU_PROBE") == 1;
+    static int probeFrame = 0;
+    const bool sampling = gpuProbe && (++probeFrame % 30) == 0;
+    double backlogMs = 0.0;
+    QElapsedTimer probeTimer;
+    if (sampling) {
+        probeTimer.start();
+        m_rhi->finish();
+        backlogMs = double(probeTimer.nsecsElapsed()) / 1e6;
+    }
+    // 非 Metal 后端过去是**每帧强制置脏**：模型/纹理异步加载完成后引擎不一定发出带
+    // visualChanged 的 sceneUpdated，一旦完全按脏标记剔除，3D 房间几何就会永远不出现
+    // （实机验证过：去掉后背景模型缺失，改回立即恢复）。代价是静止画面也每帧重渲两层
+    // （3D 约 6~9ms + UI 约 5~7ms），而主界面这类页面的内容每秒只变二三十次。
+    //
+    // 这里改成「周期性兜底」：每 m_safetyFrames 帧补脏一次，把异步资源的最坏可见延迟
+    // 压到 ~0.3s，其余帧完全交给 Qt 的 renderRequested/sceneChanged 与显式标脏。
+    // 兜底间隔可用 RHINE_LAYER_SAFETY_FRAMES 调（<=0 表示恢复每帧置脏）。
     if (m_rhi->backend() != QRhi::Metal) {
-        m_scene.dirty = true;
-        m_overlay.dirty = true;
+        if (m_safetyFrames <= 0) {
+            // 排障开关：恢复"每帧强制置脏"的旧行为（RHINE_LAYER_SAFETY_FRAMES=0）
+            m_scene.dirty = true;
+            m_overlay.dirty = true;
+        } else if (--m_safetyCountdown <= 0) {
+            m_safetyCountdown = m_safetyFrames;
+            ++m_dirtySafety;
+            m_scene.dirty = true;
+            m_overlay.dirty = true;
+        }
     }
     // 挂起释放后 control 可能为空，与 dirty 一起判断，避免对空控制对象录制。
     if (m_scene.dirty && m_scene.control) {
@@ -486,6 +521,34 @@ bool SceneLayerHost::renderFrame() {
         }
         m_overlayLayerMs = m_overlayLayerMs * 0.8 + layerTimer.nsecsElapsed() / 1e6 * 0.2;
         ++m_overlayRenders;
+    }
+    // 置脏来源探针（RHINE_LAYER_PROBE=1）：判断"每帧重渲"到底是 Qt 信号还是兜底。
+    if (m_layerProbe) {
+        static quint64 lastQt = 0, lastSafety = 0, lastScene = 0, lastOverlay = 0;
+        static quint64 lastSceneDirty = 0, lastOverlayDirty = 0;
+        if (++m_probeFrames % 60 == 0) {
+            qWarning("图层探针: 近60帧 3D重渲 %llu 次 / UI重渲 %llu 次 | 置脏来源 场景 %llu HUD %llu 兜底 %llu qt噪音 %llu",
+                     m_sceneRenders - lastScene, m_overlayRenders - lastOverlay,
+                     m_dirtyScene - lastSceneDirty, m_dirtyOverlay - lastOverlayDirty,
+                     m_dirtySafety - lastSafety, m_dirtyQt - lastQt);
+            lastSceneDirty = m_dirtyScene;
+            lastOverlayDirty = m_dirtyOverlay;
+            lastQt = m_dirtyQt;
+            lastSafety = m_dirtySafety;
+            lastScene = m_sceneRenders;
+            lastOverlay = m_overlayRenders;
+        }
+    }
+    if (sampling) {
+        probeTimer.restart();
+        m_rhi->finish();
+        const double frameGpuMs = double(probeTimer.nsecsElapsed()) / 1e6;
+        qInfo().noquote() << QStringLiteral(
+                                 "GPU探针: 进入前积压 %1 ms | 本帧 GPU %2 ms | 3D层 %3 ms | UI层 %4 ms")
+                                 .arg(backlogMs, 0, 'f', 1)
+                                 .arg(frameGpuMs, 0, 'f', 1)
+                                 .arg(m_sceneLayerMs, 0, 'f', 1)
+                                 .arg(m_overlayLayerMs, 0, 'f', 1);
     }
     return true;
 }
@@ -535,6 +598,28 @@ void SceneLayerHost::resize(QSize size) {
     // 换了渲染目标，两张纹理的内容都是新的（未定义），必须重画一次。
     m_scene.dirty = true;
     m_overlay.dirty = true;
+}
+
+void SceneLayerHost::requestSceneContent() {
+    if (!m_valid) {
+        return;
+    }
+    ++m_dirtyScene;
+    m_scene.dirty = true;
+    if (requestRender) {
+        requestRender();
+    }
+}
+
+void SceneLayerHost::requestOverlayContent() {
+    if (!m_valid) {
+        return;
+    }
+    ++m_dirtyOverlay;
+    m_overlay.dirty = true;
+    if (requestRender) {
+        requestRender();
+    }
 }
 
 QRhiTexture *SceneLayerHost::sceneTexture() const {

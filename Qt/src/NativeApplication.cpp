@@ -67,8 +67,18 @@ bool NativeApplication::initialize(const QJsonObject &resumeState) {
     music.restoreIdentityName();
     return resumed;
 }
+// RHINE_STEP_PROBE=1：拆开 app->step 内部（场景采样 / HUD 绘制 / 观察与返回对象构建）。
+static double nacSampleSum = 0, nacDrawSum = 0, nacRestSum = 0;
+static int nacFrames = 0;
+
 QJsonObject NativeApplication::step(double time, double width, bool reuseScene) {
+    const bool nacProbe = qEnvironmentVariableIntValue("RHINE_STEP_PROBE") == 1;
+    QElapsedTimer nacTimer;
+    if (nacProbe) {
+        nacTimer.start();
+    }
     const auto frame = reuseScene ? music.frame : m_scene->sample(time);
+    const double nacSampleMs = nacProbe ? double(nacTimer.nsecsElapsed()) / 1e6 : 0.0;
     if (frame.isEmpty()) {
         return {};
     }
@@ -78,11 +88,30 @@ QJsonObject NativeApplication::step(double time, double width, bool reuseScene) 
         music.sameAlbum();
     }
     hud.draw(frame, width, time);
-    return {{"commands", hud.commands},
-            {"hits", hud.hits},
-            {"state", hud.state()},
-            {"current", music.current},
-            {"cover", music.coverImage}};
+    const double nacDrawEnd = nacProbe ? double(nacTimer.nsecsElapsed()) / 1e6 : 0.0;
+    // 返回对象的构建会把 hud.commands 等大对象整份拷进新 QJsonObject，单独计时。
+    QJsonObject nacResult{{"commands", hud.commands},
+                          {"hits", hud.hits},
+                          {"state", hud.state()},
+                          {"current", music.current},
+                          {"cover", music.coverImage}};
+    if (nacProbe) {
+        const double nacTotal = double(nacTimer.nsecsElapsed()) / 1e6;
+        nacSampleSum += nacSampleMs;
+        nacDrawSum += nacDrawEnd - nacSampleMs;
+        nacRestSum += nacTotal - nacDrawEnd;
+        if (++nacFrames >= 60) {
+            const double n = nacFrames;
+            qInfo().noquote()
+                << QStringLiteral("app->step 内部: 场景采样 %1 ms | HUD 绘制 %2 ms | 其余(观察+返回拷贝) %3 ms")
+                       .arg(nacSampleSum / n, 0, 'f', 2)
+                       .arg(nacDrawSum / n, 0, 'f', 2)
+                       .arg(nacRestSum / n, 0, 'f', 2);
+            nacSampleSum = nacDrawSum = nacRestSum = 0;
+            nacFrames = 0;
+        }
+    }
+    return nacResult;
 }
 void NativeApplication::poll(double time, bool force) {
     music.player.tick(time, force);

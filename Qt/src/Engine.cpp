@@ -1,3 +1,4 @@
+#include <ctime>
 #include "Engine.h"
 #include "DiscGeometry.h"
 #include "RhiScene.h"
@@ -619,9 +620,27 @@ void Engine::wheel(double x, double y, double delta, bool pixels) {
 /**
  * 按顺序同步场景、音乐和 HUD 帧数据，保持绘制与命中区域一致。
  */
+// RHINE_STEP_PROBE=1：拆开引擎每拍成本，并区分"干活"与"等待"。
+// 墙钟远大于线程 CPU 时间 => 这一拍是在阻塞（锁、GPU、内存回读），不是算得多。
+static double stepWallSum = 0, stepCpuSum = 0, stepAppSum = 0, stepRestSum = 0;
+static int stepProbeFrames = 0;
+
+static double threadCpuMs() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return double(ts.tv_sec) * 1e3 + double(ts.tv_nsec) / 1e6;
+}
+
 void Engine::step(double time) {
     if (!ready()) {
         return;
+    }
+    const bool stepProbe = qEnvironmentVariableIntValue("RHINE_STEP_PROBE") == 1;
+    const double stepT0 = stepProbe ? threadCpuMs() : 0.0;
+    const qint64 stepWall0 = stepProbe ? clock.nsecsElapsed() : 0;
+    QElapsedTimer stepAppTimer;
+    if (stepProbe) {
+        stepAppTimer.start();
     }
     QElapsedTimer frameTimer;
     if (scene.isProfiling()) {
@@ -632,6 +651,7 @@ void Engine::step(double time) {
     ++m_steps;
     const bool reuse = m_sceneSleeping && !scene.changed();
     const auto object = app->step(time, m_width / (m_height / 1080), reuse);
+    const double stepAppMs = stepProbe ? double(stepAppTimer.nsecsElapsed()) / 1e6 : 0.0;
     if (object.isEmpty()) {
         return;
     }
@@ -778,6 +798,26 @@ void Engine::step(double time) {
         scene.timings.engineMs = frameTimer.nsecsElapsed() / 1000000.;
     }
     emit updated();
+    if (stepProbe) {
+        const double wall = double(clock.nsecsElapsed() - stepWall0) / 1e6;
+        const double cpu = threadCpuMs() - stepT0;
+        stepWallSum += wall;
+        stepCpuSum += cpu;
+        stepAppSum += stepAppMs;
+        stepRestSum += wall - stepAppMs;
+        if (++stepProbeFrames >= 60) {
+            const double n = stepProbeFrames;
+            qInfo().noquote()
+                << QStringLiteral("拍成本: 合计 %1 ms = app->step %2 + 其余 %3 | 线程CPU %4 ms | 等待 %5 ms")
+                       .arg(stepWallSum / n, 0, 'f', 2)
+                       .arg(stepAppSum / n, 0, 'f', 2)
+                       .arg(stepRestSum / n, 0, 'f', 2)
+                       .arg(stepCpuSum / n, 0, 'f', 2)
+                       .arg((stepWallSum - stepCpuSum) / n, 0, 'f', 2);
+            stepWallSum = stepCpuSum = stepAppSum = stepRestSum = 0;
+            stepProbeFrames = 0;
+        }
+    }
 }
 void Engine::snapshot(QString path) {
     if (m_frame.isEmpty()) {

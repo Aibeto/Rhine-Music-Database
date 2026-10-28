@@ -206,6 +206,18 @@ bool PresentationShell::initializeLayers() {
         m_error = QStringLiteral("离屏场景建立失败：%1").arg(m_host->lastError());
         return false;
     }
+    // 内容代次：引擎真的产出了新场景/新 HUD 时才让图层重渲。
+    // Qt 自己的 renderRequested/sceneChanged 每帧有数十次噪音，不能用来判脏。
+    connect(m_backend, &Engine::sceneUpdated, this, [this] {
+        if (m_host) {
+            m_host->requestSceneContent();
+        }
+    });
+    connect(m_backend, &Engine::hudUpdated, this, [this] {
+        if (m_host) {
+            m_host->requestOverlayContent();
+        }
+    });
     m_host->resize(m_size);
     // 纹理按物理尺寸分配；Qt Quick 的排版和输入始终保持逻辑像素。
     m_dpr = m_window->devicePixelRatio();
@@ -949,8 +961,16 @@ void PresentationShell::stepFrame() {
     // 静态页的离屏层会持续上报 renderRequested；挂起后只在首次、尺寸变化或显式请求时重绘，
     // 否则会以显示刷新率空转并持续增长图形内存。
     const bool staticIdle = m_suspended && m_staticFramePresented && !m_forcePresent;
+    // 重渲已经由内容代次剔除，但"上屏"仍然每步都做：合成一次缓存纹理很便宜，而把
+    // 上屏也一起砍掉会让 presented 从 46/s 掉到 31/s（实测），用户看到的出帧反而更少。
+    // RHINE_PRESENT_ALWAYS=0 可退回"没有新内容就不上屏"的省电行为。
+    static const bool presentAlways =
+        qEnvironmentVariableIsSet("RHINE_PRESENT_ALWAYS")
+            ? qEnvironmentVariableIntValue("RHINE_PRESENT_ALWAYS") != 0
+            : true;
     if (staticIdle ||
-        (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent && !m_pendingRealFrame)) {
+        (!presentAlways && !m_host->contentDirty() && !engineAdvanced && !m_forcePresent &&
+         !m_pendingRealFrame)) {
         ++m_skippedSteps;
         publishStats(false);
         if (m_backendName == "vulkan") {

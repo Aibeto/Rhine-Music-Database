@@ -100,6 +100,10 @@ class SceneLayerHost {
     }
 
     /** 两层是否收到更新；各层在自己的渲染完成后独立清除标记。 */
+    /// 引擎侧内容真的变了，显式标脏（Qt 的更新信号在本工程里是噪音级频率，判不了脏）。
+    void requestSceneContent();
+    void requestOverlayContent();
+
     bool contentDirty() const {
         return m_scene.dirty || m_overlay.dirty;
     }
@@ -190,6 +194,17 @@ class SceneLayerHost {
     QWindow *m_visibleWindow = nullptr;
     quint64 m_sceneRenders = 0;
     quint64 m_overlayRenders = 0;
+    /// 兜底置脏间隔（帧）：异步资源加载不一定发更新信号，靠它兜住可见性；
+    /// <=0 时恢复旧行为（每帧强制置脏）。默认 20 帧 ≈ 0.3s。
+    int m_safetyFrames = 20;
+    int m_safetyCountdown = 20;
+    /// 置脏来源计数（RHINE_LAYER_PROBE=1 时每 60 帧打印差分）
+    quint64 m_dirtyQt = 0;
+    quint64 m_dirtyScene = 0;
+    quint64 m_dirtyOverlay = 0;
+    quint64 m_dirtySafety = 0;
+    quint64 m_probeFrames = 0;
+    bool m_layerProbe = false;
     double m_sceneLayerMs = 0.0;
     double m_overlayLayerMs = 0.0;
     bool m_valid = false;

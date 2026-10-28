@@ -1,6 +1,7 @@
 #include "Hud.h"
 #include "Engine.h"
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QPainter>
 #include <QQuickWindow>
 Hud::Hud(QQuickItem *parent) : QQuickPaintedItem(parent) {
@@ -36,9 +37,25 @@ void Hud::paint(QPainter *painter) {
                                  << (window() ? window()->devicePixelRatio() : 0.0);
         }
     }
+    // 绘制成本探针（RHINE_HUD_PROBE=1）：HUD 是 QPainter 程序化绘制，
+    // 这个数字决定「按中间相位再画一遍」这种插值方案的实际价码。
+    static const bool hudTiming = qEnvironmentVariableIntValue("RHINE_HUD_PROBE") == 1;
+    static double paintMs = 0.0;
+    static int paintFrames = 0;
+    QElapsedTimer paintClock;
+    if (hudTiming) {
+        paintClock.start();
+    }
     painter->save();
     painter->scale(height() / 1080, height() / 1080);
     m_engine->glyphs()->commands(*painter, m_engine->commands(),
                                  [this](QString key) { return m_engine->host.image(key); });
     painter->restore();
+    if (hudTiming) {
+        paintMs = paintMs * 0.8 + double(paintClock.nsecsElapsed()) / 1e6 * 0.2;
+        if (++paintFrames % 30 == 0) {
+            qWarning("HUD 绘制: %d 条命令 绘制 %.2f ms (item %.0fx%.0f)",
+                     int(m_engine->commands().size()), paintMs, width(), height());
+        }
+    }
 }
