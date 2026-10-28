@@ -6,13 +6,16 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QJsonDocument>
+#ifndef Q_OS_IOS
 #include <QProcess>
+#endif
 #include <QThread>
 #include <QTimer>
 #include <memory>
 #include <utility>
 
-/** 连接同一用户的唯一服务；独立启动的服务不随界面析构或标准输入关闭而退出。 */
+#ifndef Q_OS_IOS
+/** 桌面端连接同一用户的唯一服务；iOS 不允许拉起独立音频服务进程。 */
 bool connectPlaybackService(PlaybackConnection &connection, const QString &root, QString &error) {
     const auto endpoint = PlaybackConnection::endpoint();
     if (!connection.connectToService(endpoint, 100)) {
@@ -41,6 +44,7 @@ bool connectPlaybackService(PlaybackConnection &connection, const QString &root,
     }
     return true;
 }
+#endif
 
 PlaybackConnection::PlaybackConnection(QObject *parent) : QObject(parent) {
     connect(&m_socket, &QLocalSocket::readyRead, this, &PlaybackConnection::readMessages);

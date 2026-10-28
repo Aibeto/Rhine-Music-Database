@@ -39,8 +39,10 @@ class PlaybackConnection : public QObject {
     quint64 m_serial = 0;
 };
 
+#ifndef Q_OS_IOS
 /**
  * 连接同一用户的唯一服务；没有运行时按需拉起后台 helper，
  * 并校验协议版本，避免新版界面连到旧版服务。
  */
 bool connectPlaybackService(PlaybackConnection &connection, const QString &root, QString &error);
+#endif
