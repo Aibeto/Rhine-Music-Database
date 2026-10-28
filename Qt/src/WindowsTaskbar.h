@@ -3,6 +3,7 @@
 #include <QObject>
 #include <QImage>
 #include <QPointer>
+#include <QSet>
 #include <array>
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -18,13 +19,19 @@ class QWindow;
 // Windows 任务栏控制
 class WindowsTaskbar : public QObject, public QAbstractNativeEventFilter {
   public:
-    WindowsTaskbar(Engine *engine, QWindow *window);
+    explicit WindowsTaskbar(Engine *engine, QWindow *window = nullptr);
     ~WindowsTaskbar() override;
+    void bindWindow(QWindow *window);
     bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) override;
 
+  protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
   private:
-    friend bool runWindowsTaskbarChecks(Engine &engine, QQuickWindow *window);
+    friend bool runWindowsTaskbarChecks(Engine &engine);
     void updateButtons();
+    void resetToolbar();
+    void initializeToolbar();
     void configurePreview();
     void updatePreview();
     QImage previewImage(QSize bounds) const;
@@ -34,6 +41,7 @@ class WindowsTaskbar : public QObject, public QAbstractNativeEventFilter {
     HWND m_handle = nullptr;
     ITaskbarList3 *m_taskbar = nullptr;
     UINT m_createdMessage = 0;
+    QSet<quintptr> m_readyWindows;
     bool m_comInitialized = false;
     bool m_buttonsAdded = false;
     int m_lastState = -1;

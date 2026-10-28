@@ -62,6 +62,7 @@ bool runWindowTransitionChecks();
 #endif
 #ifdef Q_OS_WIN
 #include "WindowsTaskbar.h"
+bool runWindowsTaskbarChecks(Engine &engine);
 void initializeWindowsGraphics();
 #endif
 #if !defined(Q_OS_DARWIN)
@@ -322,7 +323,8 @@ int main(int argc, char **argv) {
     }
     // Windows GUI 子系统默认可能将 Qt 日志送到调试器；测试必须写入 CTest 的标准错误管道。
     for (int i = 1; i < argc; ++i) {
-        if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--playback-gui-test") == 0) {
+        if (std::strcmp(argv[i], "--self-test") == 0 || std::strcmp(argv[i], "--playback-gui-test") == 0 ||
+            std::strcmp(argv[i], "--taskbar-self-test") == 0) {
             qInstallMessageHandler(
                 [](QtMsgType type, const QMessageLogContext &context, const QString &message) {
                     const auto text = qFormatLogMessage(type, context, message).toUtf8();
@@ -413,6 +415,12 @@ int main(int argc, char **argv) {
     const bool test = args.contains("--self-test");
     const bool offline =
         test || args.contains("--offline") || qEnvironmentVariableIntValue("RHINE_OFFLINE") == 1;
+#ifdef Q_OS_WIN
+    if (args.contains("--taskbar-self-test")) {
+        Engine direct(root, true);
+        return runWindowsTaskbarChecks(direct) ? 0 : 1;
+    }
+#endif
     if (test) {
 #ifndef Q_OS_IOS
 #ifdef Q_OS_MACOS
@@ -512,6 +520,10 @@ int main(int argc, char **argv) {
     const bool fgCandidate = !test && !args.contains("--capture") && !fgLayerDisabled &&
                              hasNativeWindowSystem &&
                              PresentationShell::supportsBackend(RhineGraphics::activeBackend());
+#ifdef Q_OS_WIN
+    // 呈现层启动会显示窗口并处理原生消息，必须提前接收 Explorer 的任务栏就绪通知。
+    WindowsTaskbar taskbar(backend.get());
+#endif
     // 排障：接管与否只看这一行。之前出现过"设了 RHINE_FG_LAYER=on 才接管"的怪现象，
     // 把每个输入的实测值打出来，比逐条读代码猜快得多。
     qWarning().noquote() << "FG gate: candidate" << fgCandidate << "layerDisabled" << fgLayerDisabled
@@ -579,7 +591,7 @@ int main(int argc, char **argv) {
 #endif
             // FG 使用独立的 QWindow，也必须保留任务栏控制和关闭后驻留托盘的行为。
 #ifdef Q_OS_WIN
-            WindowsTaskbar taskbar(backend.get(), shell->window());
+            taskbar.bindWindow(shell->window());
 #endif
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
             std::unique_ptr<DesktopTray> tray;
@@ -606,7 +618,7 @@ int main(int argc, char **argv) {
     }
     graphics.setPipelineCacheSaveFile(pipelineCache);
     window->setGraphicsConfiguration(graphics);
-    WindowsTaskbar taskbar(backend.get(), window);
+    taskbar.bindWindow(window);
     window->show();
 #endif
     backend->setWindow(window);

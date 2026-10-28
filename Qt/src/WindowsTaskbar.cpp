@@ -3,10 +3,12 @@
 #include "MusicData.h"
 #include <QCoreApplication>
 #include <QDebug>
+#include <QEvent>
 #include <QGuiApplication>
 #include <QIcon>
 #include <QPainter>
 #include <QPainterPath>
+#include <QPlatformSurfaceEvent>
 #include <QWindow>
 #include <QTimer>
 #include <cstring>
@@ -97,8 +99,7 @@ HICON createButtonIcon(int kind) {
 }
 }
 
-WindowsTaskbar::WindowsTaskbar(Engine *engine, QWindow *window)
-    : QObject(window), m_engine(engine), m_window(window) {
+WindowsTaskbar::WindowsTaskbar(Engine *engine, QWindow *window) : m_engine(engine) {
     const auto initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     m_comInitialized = SUCCEEDED(initialized);
     if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) {
@@ -113,12 +114,87 @@ WindowsTaskbar::WindowsTaskbar(Engine *engine, QWindow *window)
         m_icons[i] = createButtonIcon(i);
     }
     QCoreApplication::instance()->installNativeEventFilter(this);
-    m_handle = reinterpret_cast<HWND>(window->winId());
-    configurePreview();
     connect(&engine->app->music.player, &MusicPlayer::changed, this, &WindowsTaskbar::updateButtons);
     connect(&engine->app->music.player, &MusicPlayer::changed, this, &WindowsTaskbar::updatePreview);
     connect(&engine->app->music, &MusicLibrary::invalidated, this, &WindowsTaskbar::updateButtons);
+    bindWindow(window);
+}
+
+/** 提前监听系统就绪消息，窗口创建后再绑定；晚绑定仍可注册已经就绪的任务栏按钮。 */
+void WindowsTaskbar::bindWindow(QWindow *window) {
+    const auto handle = window ? reinterpret_cast<HWND>(window->winId()) : nullptr;
+    if (m_window == window && m_handle == handle) {
+        return;
+    }
+    if (m_window) {
+        m_window->removeEventFilter(this);
+    }
+    resetToolbar();
+    m_window = window;
+    m_handle = handle;
+    if (!m_handle) {
+        return;
+    }
+    m_window->installEventFilter(this);
+    configurePreview();
     updatePreview();
+    initializeToolbar();
+}
+
+void WindowsTaskbar::resetToolbar() {
+    if (m_taskbar) {
+        m_taskbar->Release();
+        m_taskbar = nullptr;
+    }
+    m_buttonsAdded = false;
+    m_lastState = -1;
+}
+
+/** 只在 Explorer 已确认当前 HWND 就绪后注册；重复显示沿用已有按钮。 */
+void WindowsTaskbar::initializeToolbar() {
+    if (!m_handle || !m_readyWindows.contains(quintptr(m_handle))) {
+        return;
+    }
+    if (!m_taskbar) {
+        auto result =
+            CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&m_taskbar));
+        if (SUCCEEDED(result)) {
+            result = m_taskbar->HrInit();
+        }
+        if (FAILED(result)) {
+            qWarning() << "Taskbar toolbar initialization failed:" << result;
+            resetToolbar();
+            return;
+        }
+    }
+    updateButtons();
+}
+
+bool WindowsTaskbar::eventFilter(QObject *watched, QEvent *event) {
+    if (watched == m_window) {
+        if (event->type() == QEvent::PlatformSurface) {
+            auto *surface = static_cast<QPlatformSurfaceEvent *>(event);
+            if (surface->surfaceEventType() == QPlatformSurfaceEvent::SurfaceAboutToBeDestroyed) {
+                m_readyWindows.remove(quintptr(m_handle));
+                resetToolbar();
+                m_handle = nullptr;
+            } else {
+                bindWindow(m_window);
+            }
+        } else if (event->type() == QEvent::WinIdChange) {
+            if (m_window->handle()) {
+                bindWindow(m_window);
+            } else {
+                // 句柄销毁时不能调用 winId()，否则会在析构过程中重新创建原生窗口。
+                m_readyWindows.remove(quintptr(m_handle));
+                resetToolbar();
+                m_handle = nullptr;
+            }
+        } else if (event->type() == QEvent::Show) {
+            QTimer::singleShot(0, this, &WindowsTaskbar::initializeToolbar);
+        }
+    }
+    return QObject::eventFilter(watched, event);
 }
 
 // 任务栏预览配置
@@ -175,9 +251,10 @@ bool WindowsTaskbar::sendPreview(QSize bounds, bool live) {
 // 移除消息入口，释放图标与 COM 引用
 WindowsTaskbar::~WindowsTaskbar() {
     QCoreApplication::instance()->removeNativeEventFilter(this);
-    if (m_taskbar) {
-        m_taskbar->Release();
+    if (m_window) {
+        m_window->removeEventFilter(this);
     }
+    resetToolbar();
     for (const auto icon : m_icons) {
         if (icon) {
             DestroyIcon(icon);
@@ -235,6 +312,22 @@ void WindowsTaskbar::updateButtons() {
 
 bool WindowsTaskbar::nativeEventFilter(const QByteArray &, void *message, qintptr *result) {
     const auto event = static_cast<MSG *>(message);
+    if (m_createdMessage && event->message == m_createdMessage) {
+        m_readyWindows.insert(quintptr(event->hwnd));
+        if (event->hwnd == m_handle) {
+            resetToolbar();
+            configurePreview();
+            initializeToolbar();
+        }
+        return false;
+    }
+    if (event->message == WM_NCDESTROY) {
+        m_readyWindows.remove(quintptr(event->hwnd));
+        if (event->hwnd == m_handle) {
+            resetToolbar();
+            m_handle = nullptr;
+        }
+    }
     if (!m_window || event->hwnd != m_handle) {
         return false;
     }
@@ -250,19 +343,7 @@ bool WindowsTaskbar::nativeEventFilter(const QByteArray &, void *message, qintpt
     if (event->message == WM_DWMCOMPOSITIONCHANGED) {
         configurePreview();
     }
-    if (event->message == m_createdMessage) {
-        configurePreview();
-        if (m_taskbar) {
-            m_taskbar->Release();
-            m_taskbar = nullptr;
-        }
-        m_buttonsAdded = false;
-        if (SUCCEEDED(CoCreateInstance(CLSID_TaskbarList, nullptr, CLSCTX_INPROC_SERVER,
-                                       IID_PPV_ARGS(&m_taskbar))) &&
-            SUCCEEDED(m_taskbar->HrInit())) {
-            updateButtons();
-        }
-    } else if (event->message == WM_COMMAND && HIWORD(event->wParam) == THBN_CLICKED) {
+    if (event->message == WM_COMMAND && HIWORD(event->wParam) == THBN_CLICKED) {
         const auto id = LOWORD(event->wParam);
         if (id < FIRST_BUTTON_ID || id >= FIRST_BUTTON_ID + 4 || !m_buttonsAdded) {
             return false;
