@@ -458,7 +458,7 @@ function linuxQtTool(qt, name) {
  * 复制插件、QML 模块与 ELF 依赖闭包
  * 依赖按 ldd 结果递归收集，只跳过系统图形栈与 glibc，避免与用户驱动冲突。
  */
-function deployLinuxRuntime(qt, app, binary) {
+function deployLinuxRuntime(qt, app, binary, ffmpegLibraries = new Map()) {
     const libraries = path.join(app, 'usr/lib');
     const plugins = path.join(app, 'usr/plugins');
     fs.mkdirSync(libraries, {
@@ -572,7 +572,20 @@ function deployLinuxRuntime(qt, app, binary) {
                 continue;
             }
             name = path.basename(name);
-            if (deployed.has(name) || isExcludedLinuxLibrary(name) || !fs.existsSync(location)) {
+            if (deployed.has(name) || isExcludedLinuxLibrary(name)) {
+                continue;
+            }
+            // 自编的 FFmpeg 不链接发行版的编码器库：用我们的文件替换，
+            // 也不再递归它在系统里的依赖，x265/aom/SvtAv1Enc 等就不会进包。
+            const replacement = ffmpegLibraries.get(name);
+            if (replacement) {
+                deployed.add(name);
+                const target = path.join(libraries, name);
+                fs.copyFileSync(replacement, target);
+                fs.chmodSync(target, 0o755);
+                continue;
+            }
+            if (!fs.existsSync(location)) {
                 continue;
             }
             deployed.add(name);
@@ -844,6 +857,50 @@ const linuxPrunedDirectories = [
 ];
 const linuxPrunedSuffixes = ['.a', '.la', '.prl'];
 
+/**
+ * 准备随包的自编 FFmpeg
+ * 返回 SONAME 到本机路径的替换表；表为空表示继续沿用发行版库。
+ */
+function prepareLinuxFFmpeg(qt) {
+    if (process.env.RHINE_FFMPEG === 'system') {
+        return new Map();
+    }
+    run(process.execPath, ['scripts/prepare-linux-ffmpeg.cjs']);
+    const libraries = new Map();
+    const directory = path.join('output/dependencies/ffmpeg-linux/install/lib');
+    for (const file of fs.readdirSync(directory)) {
+        if (/\.so(?:\.\d+)*$/.test(file)) {
+            libraries.set(file, path.join(directory, file));
+        }
+    }
+    // Qt 的 FFmpeg 后端只认构建时链接的 SONAME。对不上时宁可包大，也不能没声音。
+    const plugin = path.join(
+        linuxQtQuery(qt, 'QT_INSTALL_PLUGINS'),
+        'multimedia/libffmpegmediaplugin.so',
+    );
+    const required = [];
+    if (fs.existsSync(plugin)) {
+        const dynamic = spawnSync('readelf', ['-d', plugin], {
+            encoding: 'utf8',
+        });
+        for (const line of (dynamic.stdout || '').split('\n')) {
+            const match = /\[(lib(?:av\w+|sw\w+)\.so\.\d+)\]/.exec(line);
+            if (match) {
+                required.push(match[1]);
+            }
+        }
+    }
+    for (const name of required) {
+        if (!libraries.has(name)) {
+            console.warn(
+                `Self-built FFmpeg does not provide ${name}; keep the distribution libraries`,
+            );
+            return new Map();
+        }
+    }
+    return libraries;
+}
+
 /** 删除 AppDir 里的开发期文件，压缩前再清一次，避免部署顺序影响结果。 */
 function pruneLinuxAppDir(app) {
     for (const relative of linuxPrunedDirectories) {
@@ -916,6 +973,8 @@ function deployApp(qt, config, existingBundle = '') {
         fs.renameSync(app, app + '.previous-' + Date.now());
     }
     const resources = path.join(app, resourceDirectory);
+    // Linux 先备好自编的 FFmpeg，再进入依赖闭包，避免把发行版的编码器库收进来。
+    const ffmpegLibraries = linux ? prepareLinuxFFmpeg(qt) : new Map();
     if (mac && !existingBundle) {
         fs.cpSync('output/qt-build/RhineMusicDatabase.app', app, {
             recursive: true,
@@ -1022,7 +1081,12 @@ function deployApp(qt, config, existingBundle = '') {
     }
     if (linux) {
         prepareLinuxAppDir(app);
-        deployLinuxRuntime(qt, app, path.join(app, 'usr/bin/RhineMusicDatabase'));
+        deployLinuxRuntime(
+            qt,
+            app,
+            path.join(app, 'usr/bin/RhineMusicDatabase'),
+            ffmpegLibraries,
+        );
     }
     // 先部署 Qt，再装入大量 SDK 文件，避免部署工具逐个扫描非原生依赖。
     run(process.execPath, ['scripts/package-resources.cjs', resources]);
@@ -1036,6 +1100,17 @@ function deployApp(qt, config, existingBundle = '') {
     fs.copyFileSync(path.join('vendor/taglib/source.json'), path.join(thirdParty, 'taglib/source.json'));
     fs.copyFileSync(path.join('vendor/utfcpp/LICENSE'), path.join(thirdParty, 'utfcpp/LICENSE'));
     fs.copyFileSync(path.join('vendor/utfcpp/source.json'), path.join(thirdParty, 'utfcpp/source.json'));
+    // 随包的 FFmpeg 以 LGPL-2.1-or-later 构建，许可全文、来源与构建参数一起进包。
+    if (ffmpegLibraries.size) {
+        const ffmpeg = path.join(thirdParty, 'FFmpeg');
+        fs.mkdirSync(ffmpeg, { recursive: true });
+        fs.cpSync('licenses/FFmpeg', ffmpeg, { recursive: true });
+        fs.copyFileSync('vendor/ffmpeg/source.json', path.join(ffmpeg, 'source.json'));
+        fs.copyFileSync(
+            path.join('output/dependencies/ffmpeg-linux/install/build.json'),
+            path.join(ffmpeg, 'build.json'),
+        );
+    }
     fs.copyFileSync('vendor/qrcodegen/qrcodegen.hpp', path.join(resources, 'qrcodegen-LICENSE.hpp'));
     fs.cpSync('licenses/Qt', path.join(resources, 'Qt-Licenses'), {
         recursive: true,

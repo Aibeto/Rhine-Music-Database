@@ -239,6 +239,8 @@ RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineM
 
 随包的 Node 必须是官方独立分发包：构建脚本会检查 `ldd` 结果，只依赖 glibc 运行库的构建才会被打进 AppImage，发行版自己的 `/usr/bin/node` 动态链接了系统 ICU 等库，会被拒绝。
 
+Linux 包随附自编的 FFmpeg：发行版 `libavcodec` 动态依赖 x265/aom/SvtAv1Enc 等编码器库（合计约 55 MB），而这里只用 Qt 的 FFmpeg 后端解码音频。`scripts/prepare-linux-ffmpeg.cjs` 构建一份只保留音频能力的版本：编码器、复用器、avdevice、avfilter 全部关闭，解码器按 `vendor/ffmpeg/decoders-linux.json` 的音频白名单启用（视频解码器如 HEVC、H.264、VP9、AV1 不编译），parser 与 bitstream filter 也只留音频相关的部分，解复用器保持全开（源码优先取 `third_party/ffmpeg` 子模块，锁定标签 `n9.0.1` 且保持上游原样；子模块缺失或提交与 `vendor/ffmpeg/source.json` 的 `pinned-commit` 不一致时，回退到锁定校验和的发布包）（LGPL-2.1-or-later，不启用任何 GPL 或非自由组件），构建时自动替换进包。发现漏掉的音频格式时，用 `RHINE_FFMPEG_EXTRA_DECODERS=aac_latm,xxx` 临时追加解码器，确认后再补进白名单文件。设置 `RHINE_FFMPEG=system` 可回退发行版库；Qt 后端要求的 SONAME 与自编版本不一致时也会自动回退并告警。许可与来源见 `NOTICE` 及包内 `third-party/FFmpeg/`。
+
 打包前会删掉 AppDir 里的开发期文件（`usr/include`、`usr/lib/cmake`、`usr/lib/pkgconfig`、man/doc 与 `*.a`、`*.la`、`*.prl`），这些是发行版 Qt 的安装规则带进来的，运行时用不到。
 
 #### DwarFS 镜像
