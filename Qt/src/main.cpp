@@ -76,13 +76,23 @@ static bool vulkanDeviceAvailable() {
     QVulkanInstance probe;
     probe.setApiVersion(QVersionNumber(1, 0));
     if (!probe.create()) {
+        qWarning() << "Vulkan: 无法创建探测实例（loader 缺失或驱动不可用）";
         return false;
     }
     // QVulkanInstance 不公开设备列表，直接按 Vulkan API 枚举，避免依赖 QVulkanWindow。
     quint32 devices = 0;
-    return probe.functions()->vkEnumeratePhysicalDevices(probe.vkInstance(), &devices, nullptr) ==
-               VK_SUCCESS &&
-           devices > 0;
+    const auto result =
+        probe.functions()->vkEnumeratePhysicalDevices(probe.vkInstance(), &devices, nullptr);
+    if (result != VK_SUCCESS) {
+        // 只报"Vulkan 不可用"会把排障推回用户：这里必须区分驱动/loader 报错与根本没有设备。
+        qWarning() << "Vulkan: vkEnumeratePhysicalDevices 失败，VkResult" << int(result);
+        return false;
+    }
+    if (devices == 0) {
+        qWarning() << "Vulkan: 物理设备数为 0（缺 /dev/dri、ICD 未安装或驱动被禁用）";
+        return false;
+    }
+    return true;
 #else
     return false;
 #endif
@@ -461,13 +471,29 @@ int main(int argc, char **argv) {
             qCritical("GUI 回归只允许连接隔离的离线服务");
             return 1;
         }
-        const auto attached = playback->call("attach", {{"pid", double(application.applicationPid())}});
+        // 带上本次已经解析出的后端：后台服务据此判断在跑的界面进程是否还符合当前配置。
+        const auto attached =
+            playback->call("attach", {{"pid", double(application.applicationPid())},
+                                      {"backend", RhineGraphics::activeBackend()}});
         if (attached["existing"].toBool()) {
+            // 这两条分支都只让本进程退出；不打日志的话，"点了没有窗口"与启动失败无法区分。
+            if (attached["restarted"].toBool()) {
+                qInfo().noquote() << "图形后端已变更，后台服务正在按新配置重建界面进程。";
+            } else {
+                qInfo().noquote() << "已有界面进程在运行，本次启动只激活该窗口（后端"
+                                  << RhineGraphics::activeBackend() << "）。";
+            }
             return 0;
         }
         // 界面进程明确退出（非崩溃）即停止播放并结束后台服务；崩溃时 aboutToQuit 不会执行。
         QObject::connect(&application, &QCoreApplication::aboutToQuit, playback.get(),
                          [raw = playback.get()] { raw->call("quit"); });
+        // 图形后端切换后由服务要求重建界面。挂在 application 上而不是某个窗口对象上：
+        // 呈现层路径和直接 QML 路径都要能退出，只挂 PlaybackSessionWindow 会漏掉后者。
+        // 这里的退出会触发上面的 quit 通知，由服务侧在重建窗口期内忽略。
+        QObject::connect(
+            playback.get(), &PlaybackConnection::restartRequested, &application,
+            [] { QCoreApplication::quit(); }, Qt::QueuedConnection);
         engineHolder =
             std::make_unique<EngineHolder>(root, offline, engine.rootContext(), playback.get(), profilePath);
         engineHolder->start();

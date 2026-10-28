@@ -120,6 +120,11 @@ PlaybackSessionWindow::PlaybackSessionWindow(PlaybackConnection *connection, QWi
     connect(
         m_connection, &PlaybackConnection::quitRequested, this, [] { QCoreApplication::quit(); },
         Qt::QueuedConnection);
+    // 切换图形后端后由后台服务重建界面：这里只标记"显式退出"，免得被关窗到托盘的逻辑拦下；
+    // 真正的退出由 main() 统一处理，保证呈现层路径与直接 QML 路径行为一致。
+    connect(
+        m_connection, &PlaybackConnection::restartRequested, this,
+        [this] { m_explicitExit = true; }, Qt::QueuedConnection);
 
     // 引擎重建时立即把新的业务对象交给呈现层，避免静态页切换与引擎生命周期交叉。
     connect(m_holder, &EngineHolder::started, this, [this](Engine *engine) { m_shell->setBackend(engine); });

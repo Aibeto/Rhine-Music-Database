@@ -28,6 +28,9 @@ class PlaybackConnection : public QObject {
     void suspendRequested();
     void restoreRequested();
     void closeWindowRequested();
+    /// 后台服务要求按新配置重建界面（图形后端切换）：
+    /// 收到后界面进程应自行退出，但**不能**通知服务一起退出——服务要靠自己重新拉起新界面。
+    void restartRequested();
     void disconnected();
     void diagnosticEvent(QString event, QJsonObject values);
 
