@@ -2,9 +2,7 @@
 #include "Hud.h"
 #include "Engine.h"
 #include <QDebug>
-#ifdef Q_OS_LINUX
 #include <QElapsedTimer>
-#endif
 #include <QPainter>
 #include <QQuickWindow>
 Hud::Hud(QQuickItem *parent) : QQuickPaintedItem(parent) {
@@ -40,7 +38,6 @@ void Hud::paint(QPainter *painter) {
                                  << (window() ? window()->devicePixelRatio() : 0.0);
         }
     }
-#ifdef Q_OS_LINUX
     // 绘制成本探针（RHINE_HUD_PROBE=1）：HUD 是 QPainter 程序化绘制，
     // 这个数字决定「按中间相位再画一遍」这种插值方案的实际价码。
     static const bool hudTiming = qEnvironmentVariableIntValue("RHINE_HUD_PROBE") == 1;
@@ -50,6 +47,7 @@ void Hud::paint(QPainter *painter) {
     if (hudTiming) {
         paintClock.start();
     }
+#ifdef Q_OS_LINUX
     // 上限实验（RHINE_HUD_SKIP_PAINT=1）：完全跳过 HUD 绘制，量"文字栅格化免费"时的
     // 帧率天花板。画面会缺 HUD，只用于测定收益上限，不作正常配置。
     static const bool skipPaint = qEnvironmentVariableIntValue("RHINE_HUD_SKIP_PAINT") == 1;
@@ -66,7 +64,6 @@ void Hud::paint(QPainter *painter) {
                                  [this](QString key) { return m_engine->host.image(key); });
 #endif
     painter->restore();
-#ifdef Q_OS_LINUX
     if (hudTiming) {
         paintMs = paintMs * 0.8 + double(paintClock.nsecsElapsed()) / 1e6 * 0.2;
         if (++paintFrames % 30 == 0) {
@@ -74,5 +71,4 @@ void Hud::paint(QPainter *painter) {
                      int(m_engine->commands().size()), paintMs, width(), height());
         }
     }
-#endif
 }

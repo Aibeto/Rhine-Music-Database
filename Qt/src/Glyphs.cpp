@@ -10,11 +10,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLinearGradient>
-#ifdef Q_OS_LINUX
 #include <QElapsedTimer>
 #include <QStringList>
 #include <algorithm>
-#endif
 #include <QRadialGradient>
 #include <QRegularExpression>
 #include <cmath>
@@ -434,22 +432,18 @@ void Glyphs::art(QPainter &c, QString key, double x, double y, double size, int 
 void Glyphs::commands(QPainter &c, const QJsonArray &commands, std::function<QImage(QString)> image) {
     QMutexLocker lock(&mutex);
     c.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
-#ifdef Q_OS_LINUX
     // 分段探针（RHINE_HUD_PROBE=1）：按操作类型累计 QPainter 耗时，判断该缓存哪一类。
     static const bool opTiming = qEnvironmentVariableIntValue("RHINE_HUD_PROBE") == 1;
     static QHash<QString, double> opMs;
     static int opFrames = 0;
     QElapsedTimer opClock;
-#endif
     for (auto v : commands) {
         const auto a = v.toArray();
         auto op = a[0].toString();
         auto n = [&](int i) { return a[i].toDouble(); };
-#ifdef Q_OS_LINUX
         if (opTiming) {
             opClock.start();
         }
-#endif
         if (op == "save") {
             c.save();
         } else if (op == "restore") {
@@ -528,7 +522,6 @@ void Glyphs::commands(QPainter &c, const QJsonArray &commands, std::function<QIm
                 c.drawImage(QRectF(n(2), n(3), n(4), n(5)), img);
             }
         }
-#ifdef Q_OS_LINUX
         if (opTiming) {
             opMs[op] += double(opClock.nsecsElapsed()) / 1e6;
         }
@@ -552,7 +545,6 @@ void Glyphs::commands(QPainter &c, const QJsonArray &commands, std::function<QIm
         }
         qWarning().noquote() << "HUD 分项: 每帧共" << QString::number(total / 30.0, 'f', 2) << "ms |" << parts.join(" ");
         opMs.clear();
-#endif
     }
 }
 QImage Glyphs::label(const QJsonObject &value) {

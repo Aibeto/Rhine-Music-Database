@@ -1170,7 +1170,6 @@ class Renderer {
         return result;
     }
     void geometry(QRhiCommandBuffer *cb, const QList<Draw> &draws) {
-#ifdef Q_OS_LINUX
         // 先把每个 draw 的 pipeline 算出来（纯函数、无副作用），再按状态分组。
         struct Item {
             const Draw *draw;
@@ -1179,7 +1178,6 @@ class Renderer {
         };
         QList<Item> items;
         items.reserve(draws.size());
-#endif
         for (const auto &draw : draws) {
             const auto &data = draw.data;
             if (data["shadowOnly"].toBool()) {
@@ -1188,7 +1186,6 @@ class Renderer {
             const bool hashed = surface(data).flags.x() == 2;
             const bool blend = hashed || data["transparent"].toBool();
             const bool depthWrite = hashed || !blend || data["depthWrite"].toBool();
-#ifdef Q_OS_LINUX
             auto *pass = pipeline("surface", draw.bindings, color.rp, false,
                                   data["side"].toInt() == 2, depthWrite, blend);
             items.append({&draw, pass, data["transparent"].toBool()});
@@ -1232,12 +1229,6 @@ class Renderer {
                 boundBindings = draw.bindings;
             }
             // 实例数据来自 arena 时用 offset 寻址；否则回落到 draw 自带的 buffer。
-#else
-            cb->setGraphicsPipeline(pipeline("surface", draw.bindings, color.rp, false,
-                                             data["side"].toInt() == 2, depthWrite, blend));
-            cb->setShaderResources(draw.bindings);
-            cb->setViewport({0, 0, float(size.width()), float(size.height())});
-#endif
             const QRhiCommandBuffer::VertexInput inputs[] = {{draw.vertices, 0}, {draw.instances, 0}};
             cb->setVertexInput(0, 2, inputs, draw.indices, 0, QRhiCommandBuffer::IndexUInt32);
             if (draw.indices) {
@@ -1247,7 +1238,6 @@ class Renderer {
             }
             ++drawCalls;
         }
-#ifdef Q_OS_LINUX
         // 排障：状态重绑次数（RHINE_DRAW_PROBE=1，每 120 帧一次）。
         static const bool drawProbe = qEnvironmentVariableIntValue("RHINE_DRAW_PROBE") == 1;
         static int probeCounter = 0;
@@ -1257,6 +1247,7 @@ class Renderer {
                               << "| 实例buffer" << instances.size() << "| 批次buffer" << batchInstances.size();
         }
     }
+#ifdef Q_OS_LINUX
     /** 重投影中间帧探针：用主渲染 MRT 产出的运动矢量把当前场景颜色前推到 t 相位，
      *  零额外几何、相位可任意取，用来评估自研 4 倍插帧的成本与画面质量。 */
     /** 重投影中间帧：用主渲染 MRT 产出的运动矢量把当前场景颜色回看到 t 相位，
@@ -1307,8 +1298,8 @@ class Renderer {
         cb->draw(3);
         ++drawCalls;
         cb->endPass();
-#endif
     }
+#endif
     void composite(QRhiCommandBuffer *cb, QRhiRenderTarget *destination) {
 #ifndef Q_OS_DARWIN
         auto finalDestination = destination;
