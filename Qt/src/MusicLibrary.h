@@ -12,6 +12,12 @@ struct MusicDirectory {
     std::shared_ptr<MusicDirectory> parent;
     QJsonObject item;
     QJsonArray songs;
+    QString sortField = "none";
+    QJsonArray orderedSongs() const;
+    void updateSongs(QJsonArray values, QString field);
+    mutable QJsonArray cachedSongs;
+    mutable QJsonArray sortedSongs;
+    mutable QString cachedSortField;
     QJsonArray ids;
     QJsonArray albums;
     int cursor = 0;
@@ -107,6 +113,7 @@ class MusicLibrary : public QObject {
     void selectDirectory(int index, QString mode = "archive", QString axis = "row", int direction = 1);
     void navigateDirectory(int step, QString axis = {});
     void loadDirectoryPage(std::optional<int> selectAfter = std::nullopt);
+    void setDirectorySort(QString field);
     void showDirectoryInfo();
     void returnToDirectory();
     void leaveDirectory(bool restore = true);

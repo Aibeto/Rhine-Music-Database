@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "id": "5439b33b-ea81-40a9-83ef-d4ada4b0a250",
+      "title": "Rhine 帧率测量脚手架（重启后可从本文档恢复）",
+      "description": "Vulkan/OpenGL 帧率 A/B 测量的完整脚本集：全屏启动、uinput 按键注入、时间戳日志、区间帧率解析。原本在 /tmp/mb/，/tmp 会被重启清空，故在此存档；恢复命令见文末。",
+      "status": "active",
+      "filename": "rhine-5439b33b.md",
+      "relativePath": "documents/active/rhine-5439b33b.md",
+      "sourcePaths": [],
+      "sessionIds": [
+        "session-f293f616-6715-40d7-a765-8caf9100e12e"
+      ],
+      "createdAt": "2026-10-28T15:59:27.152Z",
+      "updatedAt": "2026-10-28T15:59:27.152Z",
+      "lastAccessedAt": "2026-10-28T15:59:27.152Z",
+      "revision": 1,
+      "contentHash": "79763aee79d6a01821d3b7b3219ee760298458cb3215a49c3d066ceb82a7c543",
+      "sizeBytes": 13235,
+      "memoryBodyIds": []
+    },
+    {
+      "id": "17126267-5190-4f5d-bc18-d4be28fefdfa",
+      "title": "Rhine 渲染性能诊断与改动记录（perf/render-precision）",
+      "description": "Rhine 渲染性能的完整诊断：三层瓶颈归因（呈现层压 GUI 线程、每帧强制重渲、插帧的二次几何遍历）、已实施改动与实测收益、失败实验清单、未解决项与构建环境铁律。",
+      "status": "active",
+      "filename": "rhine-perf-render-precision-17126267.md",
+      "relativePath": "documents/active/rhine-perf-render-precision-17126267.md",
+      "sourcePaths": [],
+      "sessionIds": [
+        "session-f293f616-6715-40d7-a765-8caf9100e12e"
+      ],
+      "createdAt": "2026-10-28T16:00:34.049Z",
+      "updatedAt": "2026-10-28T16:00:34.049Z",
+      "lastAccessedAt": "2026-10-28T16:00:34.049Z",
+      "revision": 1,
+      "contentHash": "b3beaa0c975b5f96723da12d0d780d6b4c9078a24c3e1ba80f585826abda0959",
+      "sizeBytes": 8185,
+      "memoryBodyIds": []
+    }
+  ]
+}

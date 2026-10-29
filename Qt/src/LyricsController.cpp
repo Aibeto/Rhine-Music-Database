@@ -125,6 +125,9 @@ int LyricsController::activeLineIndex(const QJsonObject &document, double positi
 }
 
 void LyricsController::clear() {
+    if (remoteCommand("clear", {})) {
+        return;
+    }
     ++m_generation;
     currentKey.clear();
     m_document = {};
@@ -204,6 +207,9 @@ void LyricsController::loadCandidateCover(const Pending &pending, const QJsonObj
 
 /** 本地歌曲歌词来源选择 */
 void LyricsController::selectLocalSource(const QJsonObject &track, const QString &source) {
+    if (remoteCommand("source", {{"track", track}, {"source", source}})) {
+        return;
+    }
     if (track["provider"] != "local" || track["id"].toString().isEmpty() ||
         !QStringList{"auto", "local", "netease", "qq", "kugou"}.contains(source)) {
         return;
@@ -217,6 +223,9 @@ void LyricsController::selectLocalSource(const QJsonObject &track, const QString
 
 /** 切歌先清空显示，再读精确 ID；缺词时只接受同名、同歌手、同版本的录音补缺。 */
 void LyricsController::load(const QJsonObject &track, bool retry) {
+    if (remoteCommand("load", {{"track", track}, {"retry", retry}})) {
+        return;
+    }
     const auto key = trackKey(track);
     const bool sameTrack = key == currentKey;
     const auto position = sameTrack ? positionMs : 0;
@@ -419,6 +428,9 @@ void LyricsController::sync(double position) {
 }
 
 void LyricsController::adjustOffset(double deltaMs) {
+    if (remoteCommand("offset", {{"value", deltaMs}})) {
+        return;
+    }
     offsetMs = std::clamp(offsetMs + deltaMs, -10000., 10000.);
     sync(positionMs);
     emit changed();
@@ -426,6 +438,9 @@ void LyricsController::adjustOffset(double deltaMs) {
 
 // 重置当前歌曲歌词偏移量
 void LyricsController::resetOffset() {
+    if (remoteCommand("reset", {})) {
+        return;
+    }
     if (offsetMs == 0) {
         return;
     }
@@ -436,6 +451,9 @@ void LyricsController::resetOffset() {
 
 // 将当前歌曲歌词偏移量应用到全局
 void LyricsController::applyGlobalOffset() {
+    if (remoteCommand("global", {})) {
+        return;
+    }
     if (offsetMs == m_globalOffsetMs) {
         return;
     }
@@ -455,19 +473,20 @@ void LyricsController::loadLocal(const QJsonObject &track, const Pending &pendin
         return;
     }
     const QFileInfo audio(track["path"].toString());
-    auto content = track["localLyrics"].toString();
+    const auto content = track["localLyrics"].toString();
+    QByteArray sidecarBytes;
     const auto basename = audio.absolutePath() + '/' + audio.completeBaseName();
     for (const auto &suffix : {".lrc", ".LRC"}) {
         QFile file(basename + suffix);
         if (file.open(QIODevice::ReadOnly) && file.size() <= 1000000) {
-            const auto sidecar = QString::fromUtf8(file.readAll());
+            const auto sidecar = file.readAll();
             if (!sidecar.trimmed().isEmpty()) {
-                content = sidecar;
+                sidecarBytes = sidecar;
                 break;
             }
         }
     }
-    if (content.trimmed().isEmpty()) {
+    if (sidecarBytes.isEmpty() && content.trimmed().isEmpty()) {
         if (localSource == "local") {
             pending->needsLyrics = false;
             status = "empty";
@@ -497,8 +516,13 @@ void LyricsController::loadLocal(const QJsonObject &track, const Pending &pendin
     }
     status = "loading";
     emit changed();
+    // 原始字节交给桥接统一识别编码；内嵌歌词已由标签库转换为 Unicode，作为回退保留。
+    QJsonObject parameters{{"content", content}};
+    if (!sidecarBytes.isEmpty()) {
+        parameters["contentBase64"] = QString::fromLatin1(sidecarBytes.toBase64());
+    }
     m_host->requestJson(
-        "/local/lyrics", {{"content", content}},
+        "/local/lyrics", parameters,
         [this, pending, alive = valid(pending)](QJsonObject response, QString error) {
             if (!alive()) {
                 return;
@@ -519,4 +543,38 @@ void LyricsController::loadLocal(const QJsonObject &track, const Pending &pendin
                 supplement(pending);
             }
         });
+}
+
+bool LyricsController::remoteCommand(const QString &method, QJsonObject arguments) {
+    auto connection = m_host->playbackConnection();
+    if (!connection) {
+        return false;
+    }
+    connection->call("lyrics." + method, arguments);
+    applyPlaybackSnapshot(connection->snapshot()["lyrics"].toObject());
+    return true;
+}
+
+QJsonObject LyricsController::playbackSnapshot() const {
+    return {{"document", m_document},
+            {"status", status},
+            {"message", message},
+            {"key", currentKey},
+            {"index", index},
+            {"offsetMs", offsetMs},
+            {"positionMs", positionMs},
+            {"globalOffsetMs", m_globalOffsetMs},
+            {"localSource", localSource}};
+}
+
+void LyricsController::applyPlaybackSnapshot(const QJsonObject &snapshot) {
+    m_document = snapshot["document"].toObject();
+    status = snapshot["status"].toString("idle");
+    message = snapshot["message"].toString();
+    currentKey = snapshot["key"].toString();
+    index = snapshot["index"].toInt(-1);
+    offsetMs = snapshot["offsetMs"].toDouble();
+    positionMs = snapshot["positionMs"].toDouble();
+    m_globalOffsetMs = snapshot["globalOffsetMs"].toDouble();
+    localSource = snapshot["localSource"].toString("auto");
 }

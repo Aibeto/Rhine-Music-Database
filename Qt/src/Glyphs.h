@@ -1,6 +1,9 @@
 #pragma once
 #include <QCache>
 #include <QHash>
+#include <QFile>
+#include <memory>
+#include <vector>
 #include <QImage>
 #include <QJsonArray>
 #include <QMutex>
@@ -14,7 +17,7 @@ class Glyphs : public QObject {
     Q_OBJECT
   public:
     explicit Glyphs(const QString &root);
-    ~Glyphs() override = default;
+    ~Glyphs() override;
     struct Glyph {
         double advance = 1;
         QPainterPath path;
@@ -32,6 +35,9 @@ class Glyphs : public QObject {
     QImage label(const QJsonObject &item);
 
   private:
+    // 字体只读映射必须晚于 QRawFont 析构，避免后端仍引用输入字节。
+    std::vector<std::unique_ptr<QFile>> mappedFonts;
+    QRawFont loadFont(const QString &filename);
     QRecursiveMutex mutex;
     QHash<QString, Glyph> glyphs;
     QHash<QString, QList<Glyph>> lettering;
@@ -39,6 +45,12 @@ class Glyphs : public QObject {
     QCache<QString, QPainterPath> paths{1024};
     QCache<QString, double> widths{1024};
     QCache<QString, QStringList> wrapped{128 * 1024};
+    QList<int> applicationFonts;
+    QHash<QString, QString> layoutFamilies;
+    QCache<QString, Glyph> shapedText{32 * 1024};
+    QCache<QString, bool> layoutRequired{1024};
+    bool needsLayout(const QString &text, const QString &weight);
+    Glyph layoutText(const QString &text, const QString &weight, double spacing);
     Glyph glyph(QString ch, QString weight);
 };
 

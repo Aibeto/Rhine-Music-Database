@@ -22,6 +22,11 @@ class MusicPlayer : public QObject {
     void clearUpcoming();
     void stop();
     void setQuality(const QString &value);
+    void setMode(const QString &value);
+    void setAlternative(bool enabled);
+    void clearHistory();
+    QJsonObject playbackSnapshot() const;
+    void applyPlaybackSnapshot();
     static QVector<QPair<QString, QString>> qualityOptions(const QString &provider);
     static QString localQuality(const QJsonObject &track);
     static QString sourceQuality(const QString &provider, const QJsonObject &audio, bool trial = false);
@@ -59,6 +64,10 @@ class MusicPlayer : public QObject {
     bool m_resumePaused = false;
     bool m_restoringSession = false;
     int m_recoveryAttempts = 0;
+    int m_selectionSerial = 0;
+    bool m_receivedSnapshot = false;
+    QString m_remoteCover;
+    bool remoteCommand(const QString &method, QJsonObject arguments = {});
     void recoverPlayback();
     MusicApi::Valid valid(quint64 generation);
     void prepare(QJsonObject track, quint64 generation, bool reload = false);

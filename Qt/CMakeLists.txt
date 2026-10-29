@@ -7,8 +7,10 @@ set_source_files_properties(qml/WindowChrome.qml PROPERTIES QT_RESOURCE_ALIAS Wi
 # FG 路径把 3D 与 UI 拆成两个可独立渲染的场景；Main.qml 的默认路径用同样两个组件组合， 所以两条路径共用同一份界面定义，不会各自漂移。
 set_source_files_properties(qml/Scene3D.qml PROPERTIES QT_RESOURCE_ALIAS Scene3D.qml)
 set_source_files_properties(qml/Overlay.qml PROPERTIES QT_RESOURCE_ALIAS Overlay.qml)
+set_source_files_properties(qml/Static.qml PROPERTIES QT_RESOURCE_ALIAS Static.qml)
 set_source_files_properties(qml/IOSInput.qml PROPERTIES QT_RESOURCE_ALIAS IOSInput.qml)
 set_source_files_properties(qml/LocalMusicDialogs.qml PROPERTIES QT_RESOURCE_ALIAS LocalMusicDialogs.qml)
+set_source_files_properties("${CMAKE_SOURCE_DIR}/Assets/static/welcome.png" PROPERTIES QT_RESOURCE_ALIAS welcome.png)
 qt_add_qml_module(
     RhineMusicDatabase
     URI
@@ -17,6 +19,8 @@ qt_add_qml_module(
     1.0
     OUTPUT_DIRECTORY
     "${CMAKE_BINARY_DIR}/RhineMusic"
+    RESOURCES
+    "${CMAKE_SOURCE_DIR}/Assets/static/welcome.png"
     QML_FILES
     qml/Main.qml
     qml/IOSInput.qml
@@ -24,4 +28,5 @@ qt_add_qml_module(
     qml/PerformancePanel.qml
     qml/WindowChrome.qml
     qml/Scene3D.qml
-    qml/Overlay.qml)
+    qml/Overlay.qml
+    qml/Static.qml)

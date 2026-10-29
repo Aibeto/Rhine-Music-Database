@@ -3,6 +3,8 @@
 #include "../fg/FgStats.h"
 #include "../fg/FgFrameTap.h"
 #include "PresentationBackend.h"
+#include "PresentationStartupProbe.h"
+#include "../DeferredWindowTransition.h"
 #include "FrameGenerator.h"
 
 #include <QByteArray>
@@ -71,11 +73,28 @@ class PresentationShell : public QObject {
      * 幂等，析构路径会再调用一次。
      */
     void shutdown();
+    void requestQuit();
 
     bool start();
 
     /// 启动后的收尾：返回给 main() 的退出码。渲染由事件循环里的定时器驱动。
     int run();
+
+    /**
+     * 性能模式挂起：释放真实界面的离屏层与插值上下文，只保留静态欢迎页并继续上屏。
+     * 业务引擎由调用方在此之前或之后销毁；本类不持有引擎所有权。
+     */
+    bool suspendToStatic();
+
+    /// 恢复真实界面；调用前必须先通过 setBackend() 绑定新的业务引擎。
+    bool resumeFromStatic();
+
+    bool suspended() const {
+        return m_suspended;
+    }
+
+    /// 业务引擎重建后重新绑定；会断开旧引擎的连接并接管新引擎的窗口事件。
+    void setBackend(Engine *backend);
 
     QString lastError() const {
         return m_error;
@@ -89,15 +108,23 @@ class PresentationShell : public QObject {
     QQuickWindow *inputWindow() const;
     QQuickWindow *sceneWindow() const;
 
+  signals:
+    /// iOS 在原生事件循环内完成首帧自检，失败后由应用切回默认窗口。
+    void startupFailed();
+
   protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
   private:
+    DeferredWindowTransition m_quitTransition;
     /// 交换链要的物理像素尺寸（逻辑尺寸 × 设备像素比）。
     QSize pixelSize() const;
     /// 同步补焦点：按键到达时若没有焦点项就当场重建。
     void ensureOverlayFocus(QQuickWindow *overlay);
     void step();
+    void stepFrame();
+    bool startInternal();
+    bool resumeInternal();
     void scheduleNext(int delayMs = 0);
     void reportStats();
     /// 上一次统计时的帧数，用来把 ms/frame 算成"这一窗口内"的均值。
@@ -108,6 +135,11 @@ class PresentationShell : public QObject {
     qreal m_windowDpr = 1.0;
     bool initializeBackend();
     bool initializeLayers();
+    /// 绑定业务引擎的更新信号；挂起/恢复之间引擎会被整体重建。
+    void connectBackend();
+    void disconnectBackend();
+    /// 释放当前离屏宿主（正常层或静态层）。
+    void releaseHost();
     bool ensureSwapchainResources();
     void releaseSwapchainResources();
     bool ensureCompositeResources();
@@ -138,11 +170,17 @@ class PresentationShell : public QObject {
 
     QQmlEngine *m_engine = nullptr;
     Engine *m_backend = nullptr;
+    /// 性能模式挂起中：m_host 是只载入静态页的宿主，业务引擎可能已被销毁。
+    bool m_suspended = false;
+    /// 静态页已经上屏；Qt 的 renderRequested 会持续到达，静止画面不再重复呈现。
+    bool m_staticFramePresented = false;
 
     QWindow *m_window = nullptr;
     QRhi *m_rhi = nullptr;
     QString m_backendName;
     std::unique_ptr<SceneLayerHost> m_host;
+    /// 3D 层场景图失效 → 引擎资源计数清零；宿主重建时必须先断开。
+    QMetaObject::Connection m_sceneInvalidated;
     std::unique_ptr<RhineRender::FrameGenerator> m_fg;
     std::unique_ptr<RhineRender::PresentationBackend> m_presenter;
 
@@ -159,6 +197,7 @@ class PresentationShell : public QObject {
 
     QTimer *m_timer = nullptr;
     QTimer *m_releaseTimer = nullptr;
+    RhineRender::PresentationStartupProbe m_startupProbe;
     QElapsedTimer m_frameClock;
     // QRhi 建的设备句柄：发自己的屏障时要用设备级函数表。
     QSize m_size;
@@ -167,6 +206,11 @@ class PresentationShell : public QObject {
     bool m_fgArmed = false;
     bool m_needRecreate = false;
     quint64 m_lastEngineSteps = 0;
+    // 内容代次：区分"引擎前进"与"画面真的变了"（RHINE_PRESENT_CONTENT_ONLY=1 使用）。
+    quint64 m_lastEngineHud = 0;
+    quint64 m_lastEngineScene = 0;
+    /// 有一步正在排队时收到的唤醒：当前步结束后补跑，避免丢 tick（丢一次就少一帧）。
+    bool m_wakePending = false;
     bool m_started = false;
     bool m_stopped = false;
     quint64 m_lastTapSerial = 0;
@@ -196,10 +240,11 @@ class PresentationShell : public QObject {
     bool m_pendingRealFrame = false;
     /// 交换链重建/窗口尺寸变化后必须无条件重画一次（纹理内容已失效）。
     bool m_forcePresent = true;
-    /// 连续跳过的步数：引擎在推进却一直没有脏标记时用它兜底，避免画面冻住。
     /// 累计跳过的步数，写进统计日志，便于确认"静止时确实没在空转"。
     quint64 m_skippedSteps = 0;
-    /// 上次渲染时引擎的步进计数：它变了才说明场景状态真的推进了。
+    /// 连续跳过的步数：超过阈值就强制两层重渲一次（看门狗）。
+    /// 删掉原先"引擎 steps 变了就重渲"那个隐式兜底之后，这是唯一的漏标脏保险。
+    int m_consecutiveSkips = 0;
     /// 排障计数：acquire 超时 / OutOfDate 的次数（空转时靠它们判断卡在哪条提前返回）。
     quint64 m_acquireTimeoutCount = 0;
     quint64 m_outOfDateCount = 0;

@@ -137,7 +137,16 @@ function normalizeLyrics(provider, body, metadata = {}) {
         translation = raw.ytlrc?.lyric || raw.tlyric?.lyric || '';
     } else if (provider === 'qq') {
         original = raw.lyric || '';
-        translation = raw.trans ? Buffer.from(raw.trans, 'base64').toString('utf8') : '';
+        if (raw.trans) {
+            try {
+                translation = require('./lyrics-text.cjs').decodeLyrics(
+                    Buffer.from(raw.trans, 'base64'),
+                ).text;
+            } catch {
+                // 附属翻译损坏不影响原文及时间轴，避免把替换字符交给界面。
+                translation = '';
+            }
+        }
     } else {
         original = raw.decodeContent || '';
         wordContent = original;

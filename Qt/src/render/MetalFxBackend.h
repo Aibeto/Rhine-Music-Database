@@ -1,10 +1,14 @@
 #pragma once
+#include <functional>
 
 #include "FrameGenerator.h"
 #include <QPointF>
 #include <memory>
 
 namespace RhineRender {
+
+/** 自管 QRhi 的每帧临时 Metal 对象在 macOS / iOS 共用同一释放边界。 */
+void drainMetalResources(const std::function<void()> &work);
 /** Apple 官方时域抗锯齿和超分；颜色历史由 MetalFX 所属上下文维护。 */
 class MetalFxTemporal {
   public:

@@ -8,11 +8,12 @@ import { createRequire } from 'node:module';
 import { QQAPI, qqItem } from '../../MusicBridge/client/qq.mjs';
 import { safeLoginDetails } from '../../MusicBridge/client/failure.mjs';
 import { dispatch } from '../../MusicBridge/client/dispatch.mjs';
-import format from '../../MusicBridge/lyrics-format.cjs';
 import { createClientHarness } from './fixtures/client-harness.mjs';
 
 const require = createRequire(import.meta.url);
 const { bridgeRuntime, bridgeSourceDirectory } = require('./fixtures/bridge-runtime.cjs');
+// 读取构建暂存区的归一化器及锁定依赖，与打包桥接使用同一套解码模块。
+const format = require(path.join(bridgeSourceDirectory(), 'lyrics-format.cjs'));
 const bridgeDirectory = process.argv[2];
 const message = (operation, args, cookies = {}) => ({
     route: '/native/qq/' + operation,
@@ -456,6 +457,23 @@ test('歌词解析翻译、无时标判定与词作者行过滤', () => {
         credits.lines.map((line) => line.startMs),
         [670, 4030],
     );
+});
+
+test('多语言在线歌词保留 Unicode 原文并识别翻译字节编码', () => {
+    const sample = JSON.parse(
+        fs.readFileSync(new URL('./fixtures/lyrics-encodings.json', import.meta.url), 'utf8'),
+    ).find((item) => item.name === 'shift-jis');
+    const original = '[00:01.00]별빛을 따라 걷는 밤\n[00:04.00]君の声が聞こえる';
+    const document = format.normalizeLyrics('qq', { lyric: original, trans: sample.base64 }).document;
+    assert.equal(document.lines[0].text, '별빛을 따라 걷는 밤');
+    assert.equal(document.lines[1].text, '君の声が聞こえる');
+    assert.equal(document.lines[0].translation, '君の声が聞こえる 夜空に輝く星を見上げて');
+    const broken = format.normalizeLyrics('qq', { lyric: original, trans: '//4AAAE=' }).document;
+    assert.deepEqual(
+        broken.lines.map((line) => line.text),
+        document.lines.map((line) => line.text),
+    );
+    assert.ok(broken.lines.every((line) => !line.translation));
 });
 
 test('设备身份跨进程复用且不写入登录凭据', () => {

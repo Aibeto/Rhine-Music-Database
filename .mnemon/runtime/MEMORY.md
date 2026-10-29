@@ -1,0 +1,9 @@
+Rhine-Music-Database 渲染性能：Vulkan 呈现层（PresentationShell）把两层离屏录制+合成+present 全压 GUI 线程，fg=off 时纯负担；改为启动时按 RHINE_FG 决定是否创建呈现层（Qt 默认路径）后内容帧 20.3→27.2/s（+34%）。代价：切换插帧需重启，设置页已标注「· 重启生效」。
+§
+Rhine 插帧设置项死锁（已修复，Qt/src/fg/FgCapability.h）：fg=off 不再创建呈现层后 presentLayerActive 恒 false，frameGenerationUi() 原本对它返回 {false,"呈现层未接管"} 置灰，导致开关永远打不开。修复为：未接管且偏好为关→{true,"关闭"}；偏好已开→{true,"已开启 · 重启生效"}；真正失败（reason 非空）仍置灰。回归用例见 Qt/tests/FgCapabilityChecks.cpp 的 settingsRowStates() 第 5/5b 条。
+§
+Rhine 帧率测量口径：以「内容帧/s」（节拍诊断的 render/s = Engine::m_renderFrames）为主，presented 仅作辅；fg=off 时 Vulkan presented≈内容帧×1.86（SceneLayerHost::renderFrame 非 Metal 每帧强制置脏，同帧重渲重上屏），用 presented 当帧率会高估 Vulkan。测法：全屏 2560x1440、主界面收藏专辑列表、uinput 按住 KEY_DOWN 20s，按 ↓ 键码 16777237 首末时间戳取窗口。
+§
+Rhine 构建/磁盘陷阱：./build.sh 每次都会附带 AppImage 打包（appimagetool），反复构建会堆满磁盘导致 ENOSPC、工具全部无法执行。日常验证改用 cmake --build output/qt-build --target RhineMusicDatabase -j8。清理：rm -rf /tmp/appimage_extracted_* output/RhineMusicDatabase.AppDir output/*.AppImage。
+§
+仓库策略（用户裁定 2026-10-29）：scripts/check-repository.cjs 不再参与 CI 与 npm test——调用已从 .github/workflows/desktop.yml 与 scripts/test.cjs 删除；脚本文件保留，但本地跑它会因 .mnemon/ 的 4 个 .md 与 tools/perf 而失败，属已知状态。.mnemon/ 记忆库是入库的；.gitignore 是受控文件禁止改动（它的 /.mnemon/ 一直是注释）；.git/info/exclude 已恢复 git 默认 6 行模板——不要再往里加 /.mnemon/，否则 git add .mnemon/... 会报 "paths are ignored" 并返回非 0。想排除某个提交就用 git reset -- .mnemon。

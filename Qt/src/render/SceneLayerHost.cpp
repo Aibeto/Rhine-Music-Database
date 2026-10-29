@@ -2,6 +2,7 @@
 
 #include <QColor>
 #include <QDebug>
+#include <QElapsedTimer>
 #include <QQmlComponent>
 #include <QQmlEngine>
 #include <QQuickGraphicsDevice>
@@ -12,7 +13,7 @@
 #include <rhi/qrhi.h>
 
 // Qt 的 Vulkan 类型同时受构建特性和 SDK 头文件可用性约束。
-#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_MACOS)
+#if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_DARWIN)
 #include <QVulkanInstance>
 #define RHINE_HAVE_VULKAN_TYPES 1
 #else
@@ -49,7 +50,13 @@ const QColor kSceneClearColor(0xe7, 0xe7, 0xe1);
 
 } // namespace
 
-SceneLayerHost::SceneLayerHost() = default;
+SceneLayerHost::SceneLayerHost() {
+    if (qEnvironmentVariableIsSet("RHINE_LAYER_SAFETY_FRAMES")) {
+        m_safetyFrames = qEnvironmentVariableIntValue("RHINE_LAYER_SAFETY_FRAMES");
+        m_safetyCountdown = qMax(1, m_safetyFrames);
+    }
+    m_layerProbe = qEnvironmentVariableIsSet("RHINE_LAYER_PROBE");
+}
 
 SceneLayerHost::~SceneLayerHost() {
     teardown();
@@ -74,6 +81,72 @@ bool SceneLayerHost::start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUr
     return true;
 }
 
+bool SceneLayerHost::startStatic(QQmlEngine &engine, const QUrl &url, QRhi *rhi,
+                                 QVulkanInstance *vulkanInstance) {
+    // 静态页没有 3D 层，也不需要真实宿主窗口。
+    m_visibleWindow = nullptr;
+    if (!startStaticInternal(engine, url, rhi, vulkanInstance)) {
+        teardown();
+        return false;
+    }
+    return true;
+}
+
+/** 建立一层离屏窗口并接上 Qt 的更新信号；正常路径两层与静态模式共用。 */
+bool SceneLayerHost::createLayerWindow(Layer &layer, QRhi *rhi, QVulkanInstance *vulkanInstance,
+                                       const QColor &clear, const char *name) {
+    Q_UNUSED(name);
+    layer.control = std::make_unique<LayerRenderControl>(m_visibleWindow);
+    layer.window = std::make_unique<QQuickWindow>(layer.control.get());
+
+    // 关键：Qt 6.12 没有 initialize(QRhi*) 重载。共享同一个 QRhi 的公开入口是
+    // setGraphicsDevice(fromRhi(rhi))；之后 initialize() 不会再自建 QRhi。
+    // 两层必须共用同一个 QRhi，FG 才能直接采样 3D 纹理做插值。
+    layer.window->setGraphicsDevice(QQuickGraphicsDevice::fromRhi(rhi));
+
+#if RHINE_HAVE_VULKAN_TYPES
+    // QQuickRenderControl::initialize() 在 Vulkan 下强制要求窗口上有 QVulkanInstance
+    // （Qt 内部要查实例级扩展/能力），只给 fromRhi(rhi) 是不够的。
+    if (vulkanInstance) {
+        layer.window->setVulkanInstance(vulkanInstance);
+    }
+#else
+    // Metal 等后端不需要 Vulkan 实例。
+    Q_UNUSED(vulkanInstance);
+#endif
+
+    layer.window->setColor(clear);
+
+    // 各层分别接收 Qt 的正式更新信号；回调只标脏与安排下一步，不递归渲染。
+    // Qt 的 renderRequested/sceneChanged 在本工程里是**噪音级**频率（实测每帧数十次），
+    // 用它标脏等于退回"每帧重渲"。这里只让它把下一帧排上队，标脏交给两处：
+    //   1) Engine 的真实内容信号 sceneUpdated / hudUpdated（PresentationShell 转发）
+    //   2) renderFrame() 里的周期性兜底（覆盖异步资源加载等无信号的情况）
+    const auto invalidate = [this, &layer] {
+        ++m_dirtyQt;
+        if (requestRender) {
+            requestRender();
+        }
+    };
+    QObject::connect(layer.control.get(), &QQuickRenderControl::renderRequested, layer.window.get(), invalidate);
+    QObject::connect(layer.control.get(), &QQuickRenderControl::sceneChanged, layer.window.get(), invalidate);
+
+    // 两个窗口都不 show()：RenderControl 下没有原生窗口，show() 会破坏离屏语义。
+    return true;
+}
+
+bool SceneLayerHost::initializeLayer(Layer &layer, const char *name) {
+    if (!layer.control->initialize()) {
+        return fail(QStringLiteral("%1 层 QQuickRenderControl::initialize() 失败").arg(QLatin1String(name)));
+    }
+    // 如果 Qt 没有复用传入的 QRhi（例如图形后端不匹配），两张纹理就不在同一设备上，
+    // FG 无法采样。宁可失败回退，也不要跑到合成阶段才炸。
+    if (layer.control->rhi() != m_rhi) {
+        return fail(QStringLiteral("QQuickRenderControl 没有复用传入的 QRhi（图形后端可能不匹配）"));
+    }
+    return true;
+}
+
 bool SceneLayerHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl,
                                    QRhi *rhi, QVulkanInstance *vulkanInstance) {
     if (m_valid) {
@@ -94,62 +167,17 @@ bool SceneLayerHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, c
     // 两个场景各自一个 QQuickRenderControl：一个 RenderControl 每帧换 render target
     // 会触发 Qt 重新初始化渲染目标（QQuickWindow::setRenderTarget 文档明确警告），
     // 拆成两个后各自固定一个 target，代价稳定，UI 层还能按需重渲。
-    m_scene.control = std::make_unique<LayerRenderControl>(m_visibleWindow);
-    m_overlay.control = std::make_unique<LayerRenderControl>(m_visibleWindow);
-    m_scene.window = std::make_unique<QQuickWindow>(m_scene.control.get());
-    m_overlay.window = std::make_unique<QQuickWindow>(m_overlay.control.get());
-
-    // 关键：Qt 6.12 没有 initialize(QRhi*) 重载。共享同一个 QRhi 的公开入口是
-    // setGraphicsDevice(fromRhi(rhi))；之后 initialize() 不会再自建 QRhi。
-    // 两个场景必须共用同一个 QRhi，FG 才能直接采样 3D 纹理做插值。
-    const QQuickGraphicsDevice device = QQuickGraphicsDevice::fromRhi(rhi);
-    m_scene.window->setGraphicsDevice(device);
-    m_overlay.window->setGraphicsDevice(device);
-
-#if RHINE_HAVE_VULKAN_TYPES
-    // QQuickRenderControl::initialize() 在 Vulkan 下强制要求窗口上有 QVulkanInstance
-    // （Qt 内部要查实例级扩展/能力），只给 fromRhi(rhi) 是不够的。
-    if (vulkanInstance) {
-        m_scene.window->setVulkanInstance(vulkanInstance);
-        m_overlay.window->setVulkanInstance(vulkanInstance);
+    if (!createLayerWindow(m_scene, rhi, vulkanInstance, kSceneClearColor, "3D")) {
+        return false;
     }
-#else
-    // Metal 等后端不需要 Vulkan 实例。
-    Q_UNUSED(vulkanInstance);
-#endif
-
-    m_scene.window->setColor(kSceneClearColor);
-    // UI 层必须透明清屏，否则 FG 合成时会把整帧盖住。
-    m_overlay.window->setColor(Qt::transparent);
-
-    // 两层分别接收 Qt 的正式更新信号；回调只标脏与安排下一步，不递归渲染。
-    const auto watch = [this](Layer &layer) {
-        const auto invalidate = [this, &layer] {
-            layer.dirty = true;
-            if (requestRender) {
-                requestRender();
-            }
-        };
-        QObject::connect(layer.control.get(), &QQuickRenderControl::renderRequested, layer.window.get(),
-                         invalidate);
-        QObject::connect(layer.control.get(), &QQuickRenderControl::sceneChanged, layer.window.get(),
-                         invalidate);
-    };
-    watch(m_scene);
-    watch(m_overlay);
-
-    // 两个窗口都不 show()：RenderControl 下没有原生窗口，show() 会破坏离屏语义。
-    if (!m_scene.control->initialize()) {
-        return fail(QStringLiteral("3D 场景 QQuickRenderControl::initialize() 失败"));
+    if (!createLayerWindow(m_overlay, rhi, vulkanInstance, Qt::transparent, "UI")) {
+        return false;
     }
-    if (!m_overlay.control->initialize()) {
-        return fail(QStringLiteral("UI 场景 QQuickRenderControl::initialize() 失败"));
+    if (!initializeLayer(m_scene, "3D")) {
+        return false;
     }
-
-    // 如果 Qt 没有复用传入的 QRhi（例如图形后端不匹配），两张纹理就不在同一设备上，
-    // FG 无法采样。宁可失败回退，也不要跑到合成阶段才炸。
-    if (m_scene.control->rhi() != rhi || m_overlay.control->rhi() != rhi) {
-        return fail(QStringLiteral("QQuickRenderControl 没有复用传入的 QRhi（图形后端可能不匹配）"));
+    if (!initializeLayer(m_overlay, "UI")) {
+        return false;
     }
 
     applyLayerGeometry(m_scene);
@@ -171,6 +199,46 @@ bool SceneLayerHost::startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, c
 
     m_valid = true;
     qInfo().noquote() << QStringLiteral("SceneLayerHost: 双场景宿主就绪，离屏尺寸 %1x%2")
+                             .arg(m_size.width())
+                             .arg(m_size.height());
+    return true;
+}
+
+bool SceneLayerHost::startStaticInternal(QQmlEngine &engine, const QUrl &url, QRhi *rhi,
+                                         QVulkanInstance *vulkanInstance) {
+    if (m_valid) {
+        return fail(QStringLiteral("startStatic() 被重复调用"));
+    }
+    if (!rhi) {
+        return fail(QStringLiteral("传入的 QRhi 为空，无法建立静态页目标"));
+    }
+    if (url.isEmpty()) {
+        return fail(QStringLiteral("静态页 URL 无效"));
+    }
+
+    m_rhi = rhi;
+    m_size = kFallbackSize;
+    m_staticOnly = true;
+    m_lastError.clear();
+    // 3D 层不存在；保持干净状态，contentDirty() 不会被一个空层永远点亮。
+    m_scene.dirty = false;
+
+    if (!createLayerWindow(m_overlay, rhi, vulkanInstance, Qt::transparent, "UI")) {
+        return false;
+    }
+    if (!initializeLayer(m_overlay, "UI")) {
+        return false;
+    }
+    applyLayerGeometry(m_overlay);
+    if (!createLayerTargets(m_overlay, "UI")) {
+        return false;
+    }
+    if (!loadLayer(m_overlay, engine, url, "UI")) {
+        return false;
+    }
+
+    m_valid = true;
+    qInfo().noquote() << QStringLiteral("SceneLayerHost: 静态页宿主就绪，离屏尺寸 %1x%2")
                              .arg(m_size.width())
                              .arg(m_size.height());
     return true;
@@ -293,7 +361,9 @@ void SceneLayerHost::setPixelRatio(qreal ratio) {
     applyLayerGeometry(m_scene);
     applyLayerGeometry(m_overlay);
     if (!m_suspended) {
-        createLayerTargets(m_scene, "3D");
+        if (m_scene.control) {
+            createLayerTargets(m_scene, "3D");
+        }
         createLayerTargets(m_overlay, "UI");
     }
     qInfo().noquote() << "SceneLayerHost: 离屏层放大" << m_ratio << "倍，物理像素" << pixelSize();
@@ -325,16 +395,34 @@ bool SceneLayerHost::renderLayer(Layer &layer, const char *name) {
     // 官方推荐的顺序：polishItems() 在 beginFrame() 之前，sync()/render() 必须在
     // beginFrame()/endFrame() 之间（QQuickRenderControl 文档的更新步骤示例）。
     layer.dirty = false;
+    const auto blendMs = [](double prev, qint64 ns) { return prev * 0.8 + double(ns) / 1e6 * 0.2; };
+    QElapsedTimer stage;
+    stage.start();
     control->polishItems();
+    layer.polishMs = blendMs(layer.polishMs, stage.nsecsElapsed());
+    stage.restart();
     control->beginFrame();
+    layer.beginMs = blendMs(layer.beginMs, stage.nsecsElapsed());
+    stage.restart();
     // beginFrame() 不返回状态；command buffer 为空是最直接的失败信号（例如设备丢失）。
     if (!control->commandBuffer()) {
         control->endFrame();
         return fail(QStringLiteral("%1 层 beginFrame() 没有拿到 command buffer").arg(QLatin1String(name)));
     }
+    // 注意：Qt 6 的 sync() 在成功路径上无条件返回 true（只有"没有窗口/未 beginFrame/
+    // 没有 command buffer"三条错误路径才返回 false），所以它的返回值**不能**用来判断
+    // "这一层本帧是否真的产出了新内容"。是否重渲只由 dirty 标记决定，上层用
+    // sceneRenderCount() 的差分判断"有没有新场景"，这里保持无条件累加。
     control->sync();
+    // 三段计时：sync 是 CPU（同步场景图），render 是 CPU（录制命令），endFrame 是
+    // 提交并等 GPU。三段谁大，决定了 18ms 该从 CPU 侧还是 GPU 侧下手。
+    layer.syncMs = blendMs(layer.syncMs, stage.nsecsElapsed());
+    stage.restart();
     control->render();
+    layer.recordMs = blendMs(layer.recordMs, stage.nsecsElapsed());
+    stage.restart();
     control->endFrame();
+    layer.submitMs = blendMs(layer.submitMs, stage.nsecsElapsed());
     return true;
 }
 
@@ -345,6 +433,9 @@ void SceneLayerHost::releaseGraphics() {
     }
     m_rhi->finish();
     for (Layer *layer : {&m_scene, &m_overlay}) {
+        if (!layer->control) {
+            continue;
+        }
         releaseLayerTargets(*layer);
         layer->control->invalidate();
         layer->dirty = true;
@@ -357,6 +448,9 @@ bool SceneLayerHost::resumeGraphics() {
         return m_valid;
     }
     for (Layer *layer : {&m_scene, &m_overlay}) {
+        if (!layer->control) {
+            continue;
+        }
         if (!layer->control->initialize()) {
             return fail(QStringLiteral("恢复离屏场景图失败"));
         }
@@ -375,21 +469,86 @@ bool SceneLayerHost::renderFrame() {
     if (!m_valid || !resumeGraphics()) {
         return false;
     }
-    if (m_rhi->backend() != QRhi::Metal) {
-        m_scene.dirty = true;
-        m_overlay.dirty = true;
+    // GPU 探针（RHINE_GPU_PROBE=1）：把"CPU 花在录制"和"等 GPU 归还"分开。
+    // 每 30 帧抽一次：进入前先排空队列量出积压，交出本帧后再排空量出本帧 GPU 成本。
+    // 必须抽样：finish() 会打断流水，每帧都调会改变被测对象。
+    static const bool gpuProbe = qEnvironmentVariableIntValue("RHINE_GPU_PROBE") == 1;
+    static int probeFrame = 0;
+    const bool sampling = gpuProbe && (++probeFrame % 30) == 0;
+    double backlogMs = 0.0;
+    QElapsedTimer probeTimer;
+    if (sampling) {
+        probeTimer.start();
+        m_rhi->finish();
+        backlogMs = double(probeTimer.nsecsElapsed()) / 1e6;
     }
-    if (m_scene.dirty) {
+    // 非 Metal 后端过去是**每帧强制置脏**：模型/纹理异步加载完成后引擎不一定发出带
+    // visualChanged 的 sceneUpdated，一旦完全按脏标记剔除，3D 房间几何就会永远不出现
+    // （实机验证过：去掉后背景模型缺失，改回立即恢复）。代价是静止画面也每帧重渲两层
+    // （3D 约 6~9ms + UI 约 5~7ms），而主界面这类页面的内容每秒只变二三十次。
+    //
+    // 这里改成「周期性兜底」：每 m_safetyFrames 帧补脏一次，把异步资源的最坏可见延迟
+    // 压到 ~0.3s，其余帧完全交给 Qt 的 renderRequested/sceneChanged 与显式标脏。
+    // 兜底间隔可用 RHINE_LAYER_SAFETY_FRAMES 调（<=0 表示恢复每帧置脏）。
+    if (m_rhi->backend() != QRhi::Metal) {
+        if (m_safetyFrames <= 0) {
+            // 排障开关：恢复"每帧强制置脏"的旧行为（RHINE_LAYER_SAFETY_FRAMES=0）
+            m_scene.dirty = true;
+            m_overlay.dirty = true;
+        } else if (--m_safetyCountdown <= 0) {
+            m_safetyCountdown = m_safetyFrames;
+            ++m_dirtySafety;
+            m_scene.dirty = true;
+            m_overlay.dirty = true;
+        }
+    }
+    // 挂起释放后 control 可能为空，与 dirty 一起判断，避免对空控制对象录制。
+    if (m_scene.dirty && m_scene.control) {
+        QElapsedTimer layerTimer;
+        layerTimer.start();
         if (!renderLayer(m_scene, "3D")) {
             return false;
         }
+        // 分层计时：单帧 17ms 到底花在 3D 层还是 UI 层，是决定优化方向的唯一依据。
+        m_sceneLayerMs = m_sceneLayerMs * 0.8 + layerTimer.nsecsElapsed() / 1e6 * 0.2;
         ++m_sceneRenders;
     }
     if (m_overlay.dirty) {
+        QElapsedTimer layerTimer;
+        layerTimer.start();
         if (!renderLayer(m_overlay, "UI")) {
             return false;
         }
+        m_overlayLayerMs = m_overlayLayerMs * 0.8 + layerTimer.nsecsElapsed() / 1e6 * 0.2;
         ++m_overlayRenders;
+    }
+    // 置脏来源探针（RHINE_LAYER_PROBE=1）：判断"每帧重渲"到底是 Qt 信号还是兜底。
+    if (m_layerProbe) {
+        static quint64 lastQt = 0, lastSafety = 0, lastScene = 0, lastOverlay = 0;
+        static quint64 lastSceneDirty = 0, lastOverlayDirty = 0;
+        if (++m_probeFrames % 60 == 0) {
+            qWarning("图层探针: 近60帧 3D重渲 %llu 次 / UI重渲 %llu 次 | 置脏来源 场景 %llu HUD %llu 兜底 %llu qt噪音 %llu",
+                     m_sceneRenders - lastScene, m_overlayRenders - lastOverlay,
+                     m_dirtyScene - lastSceneDirty, m_dirtyOverlay - lastOverlayDirty,
+                     m_dirtySafety - lastSafety, m_dirtyQt - lastQt);
+            lastSceneDirty = m_dirtyScene;
+            lastOverlayDirty = m_dirtyOverlay;
+            lastQt = m_dirtyQt;
+            lastSafety = m_dirtySafety;
+            lastScene = m_sceneRenders;
+            lastOverlay = m_overlayRenders;
+        }
+    }
+    if (sampling) {
+        probeTimer.restart();
+        m_rhi->finish();
+        const double frameGpuMs = double(probeTimer.nsecsElapsed()) / 1e6;
+        qInfo().noquote() << QStringLiteral(
+                                 "GPU探针: 进入前积压 %1 ms | 本帧 GPU %2 ms | 3D层 %3 ms | UI层 %4 ms")
+                                 .arg(backlogMs, 0, 'f', 1)
+                                 .arg(frameGpuMs, 0, 'f', 1)
+                                 .arg(m_sceneLayerMs, 0, 'f', 1)
+                                 .arg(m_overlayLayerMs, 0, 'f', 1);
     }
     return true;
 }
@@ -428,7 +587,7 @@ void SceneLayerHost::resize(QSize size) {
     if (m_suspended) {
         return;
     }
-    if (!createLayerTargets(m_scene, "3D")) {
+    if (m_scene.control && !createLayerTargets(m_scene, "3D")) {
         return; // fail() 已把 m_valid 置 false，调用方应回退并销毁本对象
     }
     if (!createLayerTargets(m_overlay, "UI")) {
@@ -439,6 +598,28 @@ void SceneLayerHost::resize(QSize size) {
     // 换了渲染目标，两张纹理的内容都是新的（未定义），必须重画一次。
     m_scene.dirty = true;
     m_overlay.dirty = true;
+}
+
+void SceneLayerHost::requestSceneContent() {
+    if (!m_valid) {
+        return;
+    }
+    ++m_dirtyScene;
+    m_scene.dirty = true;
+    if (requestRender) {
+        requestRender();
+    }
+}
+
+void SceneLayerHost::requestOverlayContent() {
+    if (!m_valid) {
+        return;
+    }
+    ++m_dirtyOverlay;
+    m_overlay.dirty = true;
+    if (requestRender) {
+        requestRender();
+    }
 }
 
 QRhiTexture *SceneLayerHost::sceneTexture() const {
@@ -475,5 +656,6 @@ void SceneLayerHost::teardown() {
         layer->depthStencil = nullptr;
     }
     m_rhi = nullptr;
+    m_staticOnly = false;
     m_valid = false;
 }

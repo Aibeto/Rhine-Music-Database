@@ -12,12 +12,22 @@ async function main() {
         ['timed', '[00:01.00]第一句\n[00:03.50]第二句'],
         ['plain', '本地纯文本歌词'],
         ['invalid', 123],
+        ['korean', '[00:01.00]별빛을 따라 걷는 밤\n[00:02.00]우리의 노래'],
     ];
+    const encodingCases = require('./fixtures/lyrics-encodings.json');
+    for (const sample of encodingCases) {
+        cases.push([sample.name, { contentBase64: sample.base64 }]);
+    }
+    cases.push(['bad-base64', { contentBase64: '!!!!' }]);
+    cases.push(['utf8-fallback', { content: '[00:01.00]内嵌歌词', contentBase64: '//4AAAE=' }]);
+    const optionalCases = [];
     if (process.argv[3]) {
         const root = path.resolve(process.argv[3]);
         for (const file of fs.readdirSync(root, { recursive: true })) {
             if (path.extname(file).toLowerCase() === '.lrc') {
-                cases.push([file, fs.readFileSync(path.join(root, file), 'utf8')]);
+                const request = { contentBase64: fs.readFileSync(path.join(root, file)).toString('base64') };
+                cases.push([file, request]);
+                optionalCases.push(file);
             }
         }
     }
@@ -53,7 +63,12 @@ async function main() {
     });
     for (const [id, content] of cases) {
         child.stdin.write(
-            JSON.stringify({ id, route: '/local/lyrics', params: { content }, cookies: {} }) + '\n',
+            JSON.stringify({
+                id,
+                route: '/local/lyrics',
+                params: typeof content === 'object' ? content : { content },
+                cookies: {},
+            }) + '\n',
         );
     }
     try {
@@ -74,12 +89,31 @@ async function main() {
     );
     assert.equal(responses.get('plain').document.plainText, '本地纯文本歌词');
     assert.equal(responses.get('invalid').code, 400);
-    for (const [id] of cases.slice(3)) {
+    assert.equal(responses.get('korean').document.lines[0].text, '별빛을 따라 걷는 밤');
+    for (const sample of encodingCases) {
+        const result = responses.get(sample.name);
+        assert.equal(result.code, 200, sample.name);
+        assert.equal(
+            result.document.lines.length
+                ? result.document.lines.map((line) => line.text).join('\n')
+                : result.document.plainText,
+            sample.text.replace(/\[\d+:\d+\.\d+\]/g, '').trim(),
+            sample.name,
+        );
+    }
+    assert.equal(responses.get('bad-base64').code, 400);
+    assert.equal(responses.get('utf8-fallback').document.plainText, '内嵌歌词');
+    for (const id of optionalCases) {
         const result = responses.get(id);
         assert.equal(result.code, 200, id);
         assert.ok(result.document.lines.length || result.document.plainText, id);
     }
-    console.log('Local lyrics private IPC and existing parser passed; real files:', cases.length - 3);
+    console.log(
+        'Local lyrics private IPC passed; encoding fixtures:',
+        encodingCases.length,
+        'real files:',
+        optionalCases.length,
+    );
 }
 main().catch((error) => {
     console.error(error);

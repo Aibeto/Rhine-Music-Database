@@ -169,7 +169,7 @@ QJsonArray MusicLibrary::sourceItems(int lane) const {
 }
 
 QJsonArray MusicLibrary::libraryItems() const {
-    return directory ? directory->songs : sourceItems(selectedLane);
+    return directory ? directory->orderedSongs() : sourceItems(selectedLane);
 }
 
 int MusicLibrary::libraryTotal() const {
@@ -910,6 +910,21 @@ QJsonArray MusicLibrary::directoryQueue() const {
     QJsonArray ids;
     if (directory) {
         ids = directory->ids;
+        if (directory->sortField != "none") {
+            QJsonArray orderedIDs;
+            QSet<QString> loadedIDs;
+            for (const auto &song : directory->orderedSongs()) {
+                const auto id = song.toObject()["id"].toString();
+                orderedIDs.append(id);
+                loadedIDs.insert(id);
+            }
+            for (const auto &id : ids) {
+                if (!loadedIDs.contains(id.toString())) {
+                    orderedIDs.append(id);
+                }
+            }
+            ids = orderedIDs;
+        }
     } else if (selectedLane == 1 && likedIDs) {
         ids = *likedIDs;
     }

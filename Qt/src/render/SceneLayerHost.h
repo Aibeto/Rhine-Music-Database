@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QColor>
 #include <QSize>
 #include <QString>
 #include <QUrl>
@@ -47,6 +48,16 @@ class SceneLayerHost {
     bool start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
                QVulkanInstance *vulkanInstance = nullptr, QWindow *visibleWindow = nullptr);
 
+    /**
+     * 只建立 UI 层并载入一张静态页（性能模式挂起时使用）。
+     * 3D 层不创建、不渲染，sceneTexture() 返回空；overlayTexture() 即静态画面。
+     */
+    bool startStatic(QQmlEngine &engine, const QUrl &url, QRhi *rhi, QVulkanInstance *vulkanInstance = nullptr);
+
+    bool isStaticOnly() const {
+        return m_staticOnly;
+    }
+
     /** 两个场景各走一遍 polishItems → beginFrame → sync → render → endFrame。 */
     bool renderFrame();
     void releaseGraphics();
@@ -89,6 +100,10 @@ class SceneLayerHost {
     }
 
     /** 两层是否收到更新；各层在自己的渲染完成后独立清除标记。 */
+    /// 引擎侧内容真的变了，显式标脏（Qt 的更新信号在本工程里是噪音级频率，判不了脏）。
+    void requestSceneContent();
+    void requestOverlayContent();
+
     bool contentDirty() const {
         return m_scene.dirty || m_overlay.dirty;
     }
@@ -109,12 +124,43 @@ class SceneLayerHost {
     quint64 overlayRenderCount() const {
         return m_overlayRenders;
     }
+    /// 各层最近一次渲染的耗时（指数滑动平均，ms）。排障用：判断 17ms 的单帧
+    /// 到底花在 3D 层还是 UI 层，只有分开量才知道该优化哪一侧。
+    double sceneLayerMs() const {
+        return m_sceneLayerMs;
+    }
+    double overlayLayerMs() const {
+        return m_overlayLayerMs;
+    }
+    /// 3D 层三段分解（ms）：sync=同步场景图(CPU)、record=录制命令(CPU)、submit=提交并等 GPU。
+    double scenePolishMs() const {
+        return m_scene.polishMs;
+    }
+    double sceneBeginMs() const {
+        return m_scene.beginMs;
+    }
+    double sceneSyncMs() const {
+        return m_scene.syncMs;
+    }
+    double sceneRecordMs() const {
+        return m_scene.recordMs;
+    }
+    double sceneSubmitMs() const {
+        return m_scene.submitMs;
+    }
 
   private:
     struct Layer {
         std::unique_ptr<QQuickRenderControl> control;
         std::unique_ptr<QQuickWindow> window;
         bool dirty = true;
+        /// 单层渲染的三段耗时（指数滑动平均，ms）：sync 同步场景图（CPU）、
+        /// record 录制命令（CPU）、submit 提交并等 GPU（endFrame，含等待）。
+        double polishMs = 0.0;
+        double beginMs = 0.0;
+        double syncMs = 0.0;
+        double recordMs = 0.0;
+        double submitMs = 0.0;
         QQuickItem *rootItem = nullptr; // 由 window->contentItem() 持有，这里只观察
         QRhiTexture *texture = nullptr;
         QRhiRenderBuffer *depthStencil = nullptr;
@@ -125,6 +171,11 @@ class SceneLayerHost {
     bool fail(const QString &message);
     bool startInternal(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
                        QVulkanInstance *vulkanInstance);
+    bool startStaticInternal(QQmlEngine &engine, const QUrl &url, QRhi *rhi, QVulkanInstance *vulkanInstance);
+    /// 建立一层离屏窗口并接上 Qt 的更新信号；两层与静态模式共用。
+    bool createLayerWindow(Layer &layer, QRhi *rhi, QVulkanInstance *vulkanInstance, const QColor &clear,
+                           const char *name);
+    bool initializeLayer(Layer &layer, const char *name);
     bool createLayerTargets(Layer &layer, const char *name);
     void releaseLayerTargets(Layer &layer);
     bool loadLayer(Layer &layer, QQmlEngine &engine, const QUrl &url, const char *name);
@@ -134,6 +185,8 @@ class SceneLayerHost {
 
     Layer m_scene;
     Layer m_overlay;
+    /// 静态模式只有 UI 层；resize / 资源释放 / 渲染都必须跳过未建立的 3D 层。
+    bool m_staticOnly = false;
     QRhi *m_rhi = nullptr;
     QSize m_size;
     qreal m_ratio = 1.0;
@@ -141,6 +194,19 @@ class SceneLayerHost {
     QWindow *m_visibleWindow = nullptr;
     quint64 m_sceneRenders = 0;
     quint64 m_overlayRenders = 0;
+    /// 兜底置脏间隔（帧）：异步资源加载不一定发更新信号，靠它兜住可见性；
+    /// <=0 时恢复旧行为（每帧强制置脏）。默认 20 帧 ≈ 0.3s。
+    int m_safetyFrames = 20;
+    int m_safetyCountdown = 20;
+    /// 置脏来源计数（RHINE_LAYER_PROBE=1 时每 60 帧打印差分）
+    quint64 m_dirtyQt = 0;
+    quint64 m_dirtyScene = 0;
+    quint64 m_dirtyOverlay = 0;
+    quint64 m_dirtySafety = 0;
+    quint64 m_probeFrames = 0;
+    bool m_layerProbe = false;
+    double m_sceneLayerMs = 0.0;
+    double m_overlayLayerMs = 0.0;
     bool m_valid = false;
     bool m_suspended = false;
     QString m_lastError;

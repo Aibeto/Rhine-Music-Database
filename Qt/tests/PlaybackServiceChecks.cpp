@@ -1,0 +1,229 @@
+#include "PlaybackConnection.h"
+#include "DesktopPlaybackControls.h"
+#include <QAudioDevice>
+#include <QCoreApplication>
+#include <QCryptographicHash>
+#include <QDataStream>
+#include <QDir>
+#include <QDirIterator>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QMediaDevices>
+#include <QProcess>
+#include <QProcessEnvironment>
+#include <QTemporaryDir>
+#include <QThread>
+#include <QUrl>
+#include <functional>
+#include <memory>
+
+bool runWindowTransitionChecks();
+bool runEngineResumeChecks(const QString &resources);
+
+namespace {
+bool waitFor(const std::function<bool()> &ready, int timeoutMs = 10000) {
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (!ready() && elapsed.elapsed() < timeoutMs) {
+        QCoreApplication::processEvents();
+        QThread::msleep(5);
+    }
+    return ready();
+}
+
+/** 静音 PCM 避免测试打扰用户，真实时长与 EOF 仍经过 FFmpeg 和输出设备。 */
+bool writeWave(const QString &path) {
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        return false;
+    }
+    constexpr int sampleBytes = 8000 * 2 * 120;
+    QDataStream stream(&file);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    stream.writeRawData("RIFF", 4);
+    stream << quint32(36 + sampleBytes);
+    stream.writeRawData("WAVEfmt ", 8);
+    stream << quint32(16) << quint16(1) << quint16(1) << quint32(8000) << quint32(16000) << quint16(2)
+           << quint16(16);
+    stream.writeRawData("data", 4);
+    stream << quint32(sampleBytes);
+    return file.write(QByteArray(sampleBytes, '\0')) == sampleBytes;
+}
+}
+
+/**
+ * 用真实服务与 GUI 进程验证核心生命周期：
+ * 独立服务持有播放、GUI 可以挂接和崩溃、显式退出会回收服务。
+ * 所有数据和套接字均限定在本轮临时目录。
+ */
+bool runPlaybackServiceChecks(const QString &sourceResources, const QString &executable, const QString &gui) {
+    if (!runWindowTransitionChecks() || !runEngineResumeChecks(sourceResources)) {
+        return false;
+    }
+    QTemporaryDir directory;
+    if (!directory.isValid() || !writeWave(directory.path() + "/silence.wav")) {
+        return false;
+    }
+    // 恢复与跨进程用例只读取自身临时资源，不依赖终端的用户目录访问身份。
+    const auto resources = directory.path() + "/resources";
+    QDir().mkpath(resources);
+    for (const auto &file : QDir(sourceResources).entryInfoList(QDir::Files)) {
+        if (!QFile::copy(file.absoluteFilePath(), resources + '/' + file.fileName())) {
+            return false;
+        }
+    }
+    QDirIterator badges(sourceResources + "/quality", QDir::Files, QDirIterator::Subdirectories);
+    while (badges.hasNext()) {
+        const auto source = badges.next();
+        const auto target =
+            resources + "/quality/" + QDir(sourceResources + "/quality").relativeFilePath(source);
+        QDir().mkpath(QFileInfo(target).absolutePath());
+        if (!QFile::copy(source, target)) {
+            return false;
+        }
+    }
+    bool ok = true;
+    auto check = [&](bool condition, const char *message) {
+        if (!condition) {
+            qCritical() << "FAIL:" << message;
+            ok = false;
+        }
+    };
+    const auto scope = QDir(directory.path()).absoluteFilePath("data").toUtf8();
+    auto endpoint =
+        "rhine-playback-" +
+        QString::fromLatin1(QCryptographicHash::hash(scope, QCryptographicHash::Sha256).toHex().left(24));
+#ifndef Q_OS_WIN
+    endpoint.prepend("/tmp/");
+#endif
+    QProcess service;
+    service.setProcessChannelMode(QProcess::MergedChannels);
+    service.start(executable, {"--resources", resources, "--gui", gui, "--offline-test", directory.path()});
+    if (!service.waitForStarted()) {
+        qCritical() << service.errorString();
+        return false;
+    }
+    auto connection = std::make_unique<PlaybackConnection>();
+    if (!waitFor([&] { return connection->connectToService(endpoint, 50); })) {
+        qCritical() << "Playback service did not listen:" << service.readAll();
+        service.kill();
+        service.waitForFinished();
+        return false;
+    }
+    check(connection->call("hello")["protocol"] == PlaybackConnection::ProtocolVersion,
+          "real helper accepts IPC handshake");
+    check(connection->snapshot()["servicePid"].toInteger() == service.processId(),
+          "playback owner is the separate helper process");
+    connection->call("host.setProvider", {{"provider", "local"}});
+    connection->call("player.volume", {{"value", 0}});
+    connection->call("host.diagnostics", {{"enabled", true}});
+    QJsonArray queue;
+    for (int index = 0; index < 3; ++index) {
+        queue.append(QJsonObject{{"kind", "song"},
+                                 {"provider", "local"},
+                                 {"id", QString::number(index)},
+                                 {"title", "IPC fixture"},
+                                 {"path", directory.path() + "/silence.wav"},
+                                 {"url", QUrl::fromLocalFile(directory.path() + "/silence.wav").toString()}});
+    }
+    connection->call("player.play", {{"track", queue[0]}, {"source", queue}});
+    connection->call("player.mode", {{"value", "off"}});
+    const bool output = !QMediaDevices::defaultAudioOutput().isNull();
+    if (output) {
+        check(waitFor([&] {
+                  connection->call("hello");
+                  return connection->snapshot()["state"].toObject()["position"].toDouble() > 0;
+              }),
+              "service consumes real audio before GUI starts");
+    }
+    auto launchGui = [&](QProcess &process, const QStringList &extra) {
+        auto environment = QProcessEnvironment::systemEnvironment();
+        environment.insert("RHINE_RESOURCES", resources);
+#ifdef Q_OS_MACOS
+        // 测试控制器保持辅助身份，正常 GUI 仍沿用用户启动时的应用身份。
+        environment.remove("QT_MAC_DISABLE_FOREGROUND_APPLICATION_TRANSFORM");
+#endif
+        // 无显示服务器的默认测试不需要图形设备；真实 Metal 验收另外运行。
+        if (environment.value("QT_QPA_PLATFORM") == "offscreen") {
+            environment.insert("QT_QUICK_BACKEND", "software");
+        }
+        process.setProcessEnvironment(environment);
+        process.setProcessChannelMode(QProcess::MergedChannels);
+        process.start(gui, QStringList{"--playback-gui-test", directory.path()} + extra);
+    };
+    QProcess panel;
+    launchGui(panel, {});
+    QByteArray panelLog;
+    const bool panelReady =
+        panel.waitForStarted() && waitFor([&] {
+            panelLog += panel.readAll();
+            return panelLog.contains("PLAYBACK_GUI_READY") || panel.state() == QProcess::NotRunning;
+        }) &&
+        panelLog.contains("PLAYBACK_GUI_READY");
+    check(panelReady, "real persistent GUI starts");
+    if (!panelReady) {
+        panelLog += panel.readAll();
+        qCritical() << "GUI process state:" << panel.state() << "exit status:" << panel.exitStatus()
+                    << "exit code:" << panel.exitCode() << "error:" << panel.errorString();
+        qCritical().noquote() << panelLog;
+    }
+    check(waitFor([&] {
+              connection->call("hello");
+              return connection->snapshot()["interfaceConnected"].toBool() &&
+                     connection->snapshot()["interfacePid"].toInteger() == panel.processId();
+          }),
+          "GUI attaches to the playback service");
+    // 模拟 GUI 崩溃仍只结束本轮启动的界面，服务和音频应继续。
+    panel.kill();
+    panel.waitForFinished();
+    check(waitFor([&] {
+              connection->call("hello");
+              return !connection->snapshot()["interfaceConnected"].toBool();
+          }),
+          "audio service observes GUI crash without exiting");
+    if (output) {
+        // 渲染引擎已随 GUI 退出，任务栏控制仍须能直接驱动后台服务。
+        DesktopPlaybackControls controls(resources, connection.get());
+        check(waitFor([&] { return controls.state()["canPlay"].toBool(); }),
+              "taskbar controls remain available without the GUI engine");
+        controls.trigger("toggle");
+        check(waitFor([&] {
+                  connection->call("hello");
+                  return !connection->snapshot()["state"].toObject()["requested"].toBool();
+              }),
+              "taskbar pause reaches the service after GUI crash");
+        controls.trigger("toggle");
+        check(waitFor([&] {
+                  connection->call("hello");
+                  return connection->snapshot()["state"].toObject()["requested"].toBool();
+              }),
+              "taskbar resume reaches the service after GUI crash");
+    } else {
+        connection->call("player.pause", {{"paused", true}});
+        check(!connection->snapshot()["state"].toObject()["requested"].toBool(),
+              "pause remains available without an audio device");
+    }
+    QProcess exitInterface;
+    launchGui(exitInterface, {"--playback-test-quit"});
+    check(exitInterface.waitForStarted() && exitInterface.waitForFinished(10000) &&
+              exitInterface.exitCode() == 0,
+          "explicit GUI quit exits the interface");
+    if (exitInterface.state() != QProcess::NotRunning) {
+        exitInterface.kill();
+        exitInterface.waitForFinished();
+    }
+    check(service.waitForFinished(10000) && service.exitCode() == 0,
+          "explicit quit stops helper and playback");
+    if (service.state() != QProcess::NotRunning) {
+        service.kill();
+        service.waitForFinished();
+    }
+    if (!ok) {
+        qCritical().noquote() << service.readAll();
+        qCritical().noquote() << panelLog;
+    }
+    qInfo() << "Independent playback service and persistent window:" << ok;
+    return ok;
+}

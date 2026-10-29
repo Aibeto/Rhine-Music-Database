@@ -1,9 +1,10 @@
 #include "RhiScene.h"
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
 #include "render/MetalFxBackend.h"
 #endif
 #include "render/MotionPass.h"
 #include "render/ScenePostProcess.h"
+#include "fg/FgFrameTap.h"
 #include "fg/FgCapability.h"
 #include <cstdio>
 #include "DiscGeometry.h"
@@ -49,6 +50,8 @@ struct Globals {
     PackedMatrix emitterInverse;
     QVector4D opticalLight;
     QVector4D emissionColor;
+    PackedMatrix previousViewProjection;
+    PackedMatrix currentViewProjection;
 };
 struct Surface {
     QVector4D color, physical, optics, attenuation, extra, flags, darkColor, emission;
@@ -56,10 +59,12 @@ struct Surface {
 struct Instance {
     PackedMatrix model;
     QVector4D state;
+    // 上一帧模型矩阵：运动矢量随主渲染同一趟输出，不再需要第二趟几何。
+    PackedMatrix previousModel;
 };
-static_assert(sizeof(Globals) == 704);
+static_assert(sizeof(Globals) == 832);
 static_assert(sizeof(Surface) == 128);
-static_assert(sizeof(Instance) == 80);
+static_assert(sizeof(Instance) == 144);
 // 与主渲染路径一致：封面最高 1024²，带 mip 后单张约 5.3 MiB，预算需按此放宽。
 static constexpr qint64 MUSIC_TEXTURE_BUDGET_BYTES = 64 * 1024 * 1024;
 static QMatrix4x4 matrix(QJsonArray a, int offset = 0) {
@@ -109,8 +114,10 @@ struct Target {
 };
 class Renderer {
   public:
+    // 映射的烘焙输入随渲染器释放，避免大块只读图集进入进程堆缓存。
+    std::vector<std::unique_ptr<QFile>> mappedAtlases;
     QRhi *rhi;
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     RhineRender::Settings settings;
     QJsonObject temporalFrame;
     RhineFg::FrameInputs *frameInputs = nullptr;
@@ -119,7 +126,7 @@ class Renderer {
     QRhiTexture *postColor = nullptr;
 #endif
     std::unique_ptr<RhineRender::MotionPass> motion;
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
     std::unique_ptr<RhineRender::ScenePostProcess> postProcess;
     RhineFg::FrameInputs motionInputs;
 #endif
@@ -160,6 +167,18 @@ class Renderer {
         quint64 used = 0;
     };
     QHash<int, BufferState> instances;
+    // 运动矢量 MRT 所需的上一帧状态：逐 draw 的实例矩阵与上一帧 VP。
+    QHash<int, QByteArray> previousInstanceMatrices;
+    QMatrix4x4 previousViewProjection;
+    QElapsedTimer frameClock;
+    bool motionHistoryValid = false;
+    QRhiTexture *motionVectors = nullptr;
+    // 重投影插帧探针（RHINE_WARP_PROBE=1）：把当前场景颜色按运动矢量前推到 t 相位。
+    // 与 FFX 插值不同，相位 t 可任意取（FFX 硬编码 0.5），且不需要第二趟几何。
+    Target warp;
+    QRhiShaderResourceBindings *warpBinding = nullptr;
+    QRhiTexture *warpSource = nullptr;
+    QRhiTexture *warpVectors = nullptr;
     QHash<QString, MaterialState> materials;
     QHash<QString, QRhiShaderResourceBindings *> postBindings;
     QHash<QString, QString> labelRevisions;
@@ -210,6 +229,20 @@ class Renderer {
                          bool resize = false) {
         return create(own(rhi->newTexture(format, s, 1, flags), resize));
     }
+    QByteArray mapAtlas(const QString &name) {
+        auto file = std::make_unique<QFile>(root + "/" + name);
+        if (file->open(QIODevice::ReadOnly)) {
+            const auto size = file->size();
+            if (const auto address = file->map(0, size)) {
+                const auto bytes = QByteArray::fromRawData(reinterpret_cast<const char *>(address), size);
+                mappedAtlases.push_back(std::move(file));
+                return bytes;
+            }
+        }
+        // 不支持文件映射的平台仍沿用原读取路径，上传字节和格式保持一致。
+        return read(root, name);
+    }
+
     void upload(QRhiTexture *t, QByteArray bytes) {
         QRhiTextureSubresourceUploadDescription data(bytes);
         updates->uploadTexture(t, QRhiTextureUploadDescription({QRhiTextureUploadEntry(0, 0, data)}));
@@ -234,7 +267,7 @@ class Renderer {
         updates->uploadTexture(target, description);
     }
     Renderer(QString path, QRhi *device) : rhi(device), root(path) {
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         postProcess = std::make_unique<RhineRender::ScenePostProcess>(rhi);
 #endif
         updates = rhi->nextResourceUpdateBatch();
@@ -258,11 +291,11 @@ class Renderer {
         // 曲目标签与封面由 CPU 逐层上传 mip 链，采样需要三线性。
         mipSampler = sampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::ClampToEdge);
         surfaceAtlas = texture({2304, 768}, QRhiTexture::RGBA16F);
-        upload(surfaceAtlas, read(root, "archive-baked-surface.bin"));
+        upload(surfaceAtlas, mapAtlas("archive-baked-surface.bin"));
         lightAtlas = texture({768, 1024}, QRhiTexture::RGBA16F);
-        upload(lightAtlas, read(root, "archive-baked-light.bin"));
+        upload(lightAtlas, mapAtlas("archive-baked-light.bin"));
         normalAtlas = texture({128, 256}, QRhiTexture::RGBA16F);
-        upload(normalAtlas, read(root, "archive-baked-normal.bin"));
+        upload(normalAtlas, mapAtlas("archive-baked-normal.bin"));
         white = texture({1, 1}, QRhiTexture::RGBA8);
         upload(white, QByteArray(4, char(255)));
         floor = plane(-100, -100, 100, 100, 0, 0, 0, 0, 0);
@@ -363,14 +396,20 @@ class Renderer {
         return buffer(QByteArray(reinterpret_cast<const char *>(vertices.data()), vertices.size() * 4),
                       QRhiBuffer::VertexBuffer);
     }
-    Target makeTarget(QRhiTexture *texture, QRhiTexture *depth = nullptr, QRhiTexture *resolve = nullptr) {
+    Target makeTarget(QRhiTexture *texture, QRhiTexture *depth = nullptr, QRhiTexture *resolve = nullptr,
+                      QRhiTexture *vectors = nullptr) {
         QRhiTextureRenderTargetDescription desc;
         if (texture) {
             QRhiColorAttachment attachment(texture);
             if (resolve) {
                 attachment.setResolveTexture(resolve);
             }
-            desc.setColorAttachments({attachment});
+            if (vectors) {
+                // 第二颜色附件：运动矢量与颜色同一趟栅格化输出。
+                desc.setColorAttachments({attachment, QRhiColorAttachment(vectors)});
+            } else {
+                desc.setColorAttachments({attachment});
+            }
         }
         desc.setDepthTexture(depth);
         auto rt = own(rhi->newTextureRenderTarget(desc), true);
@@ -394,13 +433,13 @@ class Renderer {
             retire(binding);
         }
         postBindings.clear();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         postColor = nullptr;
 #endif
     }
     /** 仅分配颜色和深度；烘焙增强不创建实时透射、阴影、AO、景深或光晕目标。 */
     void resize(QSize value, bool needsReadbackTarget) {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         const auto nextSize = settings.renderSize(value);
         if (viewSize == value && size == nextSize) {
             return;
@@ -427,7 +466,13 @@ class Renderer {
         auto attachment =
             create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, sampleCount, rtFlags), true));
         auto resolved = sampleCount > 1 ? texture(size, QRhiTexture::RGBA16F, rtFlags, true) : nullptr;
-        color = makeTarget(attachment, depth, resolved);
+        // 单采样时额外挂一张运动矢量目标，供插帧/时域直接读取，省掉第二趟几何。
+        // 注意：OpenGL 后端只有一个 draw buffer，片元着色器必须改用不带 location=1 的变体
+        // （opticalSurfaceNoMrt.frag），见 pipeline()。附件本身两个后端都挂着。
+        motionVectors = sampleCount > 1
+                            ? nullptr
+                            : create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1, rtFlags), true));
+        color = makeTarget(attachment, depth, resolved, motionVectors);
         target = {};
         if (needsReadbackTarget) {
             // 读回目标固定为窗口尺寸：超采样只放大内部目标，合成通道按目标像素尺寸缩回。
@@ -439,7 +484,7 @@ class Renderer {
     Globals globals(QJsonObject f) {
         auto projection = matrix(f["projection"].toArray());
         const auto jitter = f["jitter"].toArray();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         const bool temporal = settings.temporal();
 #else
         const bool temporal = postProcess->temporal();
@@ -757,11 +802,17 @@ class Renderer {
         }
         auto p = own(rhi->newGraphicsPipeline(), true);
         const bool geo = kind == "surface";
+        // OpenGL 后端：场景目标只有一个 draw buffer，片元着色器不能声明 location=1 的第二个输出，
+        // 否则驱动会丢弃整块 fragment 结果（实测 3D 层全黑）。Vulkan 走 MRT 单趟。
+        const bool surfaceMrt = geo && motionVectors != nullptr &&
+                                rhi->backend() != QRhi::OpenGLES2;
+        const QString fragmentName =
+            (geo && !surfaceMrt) ? QStringLiteral("surfaceNoMrt") : kind;
         p->setShaderStages({{QRhiShaderStage::Vertex, shader(geo ? "geometry.vert" : "quad.vert")},
-                            {QRhiShaderStage::Fragment, shader(kind + ".frag")}});
+                            {QRhiShaderStage::Fragment, shader(fragmentName + ".frag")}});
         if (geo) {
             QRhiVertexInputLayout layout;
-            layout.setBindings({{32}, {80, QRhiVertexInputBinding::PerInstance}});
+            layout.setBindings({{32}, {144, QRhiVertexInputBinding::PerInstance}});
             layout.setAttributes({{0, 0, QRhiVertexInputAttribute::Float3, 0},
                                   {0, 1, QRhiVertexInputAttribute::Float3, 12},
                                   {0, 2, QRhiVertexInputAttribute::Float2, 24},
@@ -769,7 +820,11 @@ class Renderer {
                                   {1, 4, QRhiVertexInputAttribute::Float4, 16},
                                   {1, 5, QRhiVertexInputAttribute::Float4, 32},
                                   {1, 6, QRhiVertexInputAttribute::Float4, 48},
-                                  {1, 7, QRhiVertexInputAttribute::Float4, 64}});
+                                  {1, 7, QRhiVertexInputAttribute::Float4, 64},
+                                  {1, 8, QRhiVertexInputAttribute::Float4, 80},
+                                  {1, 9, QRhiVertexInputAttribute::Float4, 96},
+                                  {1, 10, QRhiVertexInputAttribute::Float4, 112},
+                                  {1, 11, QRhiVertexInputAttribute::Float4, 128}});
             p->setVertexInputLayout(layout);
             p->setDepthTest(true);
             p->setDepthWrite(depthWrite);
@@ -787,7 +842,13 @@ class Renderer {
             b.srcAlpha = QRhiGraphicsPipeline::One;
             b.dstAlpha = QRhiGraphicsPipeline::OneMinusSrcAlpha;
         }
-        p->setTargetBlends({b});
+        // MRT：场景目标除颜色外还挂着运动矢量附件，必须为**每个**颜色附件声明 blend。
+        // 只声明一个时 location=1 的写出会被静默丢弃（表现为运动矢量恒为 0）。
+        if (surfaceMrt) {
+            p->setTargetBlends({b, QRhiGraphicsPipeline::TargetBlend{}});
+        } else {
+            p->setTargetBlends({b});
+        }
         if (!pipelineLayouts.contains(kind)) {
             auto layout = own(rhi->newShaderResourceBindings(), true);
             const auto stages =
@@ -868,6 +929,19 @@ class Renderer {
             return state.buffer;
         }
         const auto matrices = matrixBytes(draw);
+        // 上一帧实例按平移列配对：列表滚动后顺序会变，按索引直接配对会给出错误速度。
+        QHash<QByteArray, int> previousTranslations;
+        const auto previousBytes = previousInstanceMatrices.value(draw["id"].toInt());
+        for (int index = 0; (index + 1) * 64 <= previousBytes.size(); ++index) {
+            previousTranslations.insert(previousBytes.mid(index * 64 + 48, 16), index);
+        }
+        QHash<int, int> previousMatched;
+        for (int index = 0; (index + 1) * 64 <= matrices.size(); ++index) {
+            const int match = previousTranslations.value(matrices.mid(index * 64 + 48, 16), -1);
+            if (match >= 0) {
+                previousMatched.insert(index, match);
+            }
+        }
         const auto native = nativeBuffers.value(draw["id"].toInt());
         const auto themes = draw["themes"].toArray();
         std::vector<Instance> values;
@@ -887,6 +961,14 @@ class Renderer {
             // 详情页背景仍是实例化的唱片墙，若按整帧置位会把这些卡片一起改掉。
             const bool hero = detailMode && !draw["instanced"].toBool();
             value.state = {n(draw, "quality"), n(draw, "clarity"), theme, hero ? 1.f : 0.f};
+            value.previousModel = PackedMatrix();
+            const auto previous = previousInstanceMatrices.value(draw["id"].toInt());
+            const int previousIndex = previousMatched.value(i, -1);
+            if (previousIndex >= 0 && (previousIndex + 1) * 64 <= previous.size()) {
+                memcpy(value.previousModel.elements, previous.constData() + previousIndex * 64, 64);
+            } else if ((i + 1) * 64 <= matrices.size()) {
+                memcpy(value.previousModel.elements, matrices.constData() + i * 64, 64);
+            }
             values.push_back(value);
         }
         const QByteArray bytes(reinterpret_cast<const char *>(values.data()),
@@ -901,6 +983,8 @@ class Renderer {
         int start;
         int count;
         QRhiShaderResourceBindings *bindings;
+        // arena 内偏移；instances 为 nullptr 时生效（0 也合法，表示 arena 起点）。
+        int instanceOffset = 0;
     };
     QList<Draw> prepare(const QList<QJsonObject> &draws, bool decorationHigh) {
         QList<Draw> result;
@@ -1049,6 +1133,14 @@ class Renderer {
         return result;
     }
     void geometry(QRhiCommandBuffer *cb, const QList<Draw> &draws) {
+        // 先把每个 draw 的 pipeline 算出来（纯函数、无副作用），再按状态分组。
+        struct Item {
+            const Draw *draw;
+            QRhiGraphicsPipeline *pass;
+            bool transparent;
+        };
+        QList<Item> items;
+        items.reserve(draws.size());
         for (const auto &draw : draws) {
             const auto &data = draw.data;
             if (data["shadowOnly"].toBool()) {
@@ -1057,10 +1149,49 @@ class Renderer {
             const bool hashed = surface(data).flags.x() == 2;
             const bool blend = hashed || data["transparent"].toBool();
             const bool depthWrite = hashed || !blend || data["depthWrite"].toBool();
-            cb->setGraphicsPipeline(pipeline("surface", draw.bindings, color.rp, false,
-                                             data["side"].toInt() == 2, depthWrite, blend));
-            cb->setShaderResources(draw.bindings);
-            cb->setViewport({0, 0, float(size.width()), float(size.height())});
+            auto *pass = pipeline("surface", draw.bindings, color.rp, false,
+                                  data["side"].toInt() == 2, depthWrite, blend);
+            items.append({&draw, pass, data["transparent"].toBool()});
+        }
+        // 不透明段按 pipeline 稳定排序（同 pipeline 内保持原顺序）；透明段原样接在后面。
+        // 两段分段处理保证透明物体的混合顺序与改动前完全一致。
+        std::stable_sort(items.begin(), items.end(), [](const Item &a, const Item &b) {
+            if (a.transparent != b.transparent) {
+                return !a.transparent;  // 不透明在前
+            }
+            if (a.transparent) {
+                return false;  // 透明段保持原序（stable_sort 下相等即不改顺序）
+            }
+            return reinterpret_cast<quintptr>(a.pass) < reinterpret_cast<quintptr>(b.pass);
+        });
+        const QRhiViewport viewport{0, 0, float(size.width()), float(size.height())};
+        bool viewportSet = false;
+        QRhiGraphicsPipeline *boundPass = nullptr;
+        QRhiShaderResourceBindings *boundBindings = nullptr;
+        int pipelineBinds = 0, bindingsBinds = 0, viewportSets = 0;
+        for (const auto &item : items) {
+            const auto &draw = *item.draw;
+            const auto &data = draw.data;
+            if (item.pass != boundPass) {
+                cb->setGraphicsPipeline(item.pass);
+                ++pipelineBinds;
+                boundPass = item.pass;
+                // 视口是动态状态，绑定新 pipeline 后必须重设一次；同一 pipeline 连续绘制时
+                // 尺寸不会变，不必每 draw 都调（原来每 draw 一次是纯浪费）。
+                cb->setViewport(viewport);
+                ++viewportSets;
+                viewportSet = true;
+            } else if (!viewportSet) {
+                cb->setViewport(viewport);
+                ++viewportSets;
+                viewportSet = true;
+            }
+            if (draw.bindings != boundBindings) {
+                cb->setShaderResources(draw.bindings);
+                ++bindingsBinds;
+                boundBindings = draw.bindings;
+            }
+            // 实例数据来自 arena 时用 offset 寻址；否则回落到 draw 自带的 buffer。
             const QRhiCommandBuffer::VertexInput inputs[] = {{draw.vertices, 0}, {draw.instances, 0}};
             cb->setVertexInput(0, 2, inputs, draw.indices, 0, QRhiCommandBuffer::IndexUInt32);
             if (draw.indices) {
@@ -1070,15 +1201,74 @@ class Renderer {
             }
             ++drawCalls;
         }
+        // 排障：状态重绑次数（RHINE_DRAW_PROBE=1，每 120 帧一次）。
+        static const bool drawProbe = qEnvironmentVariableIntValue("RHINE_DRAW_PROBE") == 1;
+        static int probeCounter = 0;
+        if (drawProbe && (++probeCounter % 120) == 0) {
+            qInfo().noquote() << "绘制探针: draw" << items.size() << "| pipeline 绑定" << pipelineBinds
+                              << "| srb 绑定" << bindingsBinds << "| viewport 设置" << viewportSets
+                              << "| 实例buffer" << instances.size() << "| 批次buffer" << batchInstances.size();
+        }
+    }
+    /** 重投影中间帧探针：用主渲染 MRT 产出的运动矢量把当前场景颜色前推到 t 相位，
+     *  零额外几何、相位可任意取，用来评估自研 4 倍插帧的成本与画面质量。 */
+    /** 重投影中间帧：用主渲染 MRT 产出的运动矢量把当前场景颜色回看到 t 相位，
+     *  零额外几何。相位走多份烘焙变体而不是 uniform——本机 Intel ANV 驱动在
+     *  同一管线同时绑定两个 std140 uniform block 时会在建管线阶段 SIGFPE。 */
+    void warpFrame(QRhiCommandBuffer *cb, QRhiTexture *source) {
+        if (!qEnvironmentVariableIsSet("RHINE_WARP_PROBE") || !source || !motionVectors ||
+            size.isEmpty()) {
+            return;
+        }
+        // 目标与绑定都按「尺寸 / 输入纹理」变化重建：场景目标在 resize 时会被换掉，
+        // 绑定里残留的旧指针会直接崩，所以显式比对三个输入。
+        const bool sizeChanged = !warp.texture || warp.texture->pixelSize() != size;
+        if (sizeChanged) {
+            warp.texture = create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1,
+                                                      QRhiTexture::RenderTarget)));
+            warp.rt = own(rhi->newTextureRenderTarget({QRhiColorAttachment(warp.texture)}));
+            auto descriptor = own(warp.rt->newCompatibleRenderPassDescriptor());
+            warp.rt->setRenderPassDescriptor(descriptor);
+            create(warp.rt);
+            warp.rp = warp.rt->renderPassDescriptor();
+            qWarning("重投影探针: 目标 %dx%d", size.width(), size.height());
+        }
+        if (sizeChanged || warpSource != source || warpVectors != motionVectors) {
+            const auto stages = QRhiShaderResourceBinding::VertexStage |
+                                QRhiShaderResourceBinding::FragmentStage;
+            warpBinding = bindings(
+                {QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer),
+                 QRhiShaderResourceBinding::sampledTexture(
+                     2, QRhiShaderResourceBinding::FragmentStage, source, linear),
+                 QRhiShaderResourceBinding::sampledTexture(
+                     3, QRhiShaderResourceBinding::FragmentStage, motionVectors, linear)});
+            warpSource = source;
+            warpVectors = motionVectors;
+        }
+        const auto phase = qEnvironmentVariableIsSet("RHINE_WARP_T")
+                               ? QString::fromLocal8Bit(qgetenv("RHINE_WARP_T"))
+                               : QStringLiteral("0.5");
+        const QString kind = phase == "0.25"   ? QStringLiteral("warpEarly")
+                             : phase == "0.75" ? QStringLiteral("warpLate")
+                             : phase == "debug" ? QStringLiteral("warpDebug")
+                                                : QStringLiteral("warp");
+        auto *pass = pipeline(kind, warpBinding, warp.rp);
+        cb->beginPass(warp.rt, Qt::black, {1, 0});
+        cb->setGraphicsPipeline(pass);
+        cb->setShaderResources(warpBinding);
+        cb->setViewport({0, 0, float(size.width()), float(size.height())});
+        cb->draw(3);
+        ++drawCalls;
+        cb->endPass();
     }
     void composite(QRhiCommandBuffer *cb, QRhiRenderTarget *destination) {
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         auto finalDestination = destination;
         if (postProcess->active()) {
             destination = postProcess->inputTarget();
         }
 #endif
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         QRhiTexture *sceneColor = color.texture;
         implementation = QStringLiteral("off");
         if (settings.temporal()) {
@@ -1102,10 +1292,15 @@ class Renderer {
             postColor = sceneColor;
         }
 #endif
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         auto &binding = postBindings["final/" + QString::number(quintptr(sceneColor))];
 #else
-        auto &binding = postBindings["final"];
+        // RHINE_WARP_SHOW=1 时最终合成改读重投影结果，用于肉眼判断拉丝。
+        const bool showWarp = qEnvironmentVariableIsSet("RHINE_WARP_SHOW") && warp.texture &&
+                              qEnvironmentVariableIsSet("RHINE_WARP_PROBE");
+        auto &binding = postBindings[showWarp
+                                         ? "final/warp/" + QString::number(quintptr(warp.texture))
+                                         : QStringLiteral("final")];
 #endif
         if (!binding) {
             const auto stages =
@@ -1113,13 +1308,17 @@ class Renderer {
             binding = bindings(
                 {QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer),
                  QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
                                                            sceneColor,
 #else
-                                                           color.texture,
+                                                           showWarp ? warp.texture : color.texture,
 #endif
                                                            linear)});
         }
+#ifndef Q_OS_DARWIN
+        // 探针：最终合成前先产出一张重投影中间帧（默认关闭，RHINE_WARP_PROBE=1 才走）。
+        warpFrame(cb, color.texture);
+#endif
         cb->beginPass(destination, Qt::black, {1, 0});
         cb->setGraphicsPipeline(pipeline("finalFragment", binding, destination->renderPassDescriptor()));
         cb->setShaderResources(binding);
@@ -1128,15 +1327,38 @@ class Renderer {
         cb->draw(3);
         ++drawCalls;
         cb->endPass();
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         if (postProcess->active()) {
             postProcess->resolve(cb, finalDestination, motionInputs);
         }
 #endif
     }
+    /** 主渲染已经输出运动矢量，这里只把本帧输入交给 FG 宿主（不再有第二趟几何）。 */
+    void publishMotionInputs(const QJsonObject &frame) {
+        RhineFg::FrameInputs inputs;
+        inputs.depth = depth;
+        inputs.motionVectors = motionVectors;
+        inputs.renderSize = size;
+        inputs.displaySize = viewSize;
+        const auto jitter = frame["jitter"].toArray();
+        inputs.jitter =
+            jitter.size() == 2 ? QPointF(jitter[0].toDouble(), jitter[1].toDouble()) : QPointF();
+        inputs.reset = frame["temporalReset"].toBool();
+        inputs.frameTimeMs = frameClock.isValid() ? float(frameClock.nsecsElapsed()) / 1e6f : 16.6667f;
+        frameClock.start();
+        const auto projection = matrix(frame["projection"].toArray());
+        const float c = projection(2, 2);
+        const float translation = projection(2, 3);
+        if (std::abs(c - 1.f) > 1e-6f && std::abs(c + 1.f) > 1e-6f) {
+            inputs.nearPlane = translation / (c - 1.f);
+            inputs.farPlane = translation / (c + 1.f);
+        }
+        inputs.fovYRadians = 2.f * std::atan(1.f / projection(1, 1));
+        RhineFg::publish(inputs);
+    }
     /** 同一份几何生成深度和运动矢量，供时域处理与呈现层使用。 */
     void velocityPass(QRhiCommandBuffer *cb, const QList<Draw> &draws, const QJsonObject &frame) {
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         const bool required =
             settings.temporal() || (settings.interpolation && RhineFg::capability().interpolationAvailable);
 #else
@@ -1166,7 +1388,7 @@ class Renderer {
                            draw.count, data["count"].toInt(), data["side"].toInt() == 2});
         }
         motion->render(cb, size, frame, inputs, frameInputs, viewSize);
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         RhineFg::publish(motionInputs);
 #endif
     }
@@ -1177,7 +1399,7 @@ class Renderer {
     void render(QRhiCommandBuffer *cb, QJsonObject frame, QSize dimensions, QJsonObject item, QImage cover,
                 QRhiRenderTarget *finalTarget = nullptr, const Engine::MusicTextures &musicTextures = {}) {
         transient.clear();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         temporalFrame = frame;
 #endif
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
@@ -1188,12 +1410,22 @@ class Renderer {
             updates = rhi->nextResourceUpdateBatch();
         }
         resize(dimensions, !finalTarget);
-#ifndef Q_OS_MACOS
+        QElapsedTimer dbgPre;
+        dbgPre.start();
+#ifndef Q_OS_DARWIN
         postProcess->prepare(size, viewSize, frame);
 #endif
+        const double dbgPostMs = double(dbgPre.nsecsElapsed()) / 1e6;
+        dbgPre.restart();
         auto g = globals(frame);
+        // 速度用未抖动 VP（光栅位置仍带抖动），口径与 motion.vert 一致。
+        const auto unjitteredVp = matrix(frame["view"].toArray()) * matrix(frame["projection"].toArray());
+        g.currentViewProjection = PackedMatrix(unjitteredVp);
+        g.previousViewProjection =
+            motionHistoryValid ? PackedMatrix(previousViewProjection) : PackedMatrix(unjitteredVp);
         updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
         ++generation;
+        // 每帧重置 arena：实例数据按帧重建，偏移从 0 开始。
         activeTextureKeys.clear();
         activeTextureKeys.insert(item["key"].toString("empty"));
         for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
@@ -1206,10 +1438,19 @@ class Renderer {
             }
         }
         updateMusic(item, cover);
+        const double dbgTexMs = double(dbgPre.nsecsElapsed()) / 1e6;
+        dbgPre.restart();
         detailMode = frame["mode"].toString() == "detail" || frame["viewer"].toBool();
         auto draws = musicDraws(frame);
         // 保留可见与归位唱片资源，复用材质绑定和实例缓冲。
         auto data = prepare(draws, frame["mode"].toString() == "detail");
+        const double dbgListMs = double(dbgPre.nsecsElapsed()) / 1e6;
+        // 排障计时：把"构建 draw 列表"与"命令录制"分开量，只统计不改行为。
+        static QElapsedTimer dbgClock;
+        static double dbgBuild = 0, dbgRecord = 0;
+        static double dbgPostSum = 0, dbgTexSum = 0, dbgListSum = 0;
+        static int dbgFrames = 0;
+        dbgClock.start();
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
             for (const auto &draw : data) {
                 std::fprintf(
@@ -1250,9 +1491,30 @@ class Renderer {
             }
         }
         const auto sort = [](auto &draws) {
-            std::stable_sort(draws.begin(), draws.end(), [](const auto &first, const auto &second) {
-                return first.data["order"].toInt() < second.data["order"].toInt();
+            if (draws.size() < 2) {
+                return;
+            }
+            // order 预取：原实现把 QJsonObject 查找放进比较器，每次比较做两次哈希查找，
+            // n log n 次比较就是几千次/帧。这里每个 draw 只查一次，再按索引稳定排序。
+            QList<int> keys;
+            keys.reserve(draws.size());
+            for (const auto &draw : draws) {
+                keys.append(draw.data["order"].toInt());
+            }
+            QList<int> order;
+            order.resize(draws.size());
+            for (int i = 0; i < order.size(); ++i) {
+                order[i] = i;
+            }
+            std::stable_sort(order.begin(), order.end(), [&keys](int first, int second) {
+                return keys[first] < keys[second];
             });
+            QList<Draw> sorted;
+            sorted.reserve(draws.size());
+            for (int index : order) {
+                sorted.append(draws[index]);
+            }
+            draws = sorted;
         };
         sort(opaque);
         sort(transparent);
@@ -1267,19 +1529,47 @@ class Renderer {
                 ++it;
             }
         }
+        const QRhiBuffer *arenaBuffer = nullptr;
         cb->resourceUpdate(updates);
         updates = nullptr;
         const auto background = vector(frame["background"]);
         cb->beginPass(color.rt, QColor::fromRgbF(background.x(), background.y(), background.z()), {1, 0});
+        const double dbgBuildMs = double(dbgClock.nsecsElapsed()) / 1e6;
+        QElapsedTimer dbgRecordClock;
+        dbgRecordClock.start();
         geometry(cb, opaque);
         geometry(cb, transparent);
+        dbgPostSum += dbgPostMs;
+        dbgTexSum += dbgTexMs;
+        dbgListSum += dbgListMs;
+        dbgBuild += dbgBuildMs;
+        dbgRecord += double(dbgRecordClock.nsecsElapsed()) / 1e6;
+        if (++dbgFrames >= 20 && qEnvironmentVariableIsSet("RHINE_FG_DIAG")) {
+            qWarning("3D内部: 后处理 %.1f  纹理 %.1f  draw列表 %.1f  构建 %.1f  录制 %.1f ms (%d 帧均值)",
+                     dbgPostSum / dbgFrames, dbgTexSum / dbgFrames, dbgListSum / dbgFrames,
+                     dbgBuild / dbgFrames, dbgRecord / dbgFrames, dbgFrames);
+            dbgBuild = dbgRecord = 0;
+            dbgPostSum = dbgTexSum = dbgListSum = 0;
+            dbgFrames = 0;
+        }
         cb->endPass();
-        velocityPass(cb, data, frame);
+        // 运动矢量已随主渲染输出（MRT），这里只发布输入并保存上一帧状态。
+        publishMotionInputs(frame);
+        previousViewProjection = unjitteredVp;
+        previousInstanceMatrices.clear();
+        for (const auto &draw : data) {
+            previousInstanceMatrices.insert(draw.data["id"].toInt(), matrixBytes(draw.data));
+        }
+        motionHistoryValid = true;
         composite(cb, finalTarget ? finalTarget : target.rt);
     }
 };
 class ItemRenderer : public QQuickRhiItemRenderer {
     Engine *backend = nullptr;
+#ifdef Q_OS_DARWIN
+    QRhi *capabilityDevice = nullptr;
+    Engine *capabilityEngine = nullptr;
+#endif
     std::unique_ptr<Renderer> renderer;
     QJsonObject frame, item;
     SceneDrawBuffers buffers;
@@ -1298,6 +1588,15 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         auto engine = scene->engine();
         backend = engine;
         if (engine) {
+#ifdef Q_OS_DARWIN
+            if (rhi() && (capabilityDevice != rhi() || capabilityEngine != engine)) {
+                const bool temporalAvailable = RhineRender::MetalFxTemporal::supported(rhi());
+                engine->renderConfiguration.setNativeTemporalAvailable(temporalAvailable);
+                RhineFg::capabilityMutable().temporalAvailable = temporalAvailable;
+                capabilityDevice = rhi();
+                capabilityEngine = engine;
+            }
+#endif
             frame = engine->frame();
             frame["opticalLightEnabled"] = scene->lightingEnabled();
             frame["geometryRevision"] = double(engine->geometryRevision());
@@ -1331,7 +1630,7 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         if (!renderer) {
             renderer = std::make_unique<Renderer>(root, rhi());
         }
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         renderer->settings = backend->renderConfiguration.snapshot();
         renderer->frameInputs = &backend->metalFxInputs;
 #endif
@@ -1339,12 +1638,12 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         const auto previousBindings = renderer->bindingCreations;
         const auto previousUploads = renderer->coverUploads;
         const auto previousDrawCalls = renderer->drawCalls;
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
         const auto previousPostBindings = renderer->postProcess->bindingCreations;
         const auto previousPostDraws = renderer->postProcess->drawCalls;
 #endif
         renderer->render(cb, frame, renderTarget()->pixelSize(), item, cover, renderTarget(), musicTextures);
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         backend->renderTelemetry.publish(renderer->size, renderer->viewSize, 1, renderer->implementation,
                                          true);
 #endif
@@ -1356,7 +1655,7 @@ class ItemRenderer : public QQuickRhiItemRenderer {
             if (renderer->motion) {
                 resources += renderer->motion->resources.size();
             }
-#ifndef Q_OS_MACOS
+#ifndef Q_OS_DARWIN
             resources += renderer->postProcess->resources.size();
             bindings += renderer->postProcess->bindingCreations - previousPostBindings;
             draws += renderer->postProcess->drawCalls - previousPostDraws;
@@ -1469,7 +1768,7 @@ QImage renderReference(const QString &root, const QJsonObject &frame, const QJso
     }
     RhineRendering::Renderer renderer(root, rhi.get());
     renderer.nativeBuffers = buffers;
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     if (settings) {
         renderer.settings = *settings;
     }

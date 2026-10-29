@@ -48,10 +48,13 @@ const sourceDirectories = new Set([
     'scripts',
     // dxc 与 glslang 以 submodule 记录。
     'third_party',
+    // 帧率与绘制态测量脚手架，与它测量的渲染代码同仓维护。
+    'tools',
     'vendor',
 ]);
 // 公开文档只保留应用说明，开发规范、整改方案和会话记录留在本机。
-const documentation = ['README.md'];
+// tools/perf/README.md 是测量脚手架的用法说明，属于随工具发布的运行文档。
+const documentation = ['README.md', 'tools/perf/README.md'];
 assert.deepEqual(
     files.filter((file) => /\.md$/i.test(file)).sort(),
     documentation,

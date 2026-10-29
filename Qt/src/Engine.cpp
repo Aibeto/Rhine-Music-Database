@@ -1,3 +1,4 @@
+#include <ctime>
 #include "Engine.h"
 #include "DiscGeometry.h"
 #include "RhiScene.h"
@@ -32,18 +33,18 @@ QPointF haltonJitter(int phase) {
 } // namespace
 bool runNativeHostChecks(const QString &root);
 bool runNativeMusicChecks(const QString &root);
-bool runGpuReferenceCheck(const QImage &expected, const QImage &actual);
 
 /** 建立纯原生音乐、HUD 和场景状态；Qt 定时器只在输入或动画尚未收束时运行。 */
-Engine::Engine(QString path, bool offline, QObject *parent)
-    : QObject(parent), host(path, offline), scene(path), m_glyphs(path) {
+Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *connection,
+               QJsonObject resumeState)
+    : QObject(parent), host(path, offline, nullptr, false, connection), scene(path), m_glyphs(path) {
     // FSR3 抖动默认关闭；环境变量在进程启动时读取一次，运行期不再变化。
     m_jitterEnabled = qEnvironmentVariableIntValue("RHINE_JITTER") == 1;
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
     app = std::make_unique<NativeApplication>(&host, &m_glyphs, &scene, content);
     connect(&app->music, &MusicLibrary::playbackInvalidated, this, &Engine::refreshPlayback);
     connect(&app->hud, &NativeHud::localImportRequested, this, &Engine::localImportRequested);
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     renderConfiguration.initialize([this](const QString &key) { return host.preference(key); });
     connect(&host, &Host::preferenceChanged, this, [this](const QString &key, const QString &value) {
         if (renderConfiguration.applyPreference(key, value)) {
@@ -53,7 +54,7 @@ Engine::Engine(QString path, bool offline, QObject *parent)
         }
     });
 #endif
-    app->initialize();
+    m_restoredSession = app->initialize(resumeState);
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this,
             [this] { app->saveSession(); });
     connect(&host, &Host::invalidated, this, [this] { wake(false); });
@@ -107,6 +108,18 @@ Engine::~Engine() {
 }
 bool Engine::ready() const {
     return scene.ready();
+}
+double Engine::animationTime() const {
+    return m_animationTime;
+}
+bool Engine::restoredSession() const {
+    return m_restoredSession;
+}
+void Engine::restorePresentation(const NativeScene::ResumeState &state, double time) {
+    if (m_restoredSession) {
+        scene.restoreResumeState(state);
+        m_animationTime = time;
+    }
 }
 namespace {
 // 鼠标滚轮一格的距离按设置页与歌词的行高换算，约一行内容；触控板保留系统给出的连续像素距离。
@@ -272,7 +285,7 @@ void Engine::setVisible(bool value) {
         m_sleeping = true;
     } else {
         host.restoreMemoryBudget();
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
         if (renderConfiguration.snapshot().temporal()) {
             resetTemporalState();
         }
@@ -376,9 +389,11 @@ void Engine::tick() {
     m_paceStepMax = qMax(m_paceStepMax, stepNs);
     ++m_paceTicks;
     // 动态帧间隔：不设固定周期常数，帧率上限完全交给呈现侧（垂直同步/缓冲回收）。
-    // 用本帧实测的「呈现阻塞时长」决定要不要让出时间：
-    //   · 阻塞 > 2ms：呈现自己就在限速，连轴转（0ms），不额外加延迟；
-    //   · 阻塞 ≤ 2ms：说明呈现不阻塞，继续连轴转只会空转烧 CPU，让出 1ms。
+    // 注意 blockedNs 的口径：它只覆盖 tick() 内部、step() 之外的微秒级开销（指针 flush、
+    // 滚轮衰减、energyIdle），**测不到呈现阻塞**——呈现工作在 PresentationShell 的另一个
+    // 定时器回调里，根本不在 tick() 的调用栈内。所以这里恒走 interval=1：渲染期间 GUI
+    // 线程被占，定时器本来就投递不进来；渲染结束后的 1ms 是留给事件处理的余量，不是限速。
+    // 若以后真要让引擎节拍感知呈现成本，必须由呈现层回传实测帧时长，不能靠这里算。
     // RHINE_TICK_MS 仍可作为排障时人为压帧的覆盖值（>0 时生效）。
     const qint64 frameNs = clock.nsecsElapsed() - enterNs;
     const qint64 blockedNs = frameNs - stepNs;
@@ -605,9 +620,27 @@ void Engine::wheel(double x, double y, double delta, bool pixels) {
 /**
  * 按顺序同步场景、音乐和 HUD 帧数据，保持绘制与命中区域一致。
  */
+// RHINE_STEP_PROBE=1：拆开引擎每拍成本，并区分"干活"与"等待"。
+// 墙钟远大于线程 CPU 时间 => 这一拍是在阻塞（锁、GPU、内存回读），不是算得多。
+static double stepWallSum = 0, stepCpuSum = 0, stepAppSum = 0, stepRestSum = 0;
+static int stepProbeFrames = 0;
+
+static double threadCpuMs() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return double(ts.tv_sec) * 1e3 + double(ts.tv_nsec) / 1e6;
+}
+
 void Engine::step(double time) {
     if (!ready()) {
         return;
+    }
+    const bool stepProbe = qEnvironmentVariableIntValue("RHINE_STEP_PROBE") == 1;
+    const double stepT0 = stepProbe ? threadCpuMs() : 0.0;
+    const qint64 stepWall0 = stepProbe ? clock.nsecsElapsed() : 0;
+    QElapsedTimer stepAppTimer;
+    if (stepProbe) {
+        stepAppTimer.start();
     }
     QElapsedTimer frameTimer;
     if (scene.isProfiling()) {
@@ -618,6 +651,7 @@ void Engine::step(double time) {
     ++m_steps;
     const bool reuse = m_sceneSleeping && !scene.changed();
     const auto object = app->step(time, m_width / (m_height / 1080), reuse);
+    const double stepAppMs = stepProbe ? double(stepAppTimer.nsecsElapsed()) / 1e6 : 0.0;
     if (object.isEmpty()) {
         return;
     }
@@ -631,7 +665,7 @@ void Engine::step(double time) {
     // 相位只在真正产生帧的 step 里推进，按 8 帧循环。
     // 但时间性抗锯齿（FSR3/TAA）本身就是靠相位差累积历史，没有抖动它们只会反复混合
     // 同一张图、等于白做，所以这两者开启时无条件打开。AA 模式每帧读环境变量，切换免重启。
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     const bool metalFxTemporal = m_frame.value("mode") != "boot" && renderConfiguration.snapshot().temporal();
     if (!metalFxTemporal) {
         m_temporalFramesRemaining = 0;
@@ -764,6 +798,26 @@ void Engine::step(double time) {
         scene.timings.engineMs = frameTimer.nsecsElapsed() / 1000000.;
     }
     emit updated();
+    if (stepProbe) {
+        const double wall = double(clock.nsecsElapsed() - stepWall0) / 1e6;
+        const double cpu = threadCpuMs() - stepT0;
+        stepWallSum += wall;
+        stepCpuSum += cpu;
+        stepAppSum += stepAppMs;
+        stepRestSum += wall - stepAppMs;
+        if (++stepProbeFrames >= 60) {
+            const double n = stepProbeFrames;
+            qInfo().noquote()
+                << QStringLiteral("拍成本: 合计 %1 ms = app->step %2 + 其余 %3 | 线程CPU %4 ms | 等待 %5 ms")
+                       .arg(stepWallSum / n, 0, 'f', 2)
+                       .arg(stepAppSum / n, 0, 'f', 2)
+                       .arg(stepRestSum / n, 0, 'f', 2)
+                       .arg(stepCpuSum / n, 0, 'f', 2)
+                       .arg((stepWallSum - stepCpuSum) / n, 0, 'f', 2);
+            stepWallSum = stepCpuSum = stepAppSum = stepRestSum = 0;
+            stepProbeFrames = 0;
+        }
+    }
 }
 void Engine::snapshot(QString path) {
     if (m_frame.isEmpty()) {
@@ -771,7 +825,7 @@ void Engine::snapshot(QString path) {
     }
     QDir().mkpath(path);
     const QSize size(1920, 1080);
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
     const auto settings = renderConfiguration.snapshot();
     auto metal =
         renderReference(root(), m_frame, m_current, cover(), size, scene.drawBuffers, nullptr, &settings);
@@ -828,61 +882,9 @@ int Engine::selfTest() {
             ok &= hit && hit->lane == cell["lane"].toInt() && hit->row == cell["row"].toInt();
         }
     }
-    if (qEnvironmentVariableIntValue("RHINE_GPU_TEST") == 1) {
-        const QSize size(960, 540);
-        const auto actual =
-            renderReference(root(), m_frame, m_current, host.image(m_cover), size, scene.drawBuffers);
-        const auto original =
-            renderReference(root(), legacy, m_current, host.image(m_cover), size, scene.drawBuffers);
-        ok &= runGpuReferenceCheck(original, actual);
-        if (!ok) {
-            qCritical() << "Native GPU frame differs from original fixture";
-        }
-    }
     qInfo() << "Qt native scene, Host, music, playback and offline package checks:"
             << (ok ? "passed" : "FAILED");
     return ok ? 0 : 1;
-}
-
-int Engine::renderFixtures(QString source, QString output) {
-    for (const auto &name : QDir(source).entryList({"*.json"}, QDir::Files, QDir::Name)) {
-        QFile input(source + "/" + name);
-        if (!input.open(QIODevice::ReadOnly)) {
-            return 1;
-        }
-        const auto fixture = QJsonDocument::fromJson(input.readAll()).object();
-        const auto store = fixture["store"].toObject();
-        const auto settings = fixture["hud"].toObject();
-        app->music.current = store["current"].toObject();
-        const auto lists = store["lists"].toArray();
-        const auto totals = store["totals"].toArray();
-        const auto more = store["hasMore"].toArray();
-        for (int lane = 0; lane < 5; ++lane) {
-            app->music.lists[lane] = lists.at(lane).toArray();
-            app->music.totals[lane] = totals.at(lane).toInt();
-            app->music.hasMore[lane] = more.at(lane).toBool();
-        }
-        app->music.keyword = store["keyword"].toString();
-        app->music.status = store["status"].toString();
-        app->hud.modal = settings["modal"].toString();
-        app->hud.dark = settings["dark"].toBool();
-        app->hud.themeMode = settings["themeMode"].toString();
-        app->hud.reduced = settings["reduced"].toBool();
-        app->hud.motion.set(true, 0, true);
-        m_frame = fixture["frame"].toObject();
-        app->hud.draw(m_frame, 1920, 50);
-        m_commands = app->hud.commands;
-        m_current = app->music.current;
-        m_cover.clear();
-        m_coverImage = QImage();
-        const auto folder = output + "/" + fixture["name"].toString();
-        snapshot(folder);
-        QFile hitsFile(folder + "/qt-hits.json");
-        if (hitsFile.open(QIODevice::WriteOnly)) {
-            hitsFile.write(QJsonDocument(app->hud.hits).toJson());
-        }
-    }
-    return failure.isEmpty() ? 0 : 1;
 }
 
 void Engine::importLocal(QList<QUrl> urls) {

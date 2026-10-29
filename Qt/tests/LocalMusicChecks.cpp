@@ -235,6 +235,10 @@ int main(int argc, char **argv) {
     host.fixture = [&](QString route, QJsonObject values) {
         requests.append(route);
         if (route == "/local/lyrics") {
+            check(values.contains("contentBase64") &&
+                      QByteArray::fromBase64(values["contentBase64"].toString().toLatin1())
+                          .contains("[00:00.00]"),
+                  "sidecar lyrics retain original bytes until bridge decoding");
             return QJsonObject{{"body", QJsonObject{{"code", 200}, {"document", document("local")}}}};
         }
         const auto operation = route.section('/', 3, 3);

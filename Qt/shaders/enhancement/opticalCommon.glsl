@@ -31,6 +31,9 @@ layout(std140, binding = 0) uniform GlobalBlock {
     mat4 emitterInverse;
     vec4 opticalLight;
     vec4 emissionColor;
+    // 运动矢量随主渲染单趟输出所需的两台相机矩阵；顺序必须与 C++ 侧 Globals 尾部一致。
+    mat4 previousViewProjection;
+    mat4 currentViewProjection;
 };
 vec2 rtUV(vec2 uv) {
     return backend.x > 0.5 ? vec2(uv.x, 1 - uv.y) : uv;

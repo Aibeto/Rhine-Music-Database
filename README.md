@@ -53,6 +53,11 @@ chmod +x 'RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage'
 macOS、Linux 和 Windows 默认使用 FFmpeg 音频后端。Windows 设置 `QT_MEDIA_BACKEND=windows` 可临时对照原生后端。
 各平台播放都会跟随系统默认输出设备
 
+桌面播放默认由独立后台服务管理（设置 → 性能与诊断 → 性能模式，默认开启，重启生效）。关闭到菜单栏、
+最小化或被其他应用遮挡时，受控呈现层会卸载界面引擎并改为预渲染的静态欢迎帧，音频、队列和系统媒体键
+继续由后台服务工作；恢复时在同一窗口重建界面，不会重建窗口、音频源或切换桌面。关闭或未启用性能模式时
+仍为单进程路径。
+
 图形后端在 Windows 与 Linux 上优先使用 Vulkan，不可用时回退 OpenGL；macOS 固定使用 Metal。
 `RHINE_GRAPHICS=vulkan|opengl|auto` 可手动指定，`QSG_RHI_BACKEND` 的优先级更高。
 
@@ -146,6 +151,7 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 | -------- | ------ | ----------- | ------ | ----- |
 | Windows  | ✅     | 已停用      | ✅     | -     |
 | macOS    | -      | -           | -      | ✅    |
+| iOS / iPadOS | - | - | - | ✅ |
 | Linux    | ✅     | -           | ✅     | -     |
 
 | API         | FXAA   | SSAA   | MSAA   | TAA     | Upscaling        | Frame Generation |
@@ -155,12 +161,15 @@ Linux 的「设置 → GPU / 显卡」可以指定用哪一块显卡，重启生
 | OpenGL      | ✅     | 2x MAX | 8x MAX | ✅      | EASU + RCAS      | -                |
 | Metal       | -      | -      | -      | MetalFX | MetalFX Temporal | MetalFX          |
 
-插帧（FSR Frame Generation）在 Vulkan 上是**常驻能力、即时开关**：只要设备支持，启动时应用就自建
-交换链接管窗口（呈现层常驻），设置页里的帧生成开关**点一下就生效、不需要重启**——它只决定每次呈现
-要不要插入一张插值帧，不参与呈现路径的选择。只有 3D 场景参与插值，UI 始终以原生分辨率叠加在插值结果
-之上（插值帧里文字不会重影）。任何一步失败都会自动回退到默认呈现路径，不影响启动；需要强制走默认
-路径时可用 `RHINE_FG_LAYER=off`（排障用）。标题栏右上角的性能面板在接管后会显示帧生成状态、呈现与
-渲染帧率、插值帧率、光流/插值/合成/取图/上屏分项耗时、交换链图像数与格式、深度与运动矢量是否就绪。
+插帧（FSR Frame Generation）在 Vulkan 上按启动时的 `RHINE_FG` 选呈现路径：开启时应用自建交换链接管
+窗口（呈现层接管），关闭时直接走 Qt 默认路径——实测后者内容帧高约 35%，因为接管后两层离屏录制、合成
+与 present 都压在 GUI 线程上，不开插帧时它只有成本。所以设置页里的帧生成开关**开启需要重启生效**，
+已经在接管状态下关掉插值则即时生效；它只决定每次呈现要不要插一张插值帧，不参与呈现路径的选择。只有
+3D 场景参与插值，UI 始终以原生分辨率叠加在插值结果之上（插值帧里文字不会重影）。任何一步失败都会
+自动回退到默认呈现路径，不影响启动；需要强制走默认路径时可用 `RHINE_FG_LAYER=off`（排障用）。标题栏
+右上角的性能面板在接管后会显示帧生成状态，标题帧率按“渲染+插值”统计（插帧没在出帧时就是渲染帧率），
+下面再拆出呈现、渲染、插值三个分项帧率，以及光流/插值/合成/取图/上屏分项耗时、交换链图像数与格式、
+深度与运动矢量是否就绪。
 
 ## 从源码构建
 
@@ -222,6 +231,7 @@ curl -LO https://nodejs.org/dist/v26.11.1/node-v26.11.1-linux-x64.tar.xz
 mkdir -p output/node
 tar -xJf node-v26.11.1-linux-x64.tar.xz -C output/node
 # rm ./node-v26.11.1-linux-x64.tar.xz
+npm install
 npm ci
 env RHINE_NODE_BINARY=$PWD/output/node/node-v26.11.1-linux-x64/bin/node \
     RHINE_NODE_LICENSE=$PWD/output/node/node-v26.11.1-linux-x64/LICENSE \
@@ -235,9 +245,17 @@ RHINE_RESOURCES=$PWD/output/resources ./output/qt-build/RhineMusicDatabase 2>&1
 RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineMusicDatabase
 ```
 
-`npm run build` 先按依赖闭包收集 Qt 库、平台插件、图像与 TLS 插件和 QML 模块到 `output/RhineMusicDatabase.AppDir`，再用 `appimagetool` 生成 `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`。`appimagetool` 需自行安装并出现在 `PATH` 中，也可用 `APPIMAGE_TOOL` 指定路径；没有 FUSE 时脚本自动改用 `--appimage-extract-and-run`。
+`npm run build` 先按依赖闭包收集 Qt 库、平台插件、图像与 TLS 插件和 QML 模块到 `output/RhineMusicDatabase.AppDir`，再用 `mkdwarfs` 把 AppDir 打成 DwarFS 镜像，前面加上 `uruntime` 生成 `output/RhineMusicDatabase-<构建标识>-Linux-x86_64.AppImage`（见下节）。设置 `RHINE_APPIMAGE_FS=squashfs` 则改用 `appimagetool`：它需自行安装并出现在 `PATH` 中，也可用 `APPIMAGE_TOOL` 指定路径；没有 FUSE 时脚本自动改用 `--appimage-extract-and-run`，并统一透传 `-Xcompression-level 22`、`-b 1048576` 换取最小体积。squashfs 路的压缩算法只能用 `zstd`：appimagetool 自带的 mksquashfs 只编译了 zstd，`--comp xz` 会直接失败。
 
 随包的 Node 必须是官方独立分发包：构建脚本会检查 `ldd` 结果，只依赖 glibc 运行库的构建才会被打进 AppImage，发行版自己的 `/usr/bin/node` 动态链接了系统 ICU 等库，会被拒绝。
+
+Linux 包随附自编的 FFmpeg：发行版 `libavcodec` 动态依赖 x265/aom/SvtAv1Enc 等编码器库（合计约 55 MB），而这里只用 Qt 的 FFmpeg 后端解码音频。`scripts/prepare-linux-ffmpeg.cjs` 构建一份只保留音频能力的版本：编码器、复用器、avdevice、avfilter 全部关闭，解码器按 `vendor/ffmpeg/decoders-linux.json` 的音频白名单启用（视频解码器如 HEVC、H.264、VP9、AV1 不编译），parser 与 bitstream filter 也只留音频相关的部分，解复用器保持全开（源码优先取 `third_party/ffmpeg` 子模块，锁定标签 `n9.0.1` 且保持上游原样；子模块缺失或提交与 `vendor/ffmpeg/source.json` 的 `pinned-commit` 不一致时，回退到锁定校验和的发布包）（LGPL-2.1-or-later，不启用任何 GPL 或非自由组件），构建时自动替换进包。发现漏掉的音频格式时，用 `RHINE_FFMPEG_EXTRA_DECODERS=aac_latm,xxx` 临时追加解码器，确认后再补进白名单文件。设置 `RHINE_FFMPEG=system` 可回退发行版库；Qt 后端要求的 SONAME 与自编版本不一致时也会自动回退并告警。许可与来源见 `NOTICE` 及包内 `third-party/FFmpeg/`。
+
+打包前会删掉 AppDir 里的开发期文件（`usr/include`、`usr/lib/cmake`、`usr/lib/pkgconfig`、man/doc 与 `*.a`、`*.la`、`*.prl`），这些是发行版 Qt 的安装规则带进来的，运行时用不到。
+
+#### DwarFS 镜像
+
+AppImage 默认使用 DwarFS 镜像：跨文件去重后体积明显小于 squashfs，随机读取也更快。运行时是 `uruntime`，需要 FUSE；没有 FUSE 的机器上会退化成解包运行（等价于 `--appimage-extract-and-run`）。`mkdwarfs` 与 `uruntime` 由脚本按锁定版本下载并校验 SHA256，也可用 `MKDWARFS`、`URUNTIME` 指定本地路径；压缩参数用 `RHINE_DWARFS_OPTIONS` 覆盖，默认 `zstd:level=22 -S26 -B2`（`-S` 调小可让随机读取更快、体积略增）。设置 `RHINE_APPIMAGE_FS=squashfs` 可退回 appimagetool 的 squashfs 打包。
 
 ### 开发与测试
 
@@ -247,7 +265,7 @@ RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineM
 未指定版本时为开发版：设置中显示最后一次提交标题、12 位短 SHA 和“开发版”，三平台分发包均以短 SHA 作为构建标识。
 检查更新仅获取发布信息；点击“前往更新”会打开 [GitHub releases 页面](https://github.com/MikeQu223/Rhine-Music-Database/releases)，由浏览器下载，不在应用内下载文件。
 
-`npm test` 使用本地响应验证场景、拾取、音乐状态、账号隔离、锁定上游、打包通信和部署资源。设置 `RHINE_GPU_TEST=1` 可额外执行真实 GPU 离线渲染检查；Windows 设置 `RHINE_SOFTWARE_GPU=1` 可使用软件 GPU。离线测试不替代真实账号、在线音源、显示缩放与系统集成的实机检查。
+`npm test` 使用本地响应验证音乐与播放状态、账号隔离、输入法焦点与提交、窗口迁移、锁定上游、打包通信和部署资源。默认测试不包含视觉快照、固定动画采样或桌面场景组合。离线测试不替代真实账号、在线音源、显示缩放、系统输入法与系统集成的实机检查。
 
 Qt RHI 使用私有头文件，升级 Qt 后需重新编译并验证。
 

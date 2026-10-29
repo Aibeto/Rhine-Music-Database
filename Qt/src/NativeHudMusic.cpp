@@ -25,7 +25,28 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
             .contains(name)) {
         return;
     }
-    if (name == "slot") {
+    if (name == "sort-menu") {
+        if (music.current["kind"] == "playlist" && frame["mode"] == "detail") {
+            openModal("detail-sort");
+        }
+    } else if (name == "sort") {
+        const auto field = parts.value(3);
+        if (!QStringList{"none", "title", "album", "artist"}.contains(field)) {
+            return;
+        }
+        if (parts.value(2) == "detail" && frame["mode"] == "detail" && music.current["kind"] == "playlist") {
+            // 先收起菜单再补页，排序请求才能绑定仍然打开的歌单详情。
+            if (modal == "detail-sort") {
+                modal.clear();
+                closing = false;
+                ++m_searchGeneration;
+            }
+            detailSort = field;
+            trackOffset = 0;
+            music.setDirectorySort(field);
+            beginSort();
+        }
+    } else if (name == "slot") {
         const auto directory = music.directory;
         if (directory && !directory->songs.isEmpty()) {
             const auto index = directory->page + wrap(music.selectedLane * 8 + last - directory->anchor, 40);

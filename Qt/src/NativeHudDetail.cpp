@@ -360,7 +360,23 @@ void NativeHud::container(double width, double opacity) {
     if (albums) {
         songs = music.directory ? music.directory->albums : QJsonArray();
     } else if (music.directory) {
-        songs = music.directory->songs;
+        songs = music.directory->orderedSongs();
+    }
+    const auto containerKey = item["key"].toString();
+    if (containerKey != m_sortContainerKey) {
+        m_sortContainerKey = containerKey;
+        detailSort = "none";
+        m_sortNotice.clear();
+    }
+    if (music.directory) {
+        detailSort = music.directory->sortField;
+    }
+    const auto sortField =
+        !music.directory && !albums && item["kind"] == "playlist" ? detailSort : QString("none");
+    if (songs != m_sortTracks || sortField != m_sortField) {
+        m_sortTracks = songs;
+        m_sortField = sortField;
+        m_trackOrder = MusicData::sortOrder(songs, sortField);
     }
     const auto sx = left + 19;
     const auto sideWidth = sidebar - 38;
@@ -437,6 +453,11 @@ void NativeHud::container(double width, double opacity) {
         button("热门歌曲", x + 210, 345, 110, 32, "music:artist-tab:songs", 13);
         button("发行专辑", x + 335, 345, 110, 32, "music:artist-tab:albums", 13);
     }
+    if (item["kind"] == "playlist") {
+        fill(x + 195, 339, 180, 44, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});
+        hit(x + 195, 339, 180, 44, "music:sort-menu", "排序方式");
+        text("排序方式 ▾", x + 217, 351, 16, "demibold", 0, {0.96, 0.95, 0.91, 1});
+    }
     rule(x, 399, usable, 0.4);
     const auto titleX = x + 49;
     const auto artistX = x + usable * 0.52;
@@ -452,9 +473,10 @@ void NativeHud::container(double width, double opacity) {
     }
     for (int row = 0; row < rowCount && trackOffset + row < songs.size(); ++row) {
         const auto index = trackOffset + row;
-        const auto song = songs.at(index).toObject();
+        const auto rawIndex = m_trackOrder.at(index);
+        const auto song = songs.at(rawIndex).toObject();
         const auto yy = rowsY + row * rowHeight;
-        if (music.directory && music.directory->index == index) {
+        if (music.directory && music.directory->index == rawIndex) {
             auto color = ink();
             color[3] = 0.055;
             fill(x - 8, yy, usable + 16, rowHeight - 2, color);
@@ -473,14 +495,20 @@ void NativeHud::container(double width, double opacity) {
         limited(stamp, timeX, yy + 16, 12, 65);
         rule(x, yy + rowHeight - 1, usable, 0.15);
         hit(x - 8, yy, usable + 16, rowHeight - 2,
-            (albums ? "music:artist-album:" : "music:track:") + QString::number(index),
+            (albums ? "music:artist-album:" : "music:track:") + QString::number(rawIndex),
             song["title"].toString());
     }
     if (songs.isEmpty()) {
         limited(music.directoryLoading || music.detailLoading ? "正在载入曲目…" : "暂无可读取曲目", titleX,
                 490, 22, usable - 100);
     }
-    text("滚轮浏览曲目 · 点击查看歌曲", x, 934, 11);
+    QString hint = "滚轮浏览曲目 · 点击查看歌曲";
+    if (m_sortRequest) {
+        hint = "正在补齐曲目以排序…";
+    } else if (!m_sortNotice.isEmpty()) {
+        hint = m_sortNotice;
+    }
+    limited(hint, x, 934, 11, usable - 165);
     if (albums && music.directory && music.directory->albumsMore) {
         button(music.directory->albumsLoading ? "载入中…" : "更多专辑 ↓", x + usable - 150, 922, 150, 32,
                "music:artist-more", 12);

@@ -16,6 +16,8 @@ class LyricsController : public QObject {
     void adjustOffset(double deltaMs);
     void resetOffset();
     void applyGlobalOffset();
+    QJsonObject playbackSnapshot() const;
+    void applyPlaybackSnapshot(const QJsonObject &snapshot);
     double globalOffsetMs() const {
         return m_globalOffsetMs;
     }
@@ -62,6 +64,7 @@ class LyricsController : public QObject {
     QVector<double> m_starts;
     QJsonArray m_cache;
     QJsonObject m_localSources;
+    bool remoteCommand(const QString &method, QJsonObject arguments = {});
     MusicApi &api(const QString &provider);
     MusicApi::Valid valid(const Pending &pending);
     void supplement(const Pending &pending);

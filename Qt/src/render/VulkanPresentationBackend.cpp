@@ -1,4 +1,5 @@
 #include "PresentationBackend.h"
+#include "PresentationWindow.h"
 #include "../fg/VulkanPresenter.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
@@ -8,6 +9,9 @@
 #include <QWindow>
 #include <rhi/qrhi_platform.h>
 #include <vector>
+#ifdef Q_OS_WIN
+#include "WindowsStaticImage.h"
+#endif
 
 namespace RhineRender {
 namespace {
@@ -15,9 +19,10 @@ namespace {
 class VulkanPresentationBackend final : public PresentationBackend {
   public:
     ~VulkanPresentationBackend() override {
-        release();
-        m_presenter.reset();
-        m_rhi.reset();
+#ifdef Q_OS_WIN
+        m_staticImage.reset();
+#endif
+        destroyDevice();
         m_window.reset();
         m_instance.reset();
     }
@@ -31,7 +36,7 @@ class VulkanPresentationBackend final : public PresentationBackend {
             return false;
         }
 
-        m_window = std::make_unique<QWindow>();
+        m_window = std::make_unique<PresentationWindow>();
         // 必须声明成 Vulkan surface：平台窗口默认按 raster/OpenGL 建，
         // 那样 surfaceForWindow() 永远返回 VK_NULL_HANDLE。
         m_window->setSurfaceType(QSurface::VulkanSurface);
@@ -51,22 +56,6 @@ class VulkanPresentationBackend final : public PresentationBackend {
             return false;
         }
 
-        QRhiVulkanInitParams params;
-        params.inst = m_instance.get();
-        // 自建交换链需要设备支持该扩展；QRhi 默认不请求它。
-        params.deviceExtensions = {QByteArrayLiteral("VK_KHR_swapchain")};
-        m_rhi.reset(QRhi::create(QRhi::Vulkan, &params, {}));
-        if (!m_rhi) {
-            m_error = QStringLiteral("QRhi(Vulkan) 创建失败");
-            return false;
-        }
-
-        m_device = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles())->dev;
-        if (m_device == VK_NULL_HANDLE) {
-            m_error = QStringLiteral("拿不到 QRhi 的 VkDevice");
-            return false;
-        }
-
         m_window->show();
         // Wayland 下 surface 要等窗口真正 expose 之后才存在，只 create() 会拿到空句柄。
         QElapsedTimer exposeClock;
@@ -75,19 +64,51 @@ class VulkanPresentationBackend final : public PresentationBackend {
             QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
         }
 
-        const VkSurfaceKHR surface = QVulkanInstance::surfaceForWindow(m_window.get());
-        if (surface == VK_NULL_HANDLE) {
-            m_error = QStringLiteral("拿不到 QWindow 的 VkSurfaceKHR");
-            return false;
-        }
+        m_vsync = vsync;
+#ifdef Q_OS_WIN
+        m_staticImage = std::make_unique<WindowsStaticImage>(m_window.get());
+#endif
+        return resumeDevice();
+    }
+    bool supportsStaticImage() const override {
+#ifdef Q_OS_WIN
+        return true;
+#else
+        return false;
+#endif
+    }
 
-        m_size = m_window->size();
-        m_presenter = std::make_unique<VulkanPresenter>();
-        if (!m_presenter->init(m_rhi.get(), surface, m_size * m_window->devicePixelRatio(), vsync)) {
-            m_error = QStringLiteral("交换链创建失败：%1").arg(m_presenter->lastError());
+    /** 静态页交给 HWND 的 GDI 绘制，挂起时不再创建 Qt Quick 窗口或复用 Vulkan 设备。 */
+    bool suspendToImage(const QByteArray &image) override {
+#ifdef Q_OS_WIN
+        if (!m_staticImage->setImage(image)) {
+            m_error = QStringLiteral("静态图片解码失败");
             return false;
         }
-        return ensureTargets();
+        destroyDevice();
+        m_staticImage->repaint();
+        return true;
+#else
+        Q_UNUSED(image);
+        return false;
+#endif
+    }
+
+    /** 为同一原生窗口创建全新设备和交换链；失败时继续保留静态图片。 */
+    bool resumeDevice() override {
+        if (m_rhi) {
+            return true;
+        }
+        if (!createDevice()) {
+            destroyDevice();
+            return false;
+        }
+#ifdef Q_OS_WIN
+        if (m_staticImage) {
+            m_staticImage->clear();
+        }
+#endif
+        return true;
     }
     QWindow *window() const override {
         return m_window.get();
@@ -230,6 +251,46 @@ class VulkanPresentationBackend final : public PresentationBackend {
     }
 
   private:
+    bool createDevice() {
+        QRhiVulkanInitParams params;
+        params.inst = m_instance.get();
+        // 自建交换链需要设备支持该扩展；QRhi 默认不请求它。
+        params.deviceExtensions = {QByteArrayLiteral("VK_KHR_swapchain")};
+        m_rhi.reset(QRhi::create(QRhi::Vulkan, &params, {}));
+        if (!m_rhi) {
+            m_error = QStringLiteral("QRhi(Vulkan) 创建失败");
+            return false;
+        }
+
+        m_device = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles())->dev;
+        if (m_device == VK_NULL_HANDLE) {
+            m_error = QStringLiteral("拿不到 QRhi 的 VkDevice");
+            return false;
+        }
+
+        const VkSurfaceKHR surface = QVulkanInstance::surfaceForWindow(m_window.get());
+        if (surface == VK_NULL_HANDLE) {
+            m_error = QStringLiteral("拿不到 QWindow 的 VkSurfaceKHR");
+            return false;
+        }
+
+        m_size = m_window->size();
+        m_presenter = std::make_unique<VulkanPresenter>();
+        if (!m_presenter->init(m_rhi.get(), surface, m_size * m_window->devicePixelRatio(), m_vsync)) {
+            m_error = QStringLiteral("交换链创建失败：%1").arg(m_presenter->lastError());
+            return false;
+        }
+        return ensureTargets();
+    }
+
+    void destroyDevice() {
+        release();
+        m_presenter.reset();
+        m_rhi.reset();
+        m_device = VK_NULL_HANDLE;
+        m_nativeFrame = {};
+    }
+
     void releaseTargets() {
         m_swapTargets.clear();
         m_swapPasses.clear();
@@ -292,6 +353,10 @@ class VulkanPresentationBackend final : public PresentationBackend {
         }
         return true;
     }
+#ifdef Q_OS_WIN
+    std::unique_ptr<WindowsStaticImage> m_staticImage;
+#endif
+    bool m_vsync = true;
     std::unique_ptr<QVulkanInstance> m_instance;
     std::unique_ptr<QWindow> m_window;
     std::unique_ptr<QRhi> m_rhi;

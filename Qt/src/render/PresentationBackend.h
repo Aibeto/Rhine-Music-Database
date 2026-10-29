@@ -6,6 +6,7 @@
 #include <rhi/qrhi.h>
 
 class QWindow;
+class QByteArray;
 class QVulkanInstance;
 
 namespace RhineRender {
@@ -35,6 +36,16 @@ class PresentationBackend {
     virtual bool finishTarget(QRhiCommandBuffer *commands, const Frame &frame) = 0;
     virtual bool endFrame(const Frame &frame, bool rendered) = 0;
     virtual void release() = 0;
+    // 支持原生静态图片的平台可在保留窗口时销毁整个图形设备。
+    virtual bool supportsStaticImage() const {
+        return false;
+    }
+    virtual bool suspendToImage(const QByteArray &) {
+        return false;
+    }
+    virtual bool resumeDevice() {
+        return false;
+    }
     virtual bool ready() const = 0;
     virtual QSize extent() const = 0;
     virtual quint32 imageCount() const = 0;

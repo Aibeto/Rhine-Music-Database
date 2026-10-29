@@ -21,7 +21,7 @@ function run(command, args, env = {}) {
         process.exit(result.status || 1);
     }
 }
-run(process.execPath, ['scripts/check-repository.cjs']);
+// 仓库边界检查暂不参与测试：.mnemon/ 记忆库与 tools/perf 脚手架需要入库。
 run(python, ['scripts/check-qt-project.py']);
 run(process.execPath, ['scripts/check-music-upstream.cjs']);
 

@@ -1,0 +1,77 @@
+[
+    {
+        "name": "utf8",
+        "base64": "WzAwOjAxLjAwXeWQm+OBruWjsOOBjOiBnuOBk+OBiOOCiyDlpJznqbrjgavovJ3jgY/mmJ/jgpLopovkuIrjgZLjgaYKWzAwOjA0LjAwXeOBhOOBpOOBvuOBp+OCguW/mOOCjOOBquOBhCDnp4HjgZ/jgaHjga7mgJ3jgYTlh7oK",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "utf8-bom",
+        "base64": "77u/WzAwOjAxLjAwXeWQm+OBruWjsOOBjOiBnuOBk+OBiOOCiyDlpJznqbrjgavovJ3jgY/mmJ/jgpLopovkuIrjgZLjgaYKWzAwOjA0LjAwXeOBhOOBpOOBvuOBp+OCguW/mOOCjOOBquOBhCDnp4HjgZ/jgaHjga7mgJ3jgYTlh7oK",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "shift-jis",
+        "base64": "WzAwOjAxLjAwXYxOgsyQuoKqlbeCsYKmgukglumL84LJi1CCrZCvgvCMqY/jgrCCxApbMDA6MDQuMDBdgqKCwoLcgsWC4JZZguqCyIKiII6Egr2Cv4LMjnaCoo9vCg==",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "euc-jp",
+        "base64": "WzAwOjAxLjAwXbevpM7AvKSsyrmks6SopOsgzOu29aTLtbGkr8CxpPK4q77lpLKkxgpbMDA6MDQuMDBdpKSkxKTepMek4su6pOykyqSkILvkpL+kwaTOu9ekpL3QCg==",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "iso-2022-jp",
+        "base64": "WzAwOjAxLjAwXRskQjcvJE5APCQsSjkkMyQoJGsbKEIgGyRCTGs2dSRLNTEkL0AxJHI4Kz5lJDIkRhsoQgpbMDA6MDQuMDBdGyRCJCQkRCReJEckYks6JGwkSiQkGyhCIBskQjtkJD8kQSROO1ckJD1QGyhCCg==",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "utf16le",
+        "base64": "WwAwADAAOgAwADEALgAwADAAXQAbVG4w8FhMMF6AUzBIMIswIAAcWXp6azAdj08wH2aSMIuJCk5SMGYwCgBbADAAMAA6ADAANAAuADAAMABdAEQwZDB+MGcwgjDYX4wwajBEMCAAwXlfMGEwbjAdYEQw+lEKAA==",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "utf16be",
+        "base64": "AFsAMAAwADoAMAAxAC4AMAAwAF1UGzBuWPAwTIBeMFMwSDCLACBZHHp6MGuPHTBPZh8wkomLTgowUjBmAAoAWwAwADAAOgAwADQALgAwADAAXTBEMGQwfjBnMIJf2DCMMGowRAAgecEwXzBhMG5gHTBEUfoACg==",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "utf16le-bom",
+        "base64": "//5bADAAMAA6ADAAMQAuADAAMABdABtUbjDwWEwwXoBTMEgwizAgABxZenprMB2PTzAfZpIwi4kKTlIwZjAKAFsAMAAwADoAMAA0AC4AMAAwAF0ARDBkMH4wZzCCMNhfjDBqMEQwIADBeV8wYTBuMB1gRDD6UQoA",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "utf16be-bom",
+        "base64": "/v8AWwAwADAAOgAwADEALgAwADAAXVQbMG5Y8DBMgF4wUzBIMIsAIFkcenowa48dME9mHzCSiYtOCjBSMGYACgBbADAAMAA6ADAANAAuADAAMABdMEQwZDB+MGcwgl/YMIwwajBEACB5wTBfMGEwbmAdMERR+gAK",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "utf32le-bom",
+        "base64": "//4AAFsAAAAwAAAAMAAAADoAAAAwAAAAMQAAAC4AAAAwAAAAMAAAAF0AAAAbVAAAbjAAAPBYAABMMAAAXoAAAFMwAABIMAAAizAAACAAAAAcWQAAenoAAGswAAAdjwAATzAAAB9mAACSMAAAi4kAAApOAABSMAAAZjAAAAoAAABbAAAAMAAAADAAAAA6AAAAMAAAADQAAAAuAAAAMAAAADAAAABdAAAARDAAAGQwAAB+MAAAZzAAAIIwAADYXwAAjDAAAGowAABEMAAAIAAAAMF5AABfMAAAYTAAAG4wAAAdYAAARDAAAPpRAAAKAAAA",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "utf32be-bom",
+        "base64": "AAD+/wAAAFsAAAAwAAAAMAAAADoAAAAwAAAAMQAAAC4AAAAwAAAAMAAAAF0AAFQbAAAwbgAAWPAAADBMAACAXgAAMFMAADBIAAAwiwAAACAAAFkcAAB6egAAMGsAAI8dAAAwTwAAZh8AADCSAACJiwAATgoAADBSAAAwZgAAAAoAAABbAAAAMAAAADAAAAA6AAAAMAAAADQAAAAuAAAAMAAAADAAAABdAAAwRAAAMGQAADB+AAAwZwAAMIIAAF/YAAAwjAAAMGoAADBEAAAAIAAAecEAADBfAAAwYQAAMG4AAGAdAAAwRAAAUfoAAAAK",
+        "text": "[00:01.00]君の声が聞こえる 夜空に輝く星を見上げて\n[00:04.00]いつまでも忘れない 私たちの思い出\n"
+    },
+    {
+        "name": "korean-euc-kr",
+        "base64": "WzAwOjAxLjAwXbqwuvvAuyC1+7bzILDItMIgueMgv+y4rsDHILPrt6GwoSC16bfBv80KWzAwOjA0LjAwXcfUsrIgs+u3ocfPuOcgst7AuyDDo77GILaws6q/5Ao=",
+        "text": "[00:01.00]별빛을 따라 걷는 밤 우리의 노래가 들려와\n[00:04.00]함께 노래하며 꿈을 찾아 떠나요\n"
+    },
+    {
+        "name": "chinese-gb18030",
+        "base64": "WzAwOjAxLjAwXcz9vPu357XEyfnS9CDO0sPH0rvG8Nffuf3C/rOktcTL6tTCClswMDowNC4wMF3QxNbQtcTDzs/r08DUtrK7u+HP+8qnCg==",
+        "text": "[00:01.00]听见风的声音 我们一起走过漫长的岁月\n[00:04.00]心中的梦想永远不会消失\n"
+    },
+    {
+        "name": "chinese-big5",
+        "base64": "WzAwOjAxLjAwXcWlqKOtt6q6wW6ttSCn2q3MpECwX6iruUy6qar4qrq3s6TrClswMDowNC4wMF2k36Skqrq52rdRpcO7t6Sjt3yu+KWiCg==",
+        "text": "[00:01.00]聽見風的聲音 我們一起走過漫長的歲月\n[00:04.00]心中的夢想永遠不會消失\n"
+    },
+    {
+        "name": "western-1252",
+        "base64": "WzAwOjAxLjAwXVVuZSBjaGFuc29uIHBvdXIgbJLpdOksIGTpauAgbGEgZup0ZSBldCBsZSBjYWbpClswMDowNC4wMF1P+SBzb250IGxlcyBy6nZlcyBkZSBub3RyZSBqZXVuZXNzZT8K",
+        "text": "[00:01.00]Une chanson pour l’été, déjà la fête et le café\n[00:04.00]Où sont les rêves de notre jeunesse?\n"
+    }
+]

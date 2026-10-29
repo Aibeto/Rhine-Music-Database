@@ -268,13 +268,44 @@ function loadClient(name, request) {
  */
 async function dispatchRequest(message) {
     if (message.route === '/local/lyrics') {
-        const content = message.params?.content;
+        let content = message.params?.content;
+        let encoding;
+        const encoded = message.params?.contentBase64;
+        if (encoded !== undefined) {
+            if (
+                typeof encoded !== 'string' ||
+                encoded.length > 1333336 ||
+                encoded.length % 4 !== 0 ||
+                /[^A-Za-z0-9+/=]/.test(encoded)
+            ) {
+                return { body: { code: 400, message: '本地歌词字节无效' }, cookies: [] };
+            }
+            try {
+                const bytes = Buffer.from(encoded, 'base64');
+                if (bytes.toString('base64') !== encoded) {
+                    return { body: { code: 400, message: '本地歌词字节无效' }, cookies: [] };
+                }
+                const decoded = require('./lyrics-text.cjs').decodeLyrics(bytes);
+                if (decoded.text.trim()) {
+                    content = decoded.text;
+                    encoding = decoded.encoding;
+                }
+            } catch {
+                // 可用的内嵌歌词仍是合法回退；没有内嵌文本时返回明确失败，不交付替换字符。
+                if (typeof content !== 'string' || !content.trim()) {
+                    return { body: { code: 400, message: '无法识别本地歌词编码' }, cookies: [] };
+                }
+            }
+        }
         if (typeof content !== 'string' || content.length > 1000000) {
             return { body: { code: 400, message: '本地歌词内容无效' }, cookies: [] };
         }
         const result = require('./lyrics-format.cjs').normalizeLyrics('netease', { lrc: { lyric: content } });
         if (result.document) {
             result.document.source = 'local';
+            if (encoding) {
+                result.document.encoding = encoding;
+            }
         }
         return { body: result, cookies: [] };
     }

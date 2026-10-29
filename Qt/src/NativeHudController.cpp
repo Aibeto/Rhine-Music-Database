@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QPointer>
 #include <QUrl>
+#include <QTimer>
 #include <algorithm>
 #include <cmath>
 
@@ -33,8 +34,8 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     dark = themeMode == "system" ? host->systemDark() : themeMode == "dark";
     reduced = host->preference("motion") == "reduced";
     startupAnimation = host->preference("startup-animation") == "on";
-#ifdef Q_OS_MACOS
-    // macOS 的呈现节奏由系统合成器固定，设置页不提供该开关，状态恒为关闭。
+#ifdef Q_OS_DARWIN
+    // Apple 平台的呈现节奏由系统合成器固定，设置页不提供该开关，状态恒为关闭。
     vsync = false;
 #else
     vsync = host->preference("vsync") != "off";
@@ -49,9 +50,12 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
         m_music->status = "发现新版本 " + m_host->updater.latestVersion() + "，可在设置中前往发布页面更新";
     });
     connect(music, &MusicLibrary::invalidated, this, &NativeHud::finishPage);
+    connect(music, &MusicLibrary::invalidated, this,
+            [this] { QTimer::singleShot(0, this, &NativeHud::continueSort); });
 }
 
 void NativeHud::openModal(QString kind) {
+    m_sortRequest.reset();
     if (m_music->isLocal() &&
         QStringList{"login", "quality", "playlist-picker", "playlist-form"}.contains(kind)) {
         return;
@@ -91,6 +95,7 @@ void NativeHud::openModal(QString kind) {
 }
 
 void NativeHud::closeModal() {
+    m_sortRequest.reset();
     ++m_searchGeneration;
     if (modal == "login") {
         m_music->cancelLogin();
@@ -327,7 +332,7 @@ void NativeHud::playerAction(const QStringList &parts) {
     } else if (name == "volume" || name == "volume-fraction") {
         player.volume(name == "volume" ? value / 10 : value);
     } else if (name == "mode") {
-        player.mode = cycle({"off", "all", "one", "shuffle"}, player.mode);
+        player.setMode(cycle({"off", "all", "one", "shuffle"}, player.mode));
     } else if (name == "queue") {
         if (index >= 0 && index < player.queue.size()) {
             player.play(player.queue.at(index).toObject(), std::nullopt, index);
@@ -577,11 +582,14 @@ void NativeHud::action(QString value) {
     } else if (value == "replay") {
         if (!modal.isEmpty()) {
             closeModal();
+            // 初始化页立即接管界面，不能让恢复的设置面板或输入框盖住动画。
+            motion.set(false, lastTime, true);
+            modal.clear();
+            closing = false;
         }
         m_scene.mode("boot");
     } else if (value == "alternative") {
-        music.player.alternative = !music.player.alternative;
-        m_host->setPreference("alternate-source", music.player.alternative ? "on" : "off");
+        music.player.setAlternative(!music.player.alternative);
     } else if (value == "quality") {
         QStringList qualities;
         for (const auto &option : MusicPlayer::qualityOptions(music.provider)) {
@@ -620,6 +628,14 @@ void NativeHud::action(QString value) {
     } else if (value == "detail-autoplay") {
         const bool enabled = m_host->preference("detail-autoplay") == "on";
         m_host->setPreference("detail-autoplay", enabled ? "off" : "on");
+    } else if (value == "performance-mode") {
+        // 后台服务在启动时接管界面，开关只写配置，重启后生效。
+        const bool enabled = m_host->preference("performance-mode") != "off";
+        m_host->setPreference("performance-mode", enabled ? "off" : "on");
+    } else if (value == "close-behavior") {
+        // 关闭行为在点击窗口关闭按钮时读取
+        const bool toTray = m_host->preference("close-behavior") == "tray";
+        m_host->setPreference("close-behavior", toTray ? "quit" : "tray");
     } else if (value == "graphics-backend") {
         // 后端切换需要重启生效：仅写入配置，由下次启动的 selectGraphicsBackend 应用。
         // 顺序：默认（自动探测）→ Vulkan → OpenGL → 默认
@@ -681,7 +697,7 @@ void NativeHud::action(QString value) {
         // fsr 是合并后的唯一超分选项；fsr1 / fsr3 仍接受，兼容旧偏好。
         if (mode == "off" || mode == "fxaa" || mode == "ssaa" || mode == "msaa" || mode == "taa" ||
             mode == "fsr" || mode == "fsr1" || mode == "fsr3"
-#ifdef Q_OS_MACOS
+#ifdef Q_OS_DARWIN
             || mode == "metalfx"
 #endif
         ) {
@@ -718,8 +734,9 @@ void NativeHud::action(QString value) {
             qputenv("RHINE_RENDER_SCALE", QByteArray::number(clamped));
         }
     } else if (value == "fg") {
-        // 帧生成与抗锯齿模式互不影响；呈现层每帧读取 RHINE_FG，切换后下一帧生效，
-        // 所以这个开关是设置页里唯一不需要重启的偏好。转换规则与 Host::setPreference
+        // 帧生成与抗锯齿模式互不影响。**需要重启才生效**：呈现层是否接管窗口在启动时
+        // 按 RHINE_FG 决定（fg=off 走 Qt 默认路径，内容帧实测高 35%）。这里仍然写入
+        // 环境变量，保证设置页显示与持久化偏好一致。转换规则与 Host::setPreference
         // 共用同一个函数，免得两处对"什么才算 on"产生分歧。
         const auto enabled = m_host->preference("fg") == "on";
         const auto next = enabled ? QStringLiteral("off") : QStringLiteral("on");
@@ -732,8 +749,8 @@ void NativeHud::action(QString value) {
         startupAnimation = !startupAnimation;
         m_host->setPreference("startup-animation", startupAnimation ? "on" : "off");
     } else if (value == "vsync") {
-#ifdef Q_OS_MACOS
-        // macOS 固定关闭垂直同步，设置页不显示该行；外部动作也不改变任何状态。
+#ifdef Q_OS_DARWIN
+        // Apple 平台固定关闭垂直同步，设置页不显示该行；外部动作也不改变任何状态。
 #else
         vsync = !vsync;
         m_host->setPreference("vsync", vsync ? "on" : "off");
@@ -806,4 +823,53 @@ bool NativeHud::animating(double time) const {
     }
     return std::any_of(m_rolling.cbegin(), m_rolling.cend(),
                        [time](const auto &entry) { return entry.second.active(time); });
+}
+
+/** 排序只使用显示索引，分页仍使用上游游标；关闭页面或切换账号后停止补页。 */
+void NativeHud::beginSort() {
+    m_sortRequest.reset();
+    m_sortNotice.clear();
+    if (detailSort == "none") {
+        return;
+    }
+    const auto &music = *m_music;
+    m_sortRequest = SortRequest{music.provider, music.accountGeneration(), m_searchGeneration,
+                                music.current["key"].toString(), music.directory};
+    QTimer::singleShot(0, this, &NativeHud::continueSort);
+}
+
+void NativeHud::continueSort() {
+    if (!m_sortRequest) {
+        return;
+    }
+    auto &music = *m_music;
+    auto &request = *m_sortRequest;
+    const bool samePage = modal.isEmpty() && (frame["mode"] == "detail" || frame["mode"] == "archive") &&
+                          music.directory == request.directory &&
+                          (music.directory || music.current["key"] == request.key);
+    if (closing || !samePage || music.provider != request.provider ||
+        music.accountGeneration() != request.account || m_searchGeneration != request.generation) {
+        m_sortRequest.reset();
+        return;
+    }
+    if (music.sourceLoading() || music.directoryLoading || music.detailLoading || music.trackLoad) {
+        return;
+    }
+    const auto progress = music.directory ? music.directory->cursor : music.trackCursor;
+    const bool more = progress < (music.directory ? music.directory->ids.size() : music.trackIDs.size());
+    if (!more || progress == request.progress) {
+        if (more) {
+            m_sortNotice = QStringLiteral("未能补齐曲目，当前仅排序已载入内容，可加载更多后重试");
+            music.status += " · " + m_sortNotice;
+        }
+        m_sortRequest.reset();
+        music.changed();
+        return;
+    }
+    request.progress = progress;
+    if (music.directory) {
+        music.loadDirectoryPage();
+    } else {
+        music.loadTrackPage(music.tracks.size());
+    }
 }
