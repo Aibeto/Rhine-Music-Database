@@ -239,7 +239,7 @@ RHINE_RESOURCES=$PWD/output/resources RHINE_AA_MODE=off ./output/qt-build/RhineM
 
 随包的 Node 必须是官方独立分发包：构建脚本会检查 `ldd` 结果，只依赖 glibc 运行库的构建才会被打进 AppImage，发行版自己的 `/usr/bin/node` 动态链接了系统 ICU 等库，会被拒绝。
 
-Linux 包随附自编的 FFmpeg：发行版 `libavcodec` 动态依赖 x265/aom/SvtAv1Enc 等编码器库（合计约 55 MB），而这里只用 Qt 的 FFmpeg 后端解码音频。`scripts/prepare-linux-ffmpeg.cjs` 构建一份只保留音频能力的版本：编码器、复用器、avdevice、avfilter 全部关闭，解码器按 `vendor/ffmpeg/decoders-linux.json` 的音频白名单启用（视频解码器如 HEVC、H.264、VP9、AV1 不编译），parser 与 bitstream filter 也只留音频相关的部分，解复用器保持全开（源码优先取 `third_party/ffmpeg` 子模块，锁定标签 `n9.0.1` 且保持上游原样；子模块缺失或提交与 `vendor/ffmpeg/source.json` 的 `pinned-commit` 不一致时，回退到锁定校验和的发布包）（LGPL-2.1-or-later，不启用任何 GPL 或非自由组件），构建时自动替换进包。发现漏掉的音频格式时，用 `RHINE_FFMPEG_EXTRA_DECODERS=aac_latm,xxx` 临时追加解码器，确认后再补进白名单文件。设置 `RHINE_FFMPEG=system` 可回退发行版库；Qt 后端要求的 SONAME 与自编版本不一致时也会自动回退并告警。许可与来源见 `NOTICE` 及包内 `third-party/FFmpeg/`。
+Linux 包随附自编的 FFmpeg：发行版 `libavcodec` 动态依赖 x265/aom/SvtAv1Enc 等编码器库（合计约 55 MB），而这里只用 Qt 的 FFmpeg 后端解码音频。`scripts/prepare-linux-ffmpeg.cjs` 构建一份只保留音频能力的版本：编码器、复用器、avdevice、avfilter 全部关闭，解码器按 `vendor/ffmpeg/decoders-linux.json` 的音频白名单启用（视频解码器如 HEVC、H.264、VP9、AV1 不编译），parser 与 bitstream filter 也只留音频相关的部分，解复用器保持全开（源码优先取 `third_party/ffmpeg` 子模块，锁定标签 `n9.0.1` 且保持上游原样；子模块缺失或提交与 `vendor/ffmpeg/source.json` 的 `pinned-commit` 不一致时，回退到锁定校验和的发布包）（LGPL-2.1-or-later，不启用任何 GPL 或非自由组件），构建时自动替换进包。发现漏掉的音频格式时，用 `RHINE_FFMPEG_EXTRA_DECODERS=aac_latm,xxx` 临时追加解码器，确认后再补进白名单文件。设置 `RHINE_FFMPEG=system` 可回退发行版库；Qt 后端要求的 SONAME 与自编版本不一致时也会自动回退并告警。许可与来源见 `NOTICE` 及包内 `third-party/FFmpeg/`。构建用 `--enable-small`（`-O3` 换 `-Os`）与 `--enable-lto` 压缩体积；`-flto` 同时显式写进 `--extra-ldflags`，因为 FFmpeg 自己那套 `check_ldflags -flto $cpuflags` 探测在 GCC 16 上会因 `-march=generic` 失败并把 `-flto` 静默丢掉。脚本在 configure 后复核 `CFLAGS` 与 `LDFLAGS` 都带 `-flto`，缺任一即失败；工具链不支持 LTO 时可用 `RHINE_FFMPEG_LTO=0` 退回普通构建。
 
 打包前会删掉 AppDir 里的开发期文件（`usr/include`、`usr/lib/cmake`、`usr/lib/pkgconfig`、man/doc 与 `*.a`、`*.la`、`*.prl`），这些是发行版 Qt 的安装规则带进来的，运行时用不到。
 
@@ -249,7 +249,7 @@ AppImage 默认使用 DwarFS 镜像：跨文件去重后体积明显小于 squas
 
 ### 开发与测试
 
-默认构建类型为 `Release`。设置 `RHINE_BUILD_TYPE=Debug` 可构建调试版本；`PYTHON` 可覆盖 Python 命令。Qt 6.12+ 安装包含官方 QML Live Preview 工具时，可使用 `npm run preview` 进行热预览。
+默认构建类型为 `Release`，并为主程序开 LTO（`INTERPROCEDURAL_OPTIMIZATION_RELEASE`，GCC 下即 `-flto=auto`）。工具链缺 LTO 插件时 CMake 只会告警并降级，产物约大 1.5 MB；设 `RHINE_REQUIRE_LTO=1` 可把这种降级变成配置期错误（CI 的 Linux 任务即如此），核对方法见构建日志里的 `IPO/LTO enabled for Release` 一行。设置 `RHINE_BUILD_TYPE=Debug` 可构建调试版本；`PYTHON` 可覆盖 Python 命令。Qt 6.12+ 安装包含官方 QML Live Preview 工具时，可使用 `npm run preview` 进行热预览。
 
 设置 `RHINE_VERSION=vX.Y.Z` 时构建正式版，分发包的构建标识为 `vX.Y.Z`。
 未指定版本时为开发版：设置中显示最后一次提交标题、12 位短 SHA 和“开发版”，三平台分发包均以短 SHA 作为构建标识。
