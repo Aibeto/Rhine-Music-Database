@@ -1,0 +1,612 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Generate a single-file HTML storyboard board from the storyboard data.
+Run: python3 build_board.py > rhine-concept-pv-70s-board.html
+"""
+import html
+
+TOTAL = 70.0
+
+ACTS = [
+    ("0", "尘", 0.0, 5.0, 0.06),
+    ("1", "生", 5.0, 15.0, 0.34),
+    ("2", "藏", 15.0, 30.0, 0.56),
+    ("3", "溯", 30.0, 42.5, 0.78),
+    ("4", "鸣", 42.5, 57.5, 1.00),
+    ("5", "寂", 57.5, 65.0, 0.17),
+    ("6", "铭", 65.0, 70.0, 0.05),
+]
+
+# id, t0, t1, lens, scene, move, transition, sound, tick
+SHOTS = [
+    ("1",  0.0,  2.0, "100mm 微距", "全黑。一束极窄光柱斜切画面，三粒尘埃漂浮，只有一粒在焦平面上", "0.5cm/s 横移", "黑场起", "磁带底噪、空气声", None),
+    ("2",  2.0,  3.5, "100mm 拉焦", "气流吹散尘埃，露出一个巨大圆盘的一角——它在反光，但反的是什么看不清", "焦点由前拉后", "硬切", "40Hz 心跳，3s 混响", None),
+    ("3",  3.5,  5.0, "100mm 大特写", "盘面浮出第一道同心刻痕，慢转；表面有划痕、指纹残留", "盘转 90°", "硬切", "针尖悬停的金属「嘶」", None),
+    ("4",  5.0,  7.0, "100mm 微距", "一块六棱柱晶体在电场中析出，棱面各映着不同的模糊之物", "贴面滑行", "硬切", "高频电流 + 生长「叮」", None),
+    ("5",  7.0,  9.0, "50mm 中景", "拉远——那不是晶体，是一摞唱片堆成的柱体，正在黑暗里升起，尘埃环绕", "快速拉远 + 仰角", "硬切", "低频进入，脉冲起", 1),
+    ("6a", 9.0,  9.5, "微距", "针尖落到旋转盘面", "12fps 步进", "橙闪 1 帧", "咔", None),
+    ("6b", 9.5, 10.0, "微距", "盘面划痕像峡谷，光从谷底掠过", "12fps 步进", "硬切", "咔", None),
+    ("6c", 10.0, 10.5, "25mm", "一道光扫过盘面，反出网格", "急摇", "硬切", "碎裂声", None),
+    ("7", 10.5, 12.0, "100mm 俯拍", "克拉尼：细沙撒在转动的盘面上，随低频跳成花瓣状驻波；图形缓慢与刻痕重合", "极慢推", "M1 起", "沙粒滚动的细响", None),
+    ("8", 12.0, 15.0, "25mm 推镜", "摄影机坠入克拉尼图形最内圈，圈即孔；黑吞掉画面，同时透出白光", "指数加速推进", "M1 环→隧道", "反向混响渐强，过曝前 0.2s 全静", None),
+    ("9", 15.0, 18.0, "25mm 大全景", "白光洗出米白档案架，等距，延伸到无穷远；盒侧有不可读微缩字与色标", "通道内 6m/s 穿行", "M2 白→纸白", "弦乐进入", 2),
+    ("10", 18.0, 20.0, "35mm 中景", "掠过盒侧，图案一闪而过；每个盒子内部有微光", "侧向平移", "硬切", "纸摩擦 + 机械咔哒 0.5s/次", None),
+    ("11", 20.0, 22.0, "50mm", "一个盒子正面化成薄光幕，幕里闪过四个世界：海面 / 沙丘 / 燃烧的城市 / 雪原", "机身定格，幕内闪切", "硬切", "四下短促的「呼」", None),
+    ("12", 22.0, 24.0, "25mm 仰拍", "盒边拉长成数据柱，柱顶浮起光点，光点排成同心的环", "上摇 + 升镜", "M3 起", "低频上扬", None),
+    ("13", 24.0, 26.5, "25mm 俯拍大全景", "档案库显形为巨大唱盘的同心圆阵列，货架即纹路；一道光环沿纹路走一圈", "缓慢旋转 30°", "M3 柱→纹", "全频铺开", 3),
+    ("14", 26.5, 28.0, "100mm 侧光", "一张唱片侧立，薄如纸，光从侧面穿透，边缘发绿，内部纤维可见", "静止", "硬切", "单音", None),
+    ("15", 28.0, 30.0, "25mm 低角度", "唱片以 45° 倒下，像第一张多米诺，拍在地面激起一圈尘浪", "快速下摇跟随", "硬切", "金属落地 + 3s 混响", None),
+    ("16", 30.0, 31.5, "25mm", "尘浪卷起，摄影机被卷入粒子云，画面变成流动的灰白", "失重翻滚", "硬切", "噪声墙", None),
+    ("17", 31.5, 34.0, "100mm→25mm", "粒子云里浮出一只眼睛，角膜上是唱片纹路；瞳孔收缩，像镜头光圈", "变焦+推轨，推进瞳孔", "硬切", "心跳 + 极细高频", 4),
+    ("18", 34.0, 36.0, "25mm 隧道", "穿过瞳孔是一条隧道，四壁是竖直的频谱柱，随音乐起伏", "高速前进，透视拉长", "硬切", "律动全开", None),
+    ("19", 36.0, 39.0, "混剪 10 刀", "见闪切表 19a–19j", "12fps 步进", "10 次硬切", "每刀一记打击，共 10 记", None),
+    ("20", 39.0, 42.5, "50mm 环摇", "骤停：纯黑房间，中央悬浮一张发光唱片，尘土慢速飘", "缓慢环绕 15°", "硬切（静）", "近乎静默，只有耳机漏音的低频", None),
+    ("21", 42.5, 45.0, "50mm", "唱片猛然加速，甩出一圈光带；光带在空中展开成白色细线网格", "快速拉远露出网格", "M4 起", "加速的嗡鸣", 5),
+    ("22", 45.0, 47.5, "25mm", "细线开始搭建 UI：标题栏、分割线、列、伪字形文本块，像全息在空间里组装", "缓慢横移穿过结构", "M4 带→格", "每落位一声「嗒」（共 12 声）", None),
+    ("23", 47.5, 50.0, "25mm 穿行", "摄影机穿过全息 UI，穿过处被切开，剖面发橄榄绿", "直线穿行", "硬切", "低频扫频", None),
+    ("24", 50.0, 52.5, "18mm 广角全景", "UI 与建筑混合：书架即列表，列表即书架；中央悬唱片，下方是一个纯黑的、播放键形状的洞", "大范围横移", "硬切", "全频", None),
+    ("25", 52.5, 55.0, "25mm", "一束光自己去按那个洞（没有手）；唱片起转，声波以球面扩散，粒子被推开", "冲击波把镜头推开", "M5", "峰值 · 橙闪 3 帧", None),
+    ("26", 55.0, 57.5, "—", "白光溢出全屏，峰值；白中淡出一个极小的黑点", "过曝", "M5 → 硬切（不淡出）", "峰值 → 静", None),
+    ("27", 57.5, 60.0, "100mm 微距", "回到开场的光柱与尘埃，但这次尘埃是静止的", "完全静止", "硬切", "全静默，只剩耳鸣般高频", None),
+    ("28", 60.0, 62.5, "50mm", "光柱里悬着唱片，缓慢自转；背景是虚焦的米白档案架", "极慢环绕", "硬切", "单音（正弦/钢琴）", 6),
+    ("29", 62.5, 65.0, "25mm", "摄影机后退，唱片缩小成一个点，落在画面正中偏下", "匀速后退", "M6 盘→点", "混响尾巴", None),
+    ("30", 65.0, 67.0, "图形", "黑场。那个点展开成一条 1px 横线——它就是刻度尺的第 7 格；左端出现方块标记", "—", "硬切 · 橙标记", "一声极轻的「叮」", 7),
+    ("31", 67.0, 69.0, "图形", "横线上方浮出字标，无动画，直接出现，字距 +0.3em", "无", "—", "静", None),
+    ("32", 69.0, 70.0, "图形", "黑场，只剩那条横线；0.2s 后线也消失", "—", "黑场", "干净地断掉，不淡出", None),
+]
+
+MORPHS = [
+    ("M1", "12.0s", "克拉尼内圈 → 隧道入口", "圆的边缘向纵深拉伸成管壁；内圈半径不变，外圈被拉长", "3.0s"),
+    ("M2", "15.0s", "过曝白 → 纸白档案库", "曝光回落时，白色里先浮雕出盒子的边缘阴影", "2.0s"),
+    ("M3", "24.0s", "数据柱 → 唱片纹路", "升到俯视角，柱顶光点连成同心环，柱退化为平面上的线", "2.5s"),
+    ("M4", "45.0s", "光带 → UI 网格", "光带展开时不是散开，是被拉直；直线交点先出现，再长出细线", "2.5s"),
+    ("M5", "55.0s", "声波球面 → 全白", "球面推到镜头位置时不是穿过，是贴满整个画面，然后过曝", "2.5s"),
+    ("M6", "62.5s", "盘 → 点", "唱片不是缩小，是翻到侧面成一条线，再缩成一个点", "2.5s"),
+]
+
+FRAMES = [
+    ("K1", "第 3 镜 · 刻痕", "圆盘边缘在左下占 1/4，其余是黑。100mm T2.0 俯角 15°。拉丝铝 + 同心车纹，留 3 处指纹、2 条发丝划痕——全片唯一一次「人」的痕迹。", "它已经在这里很久了。"),
+    ("K2", "第 7 镜 · 克拉尼", "俯拍全圆，沙在低频下跳成六瓣/八瓣驻波，边缘的沙在「走」。干燥颗粒，每颗都在跳——不能做成流体噪声，这是最容易翻车的一镜。", "声音有了形状。"),
+    ("K3", "第 13 镜 · 档案库即唱盘", "俯拍 90°，同心圆阵列充满画面，圆心偏右下。25mm T5.6 高度 40m。聚酯白盒阵列，每 12 个盒子一次色差。", "货架就是纹路。"),
+    ("K4", "第 17 镜 · 眼", "眼占 80%，瞳孔略偏。100mm 变焦+推轨切 25mm 制造透视畸变。角膜叠加唱片同心纹路（法线位移，不是贴图）。", "它在看你。"),
+    ("K5", "第 22 镜 · 界面组装", "三层景深：前景线框虚焦、中景组装中的 UI、背景唱片。氧化玻璃厚 2mm，有气泡与污渍。每元素 0.4s 缓入落位，落位瞬间 0.06s 过曝。", "它在被搭建出来。"),
+    ("K6", "第 24 镜 · 书架即列表", "18mm 广角，透视线从四角收向中心唱片。T5.6 高度 1.6m（人眼）。全片唯一「两种物质同时出现」的镜头。", "这不是软件，这是一个地方。"),
+    ("K7", "第 28 镜 · 光柱里的唱片", "唱片占 12%，光柱从上方斜切。50mm T2.0 环绕 5°/s。喷砂铝 + 薄尘。尘埃静止，和开场形成镜像。", "它一直在那儿。"),
+    ("K8", "第 30–31 镜 · 落款", "横线在垂直中线略下，长 18% 画面宽；左端方块 8px 橙色。极细 grotesque，字距 +0.3em。无动画，直接 cut in。", "报告写完了。"),
+]
+
+FLASH = [
+    ("19a", "玻璃杯里的水因声波起涟漪", "实拍微距"),
+    ("19b", "唱针针尖，反着光", "实拍微距"),
+    ("19c", "黑暗中一双手翻动唱片，只见手与光", "全片唯一一次出现「人」"),
+    ("19d", "老式示波器的绿线", "实拍 CRT，呼应苔绿"),
+    ("19e", "那只眼睛闭上", "与第 17 镜同一只眼"),
+    ("19f", "磁带被拉出一截，绞成一团", "磁带盒未来主义"),
+    ("19g", "城市楼群像均衡器一样起伏", "3D"),
+    ("19h", "一滴水落在光盘上，涟漪扩散成同心圆", "和克拉尼同构"),
+    ("19i", "档案盒一个个自动弹开（俯拍）", "3D"),
+    ("19j", "唱片中心孔正对镜头，孔里是星空", "与第 2 镜呼应"),
+]
+
+PALETTE = [
+    ("#E7E7E1", "纸白", "档案库 / 光 / 片尾", "全片"),
+    ("#141613", "墨", "字 / 线 / 剪影", "全片"),
+    ("#777B60", "苔绿", "只做暗部反射", "全片"),
+    ("#F2F7F4", "冷白", "唯一发光体", "全片"),
+    ("#E8622A", "莱茵橙", "只属于机械交互", "仅 3 次 · 每次 ≤3 帧"),
+]
+
+
+def esc(s):
+    return html.escape(str(s), quote=True)
+
+
+def x(t):
+    return 100.0 * t / TOTAL
+
+
+def energy_path():
+    pts = []
+    for _, _, a, b, e in ACTS:
+        pts.append((x(a), 100 - e * 100))
+        pts.append((x(b), 100 - e * 100))
+    return pts
+
+
+def svg_curve():
+    pts = energy_path()
+    d = ["M %.3f %.3f" % pts[0]]
+    for px, py in pts[1:]:
+        d.append("L %.3f %.3f" % (px, py))
+    return " ".join(d)
+
+
+def svg_fill():
+    pts = energy_path()
+    d = ["M %.3f 100" % pts[0][0]]
+    for px, py in pts:
+        d.append("L %.3f %.3f" % (px, py))
+    d.append("L %.3f 100 Z" % pts[-1][0])
+    return " ".join(d)
+
+
+def bars():
+    out = []
+    for i in range(28):
+        t = i * 2.5
+        w = 100.0 / 28
+        cls = "bar whole" if i % 4 == 0 else "bar"
+        out.append('<i class="%s" style="left:%.4f%%;width:%.4f%%"></i>' % (cls, x(t), w))
+    return "".join(out)
+
+
+def act_spans():
+    out = []
+    for code, name, a, b, e in ACTS:
+        out.append(
+            '<div class="act" style="left:%.4f%%;width:%.4f%%">'
+            '<div class="actName"><b>%s</b><span>%s</span></div>'
+            '<div class="actMeta">%.1fs</div></div>' % (x(a), x(b - a), code, name, b - a)
+        )
+    return "".join(out)
+
+
+def act_band():
+    out = []
+    for code, name, a, b, e in ACTS:
+        out.append('<i class="band b%d" style="left:%.4f%%;width:%.4f%%"></i>' % (int(code), x(a), x(b - a)))
+    return "".join(out)
+
+
+def shot_strip():
+    out = []
+    for sid, t0, t1, lens, sc, mv, tr, sd, tick in SHOTS:
+        e = "M" in tr
+        o = "橙" in tr or "橙" in sd
+        cls = "cell" + (" morph" if e and "M" in tr and tr.startswith("M") else "") + (" orange" if o else "")
+        out.append(
+            '<div class="%s" style="left:%.4f%%;width:%.4f%%" title="镜%s · %.1f–%.1fs · %s">'
+            '<span>%s</span></div>' % (cls, x(t0), x(t1 - t0), sid, t0, t1, esc(lens), esc(sid))
+        )
+    return "".join(out)
+
+
+def ruler():
+    """The 1px scale bar that recurs 7 times, one notch higher each time.
+    Tick 7 IS the end-card horizontal rule."""
+    out = []
+    ticks = [(sid, (t0 + t1) / 2.0, n) for sid, t0, t1, *_r, n in SHOTS if n]
+    for sid, mid, n in ticks:
+        h = 5 + n * 4.2
+        out.append(
+            '<div class="rk" style="left:%.4f%%;height:%.1fpx"><b>%d</b></div>'
+            % (x(mid), h, n)
+        )
+    return "".join(out)
+
+
+def cards():
+    out = []
+    for sid, t0, t1, lens, sc, mv, tr, sd, tick in SHOTS:
+        dur = t1 - t0
+        trans_cls = "tv-cut"
+        if tr.startswith("M"):
+            trans_cls = "tv-morph"
+        if "橙" in tr or "橙" in sd:
+            trans_cls = "tv-orange"
+        if "黑场" in tr:
+            trans_cls = "tv-black"
+        tickbadge = ('<span class="tick">刻度 %d</span>' % tick) if tick else ""
+        out.append("""
+<article class="card">
+  <header>
+    <span class="num">%s</span>
+    <span class="tc">%s – %s</span>
+    <span class="dur">%.1fs</span>
+    %s
+  </header>
+  <div class="lens">%s</div>
+  <p class="scene">%s</p>
+  <div class="rows">
+    <div><b>运动</b><span>%s</span></div>
+    <div><b>转出</b><span class="tw %s">%s</span></div>
+    <div><b>声音</b><span>%s</span></div>
+  </div>
+</article>""" % (
+            esc(sid), "%.1fs" % t0, "%.1fs" % t1, dur, tickbadge,
+            esc(lens), esc(sc), esc(mv), trans_cls, esc(tr), esc(sd),
+        ))
+    return "".join(out)
+
+
+def morphs():
+    out = []
+    for code, at, fr, how, dur in MORPHS:
+        out.append("""
+<div class="morph">
+  <div class="mh"><b>%s</b><span>%s</span></div>
+  <div class="mt">%s</div>
+  <p>%s</p>
+  <div class="md">%s</div>
+</div>""" % (code, at, esc(fr), esc(how), dur))
+    return "".join(out)
+
+
+def frames():
+    out = []
+    for code, title, spec, mood in FRAMES:
+        out.append("""
+<div class="frame">
+  <div class="fh"><b>%s</b><span>%s</span></div>
+  <p>%s</p>
+  <q>%s</q>
+</div>""" % (code, esc(title), esc(spec), esc(mood)))
+    return "".join(out)
+
+
+def flash():
+    out = []
+    for code, what, note in FLASH:
+        out.append('<li><b>%s</b><span>%s</span><i>%s</i></li>' % (code, esc(what), esc(note)))
+    return "".join(out)
+
+
+def palette():
+    out = []
+    for hexv, name, use, freq in PALETTE:
+        out.append(
+            '<div class="sw"><i style="background:%s"></i><div><b>%s</b><span>%s</span><small>%s</small></div><code>%s</code></div>'
+            % (hexv, esc(name), esc(use), esc(freq), hexv)
+        )
+    return "".join(out)
+
+
+
+MATERIALS = [
+    ("M1", "喷砂铝", "唱盘 · 针 · 机械件", [
+        ("base color", "#B8BCB6 · linear 0.52–0.58，微冷"),
+        ("roughness", "0.42–0.50　亚光"),
+        ("anisotropic", "0.30，沿车削同心圆"),
+        ("normal", "车纹 0.08 + 细颗粒 0.03"),
+        ("edge wear", "0.5–1.5mm，曲率遮罩，不许均匀"),
+        ("指纹", "3 处，roughness 降到 0.25 的油脂层"),
+    ], "镜面反射 / clearcoat / 任何镀铬感"),
+    ("M2", "聚酯白", "档案盒外壳", [
+        ("base color", "#E7E7E1 · linear ≈ 0.79"),
+        ("roughness", "0.55，均匀，不要噪声"),
+        ("coat", "0.15 / coat-rough 0.35　薄涂层"),
+        ("transmission", "0.02，仅边缘 0.3mm 透光"),
+        ("积灰", "底部 15% 高度，AO 驱动"),
+    ], "白值过曝 —— 暗环境锁 0.72–0.80"),
+    ("M3", "纸浆", "盒内 · 标签", [
+        ("roughness", "0.85 · #D9D8CE"),
+        ("normal", "纤维各向异性 0.06"),
+        ("碎边", "0.2mm displacement"),
+        ("备注", "起毛必须靠位移，贴图做不出来"),
+    ], "用贴图假装纸纤维"),
+    ("M4", "半透树脂", "晶体", [
+        ("IOR / trans", "1.49 / 0.85"),
+        ("roughness", "0.12"),
+        ("色散", "0.02　宁少勿多"),
+        ("体积散射", "density 0.02，色微暖"),
+        ("内含", "气泡 3–5 个 + 悬浮杂质"),
+    ], "色散 >0.1 就变成水晶球"),
+    ("M5", "氧化玻璃", "全息 UI", [
+        ("厚度", "2mm，边缘染苔绿"),
+        ("亮度", "0.3 —— 靠环境反射才看得见"),
+        ("表面", "气泡 3–5 个，污渍 2 处"),
+        ("备注", "全片唯一的「高科技」来源"),
+    ], "自发光拉满 = 网页 / PPT"),
+    ("M6", "尘埃", "全片的时间", [
+        ("粒径", "0.3–2mm，不均匀分布"),
+        ("景深", "仅 3% 在焦平面"),
+        ("运动", "布朗 + 0.02m/s 上升气流"),
+        ("备注", "第 27 镜静止，且必须是同一批粒子"),
+    ], "换了粒子 = 换了时间线"),
+]
+
+
+def materials():
+    out = []
+    for code, name, use, rows, ban in MATERIALS:
+        body = "".join(
+            "<div><dt>%s</dt><dd>%s</dd></div>" % (esc(k), esc(v)) for k, v in rows
+        )
+        out.append(
+            '<div class="mat"><div class="mh"><b>%s</b><span>%s</span><i>%s</i></div>'
+            "<dl>%s</dl><p class=\"ban\"><s>\u2715</s>%s</p></div>"
+            % (code, esc(name), esc(use), body, esc(ban))
+        )
+    return "".join(out)
+
+
+CSS = """
+*{box-sizing:border-box;margin:0;padding:0}
+html{background:#080C10;color:#E7E7E1}
+body{font:14px/1.65 system-ui,"Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  background:#080C10;padding:48px 40px 96px;max-width:1560px;margin:0 auto;
+  -webkit-font-smoothing:antialiased}
+code,.mono,header .tc,header .num,.lens,.actMeta,.md,.sw code{
+  font-family:ui-monospace,"Cascadia Mono",Menlo,Consolas,monospace}
+hr{border:0;border-top:1px solid rgba(231,231,225,.10);margin:56px 0}
+h1{font-size:15px;font-weight:500;letter-spacing:.34em;text-transform:uppercase;
+  color:#E7E7E1;font-family:ui-monospace,Menlo,Consolas,monospace}
+h1 small{display:block;letter-spacing:.18em;font-size:10px;color:#777B60;margin-top:10px}
+h2{font-size:10px;letter-spacing:.30em;text-transform:uppercase;color:#777B60;font-weight:500;
+  margin-bottom:22px;font-family:ui-monospace,Menlo,Consolas,monospace}
+h2:before{content:"";display:inline-block;width:22px;height:1px;background:#777B60;
+  vertical-align:middle;margin-right:12px;transform:translateY(-1px)}
+
+/* masthead */
+.mast{display:flex;justify-content:space-between;align-items:flex-end;gap:40px;
+  padding-bottom:26px;border-bottom:1px solid rgba(231,231,225,.16);margin-bottom:34px}
+.spec{display:grid;grid-template-columns:repeat(3,auto);gap:6px 34px;font-size:11px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;color:#9A9C90;text-align:right}
+.spec b{color:#E7E7E1;font-weight:500}
+.spec em{color:#E8622A;font-style:normal}
+
+/* timeline */
+.tl{position:relative;height:150px;margin-bottom:14px;
+  border-top:1px solid rgba(231,231,225,.10);border-bottom:1px solid rgba(231,231,225,.10)}
+.tl .bar{position:absolute;top:0;bottom:0;border-left:1px solid rgba(231,231,225,.055)}
+.tl .bar.whole{border-left-color:rgba(231,231,225,.16)}
+.band{position:absolute;height:34px;top:0;background:rgba(231,231,225,.035);
+  border-right:1px solid rgba(231,231,225,.10)}
+.band.b4{background:rgba(242,247,244,.09)}
+.band.b5{background:rgba(119,123,96,.12)}
+.tl svg{position:absolute;left:0;top:46px;width:100%;height:calc(100% - 46px);overflow:visible}
+.actName{display:flex;align-items:baseline;gap:7px;font-size:10px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;color:#777B60;
+  position:absolute;top:9px;left:9px;white-space:nowrap;overflow:hidden}
+.actName b{color:#E7E7E1;font-weight:500}
+.actName span{letter-spacing:.2em}
+.actMeta{position:absolute;top:26px;left:9px;font-size:9px;color:#5C6155}
+.act{position:absolute;top:0;height:52px}
+.peak{position:absolute;top:0;bottom:0;width:0;
+  border-left:1px dashed rgba(232,98,42,.40);pointer-events:none}
+.strip{position:relative;height:34px;margin-bottom:4px}
+.cell{position:absolute;top:0;height:22px;background:rgba(231,231,225,.22);
+  border-right:2px solid #080C10;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.cell span{font:9px/1 ui-monospace,Menlo,Consolas,monospace;color:#0A0F14;opacity:.85}
+.cell.morph{background:#777B60}
+.cell.morph span{color:#F2F7F4}
+.cell.orange{background:#E8622A}
+.cell.orange span{color:#fff}
+.ruler{position:relative;height:44px;margin:18px 0 8px;
+  border-bottom:1px solid rgba(231,231,225,.07)}
+.rk{position:absolute;bottom:0;width:1px;background:#9BA082;transform:translateX(-50%)}
+.rk b{position:absolute;top:-13px;left:50%;transform:translateX(-50%);
+  font:8px ui-monospace,Menlo,monospace;color:#777B60;font-weight:400}
+.endline{position:absolute;height:1px;background:#E8622A;opacity:.75}
+.endoflabel{position:absolute;top:2px;transform:translateX(-100%);
+  font:8.5px ui-monospace,Menlo,monospace;color:#E8622A;opacity:.8;
+  white-space:nowrap;letter-spacing:.06em;text-align:right}
+.cap{font:8.5px ui-monospace,Menlo,monospace;color:#4B504A;letter-spacing:.06em;margin-top:9px}
+.cap.moss{color:#777B60}
+.scale{position:relative;height:18px;font:9px ui-monospace,Menlo,monospace;color:#5C6155}
+.scale span{position:absolute;transform:translateX(-50%)}
+
+/* cards */
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(268px,1fr));gap:14px}
+.card{background:#0C1319;border:1px solid rgba(231,231,225,.08);padding:15px 16px 12px;
+  position:relative;display:flex;flex-direction:column;gap:9px}
+.card:hover{border-color:rgba(231,231,225,.24)}
+.card header{display:flex;align-items:baseline;gap:9px;flex-wrap:wrap}
+.num{font-size:17px;color:#F2F7F4;letter-spacing:.02em}
+.tc{font-size:9.5px;color:#5C6155}
+.dur{margin-left:auto;font:9.5px ui-monospace,Menlo,monospace;color:#777B60}
+.tick{font:8.5px ui-monospace,Menlo,monospace;color:#0A0F14;background:#777B60;
+  padding:1px 5px;letter-spacing:.08em}
+.lens{font-size:9.5px;color:#777B60;letter-spacing:.04em}
+.scene{font-size:12.5px;line-height:1.72;color:#D3D3C9}
+.rows{display:grid;grid-template-columns:30px minmax(0,1fr);gap:4px 8px;
+  align-items:baseline;font-size:10.5px;color:#8D9083}
+.rows>div{display:contents}
+.rows b{color:#5C6155;font-weight:400;font-family:ui-monospace,Menlo,monospace}
+.rows span{min-width:0}
+.tw{justify-self:start;white-space:nowrap;padding:0 7px;font-size:9.5px;
+  line-height:1.6;border:1px solid rgba(231,231,225,.16)}
+.tw.tv-cut{border-color:transparent;padding-left:0;color:#6C7067}
+.tw.tv-morph{border-color:rgba(119,123,96,.85);color:#A8AC92}
+.tw.tv-orange{border-color:#E8622A;color:#E8622A}
+.tw.tv-black{border-color:rgba(231,231,225,.34);color:#E7E7E1}
+
+
+/* morphs */
+.mgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;
+  background:rgba(231,231,225,.08)}
+.morph{background:#0C1319;padding:18px 20px}
+.mh{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
+.morph .mh b{font:11px ui-monospace,Menlo,monospace;color:#0A0F14;background:#777B60;padding:1px 7px}
+.mh span{font:10px ui-monospace,Menlo,monospace;color:#5C6155}
+.mt{font-size:13px;color:#F2F7F4;margin-bottom:8px}
+.morph p{font-size:11.5px;color:#8D9083;line-height:1.7}
+.md{margin-top:9px;font-size:9.5px;color:#5C6155}
+
+/* key frames */
+.fgrid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;
+  background:rgba(231,231,225,.08)}
+.frame{background:#0C1319;padding:20px 22px 18px}
+.fh{display:flex;align-items:baseline;gap:11px;margin-bottom:12px;
+  padding-bottom:9px;border-bottom:1px solid rgba(231,231,225,.09)}
+.fh b{font:11px ui-monospace,Menlo,monospace;color:#777B60;letter-spacing:.1em}
+.fh span{font-size:12.5px;color:#F2F7F4}
+.frame p{font-size:11.5px;line-height:1.75;color:#9A9C90}
+.frame q{display:block;margin-top:12px;font-size:11.5px;color:#777B60;font-style:normal}
+.frame q:before{content:"— ";}
+
+/* flash list */
+.flash{list-style:none;display:grid;grid-template-columns:1fr;gap:0}
+.flash li{display:grid;grid-template-columns:40px minmax(0,1fr) 220px;gap:16px;
+  align-items:baseline;padding:8px 0;border-bottom:1px solid rgba(231,231,225,.06);
+  font-size:11.5px}
+.flash b{font:10px ui-monospace,Menlo,monospace;color:#777B60}
+.flash span{color:#D3D3C9}
+.flash i{font-style:normal;color:#5C6155;font-size:10px;text-align:right}
+
+/* palette */
+.pal{display:grid;grid-template-columns:repeat(auto-fit,minmax(238px,1fr));gap:1px;
+  background:rgba(231,231,225,.08)}
+.sw{background:#0C1319;padding:0;display:flex;align-items:stretch}
+.sw i{flex:0 0 54px}
+.sw div{padding:11px 13px;flex:1;display:flex;flex-direction:column;gap:2px}
+.sw b{font-size:11.5px;font-weight:500;color:#E7E7E1}
+.sw span{font-size:10px;color:#8D9083}
+.sw small{font-size:9px;color:#5C6155;letter-spacing:.04em}
+.sw code{align-self:center;padding-right:13px;font-size:9.5px;color:#5C6155}
+
+footer{margin-top:64px;padding-top:18px;border-top:1px solid rgba(231,231,225,.10);
+  font:10px ui-monospace,Menlo,monospace;color:#4B504A;display:flex;
+  justify-content:space-between;gap:20px;flex-wrap:wrap;letter-spacing:.06em}
+
+/* materials */
+.matgrid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1px;
+  background:rgba(231,231,225,.10);border:1px solid rgba(231,231,225,.10)}
+.mat{background:#0C1319;padding:18px 20px 16px;display:flex;flex-direction:column}
+.mat .mh{display:flex;align-items:baseline;gap:8px;margin-bottom:13px;
+  padding-bottom:10px;border-bottom:1px solid rgba(231,231,225,.08)}
+.mat .mh b{font:10px ui-monospace,Menlo,monospace;color:#0A0F14;background:#777B60;padding:1px 6px;letter-spacing:.08em}
+.mat .mh span{font-size:13.5px;color:#E7E7E1;letter-spacing:.02em}
+.mat .mh i{font-size:9px;color:#5C6155;font-style:normal;margin-left:auto;letter-spacing:.04em}
+.mat dl{display:grid;gap:4px}
+.mat dl>div{display:grid;grid-template-columns:92px 1fr;gap:10px;align-items:baseline}
+.mat dt{font:9px ui-monospace,Menlo,monospace;color:#5C6155;letter-spacing:.03em;text-align:right}
+.mat dd{font-size:10.5px;color:#9A9C90;line-height:1.55}
+.mat .ban{margin-top:auto;padding-top:9px;border-top:1px dashed rgba(231,231,225,.12);
+  font-size:10px;color:#8D9083;display:flex;gap:6px;align-items:baseline}
+.mat .ban s{color:#777B60;text-decoration:none;font-size:10px}
+
+@media (max-width:1280px){
+  .fgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+}
+@media (max-width:1000px){
+  .mgrid{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .flash li{grid-template-columns:36px minmax(0,1fr)}
+  .flash i{display:none}
+}
+@media (max-width:820px){
+  body{padding:28px 18px 64px}
+  .mast{flex-direction:column;align-items:flex-start;gap:20px}
+  .spec{text-align:left}
+  .fgrid,.mgrid,.matgrid{grid-template-columns:1fr}
+}
+@media print{
+  html,body{background:#fff;color:#111}
+  .card,.morph,.frame,.sw{background:#fff;border-color:#ddd}
+  h1{color:#111}
+}
+"""
+
+HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>RHINE MUSIC DATABASE · 概念宣传影像 70″ · 分镜板</title>
+<style>%(css)s</style>
+</head>
+<body>
+
+<div class="mast">
+  <h1>Rhine Music Database<small>Concept Promotional Film · Storyboard Board · v3 · 方向 A 档案 · 物性</small></h1>
+  <div class="spec">
+    <div>总时长 <b>70.0s</b></div>
+    <div>镜头 <b>34</b></div>
+    <div>剪辑点 <b>42</b></div>
+    <div>BPM <b>96</b></div>
+    <div>小节 <b>28</b></div>
+    <div>形变转场 <b>6</b></div>
+    <div>旁白 <b>0</b></div>
+    <div>介绍文字 <b>0</b></div>
+    <div>饱和色 <b><em>3 帧组</em></b></div>
+  </div>
+</div>
+
+<h2>时间结构</h2>
+<div class="tl">
+  %(bands)s
+  %(actspans)s
+  <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+    <path d="%(fill)s" fill="rgba(242,247,244,.07)"/>
+    <path d="%(curve)s" fill="none" stroke="#F2F7F4" stroke-opacity=".85"
+          stroke-width="1.6" vector-effect="non-scaling-stroke"
+          stroke-linejoin="miter"/>
+  </svg>
+  %(bars)s
+  <div class="peak" style="left:82.1429%%"></div>
+</div>
+
+<div class="scale">
+  %(scales)s
+</div>
+
+<div class="strip">%(strip)s</div>
+<div class="cap">34 个镜头块 · 苔绿 = 形变转场 · 橙 = 机械交互帧 · 虚线 = 57.5s 峰值，之后硬切</div>
+<div class="ruler">%(ruler)s</div>
+<div class="cap moss">刻度尺 · 全片出现 7 次，每次高一格，从不解释 —— 第 7 格就是片尾那条 1px 横线</div>
+
+<hr>
+
+<h2>分镜 · 34 镜 / 42 剪辑点</h2>
+<div class="grid">%(cards)s</div>
+
+<hr>
+
+<h2>材质圣经 · A 方向的赌注全在这里</h2>
+<div class="matgrid">%(materials)s</div>
+<div class="cap moss">贴图糙一点，整片立刻掉进学生作业 —— 这六张表是这一版的主体，不是附录</div>
+
+<hr>
+
+<h2>形变链 · 六处不做剪切</h2>
+<div class="mgrid">%(morphs)s</div>
+
+<hr>
+
+<h2>关键帧 · 先做这 8 张</h2>
+<div class="fgrid">%(frames)s</div>
+
+<hr>
+
+<h2>第 19 镜 · 闪切十刀（每刀 0.3s / 12fps 步进）</h2>
+<ul class="flash">%(flash)s</ul>
+
+<hr>
+
+<h2>调色板与纪律</h2>
+<div class="pal">%(palette)s</div>
+
+<footer>
+  <span>96 BPM × 28 小节 = 70.0s · 能量断崖在 57.5s · 橙色仅属于机械交互</span>
+  <span>RHINE MUSIC DATABASE / STORYBOARD v3</span>
+</footer>
+
+</body>
+</html>
+"""
+
+
+def scales():
+    out = []
+    for i in range(0, 71, 5):
+        out.append('<span style="left:%.4f%%">%ds</span>' % (x(i), i))
+    return "".join(out)
+
+
+print(HTML % {
+    "css": CSS,
+    "bands": act_band(),
+    "actspans": act_spans(),
+    "fill": svg_fill(),
+    "curve": svg_curve(),
+    "bars": bars(),
+    "scales": scales(),
+    "ruler": ruler(),
+    "strip": shot_strip(),
+    "cards": cards(),
+    "morphs": morphs(),
+    "frames": frames(),
+    "flash": flash(),
+    "materials": materials(),
+    "palette": palette(),
+})
