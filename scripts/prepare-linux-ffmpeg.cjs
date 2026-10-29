@@ -125,7 +125,17 @@ const bsfs = [
 ];
 
 // 构建参数：shared 便于随包替换；关闭一切与音频解码无关的部分。
+// --enable-small 把默认的 -O3 换成 -Os：音频解码的算力冗余很大，换来的结果是 avcodec 小一截。
+// --enable-lto 让 CFLAGS 带上 -flto，链接期再做跨编译单元的死代码消除；不启用任何 GPL 组件，
+//   许可断言不受影响。
+// --extra-ldflags=-flto 是补 FFmpeg 自己的漏洞：它用 `check_ldflags -flto $cpuflags` 决定链接期
+//   是否带 -flto，而 $cpuflags 默认是 -march=generic；GCC 16 起 generic 只允许出现在 -mtune 上，
+//   该探测因此失败，-flto 被静默从 LDFLAGS 拿掉。此时对象是胖 LTO 对象（同时含 IR 与机器码），
+//   链接器若没加载到插件就会直接跳到机器码，LTO 白开。显式写进 ldflags 后不依赖这个探测，也不
+//   依赖 ld 的 /usr/lib/bfd-plugins 自动加载插件。
+//   工具链确实不支持时用 RHINE_FFMPEG_LTO=0 关掉，该值同时进 fingerprint，切换会触发重编。
 // --disable-x86asm 免去构建机需要 nasm，音频解码不依赖汇编加速。
+const lto = process.env.RHINE_FFMPEG_LTO !== '0';
 const configureArguments = [
     '--enable-shared',
     '--disable-static',
@@ -133,6 +143,8 @@ const configureArguments = [
     '--disable-doc',
     '--disable-debug',
     '--disable-autodetect',
+    '--enable-small',
+    ...(lto ? ['--enable-lto', '--extra-ldflags=-flto'] : []),
     '--disable-encoders',
     '--disable-muxers',
     '--disable-avdevice',
@@ -204,6 +216,34 @@ function assertAudioOnly() {
     console.log(`FFmpeg decoders: ${enabled.size} enabled, video decoders disabled`);
 }
 
+/**
+ * 断言 LTO 真的生效
+ * configure 的 check_cflags/check_ldflags 对不认识的 flag 只记日志、不报错，缺插件时 -flto 被丢弃
+ * 而构建照常成功。两个位置都要复核：CFLAGS 缺 -flto 等于没开 LTO；LDFLAGS 缺 -flto 则链接期不做
+ * 跨单元优化（胖 LTO 对象会退回机器码），两者都算静默降级，一律拦住。
+ */
+function assertLto() {
+    if (!lto) {
+        console.warn('FFmpeg LTO disabled by RHINE_FFMPEG_LTO=0');
+        return;
+    }
+    const file = path.join(build, 'ffbuild/config.mak');
+    if (!fs.existsSync(file)) {
+        console.warn('Cannot confirm the FFmpeg LTO flags; check configure output');
+        return;
+    }
+    const content = fs.readFileSync(file, 'utf8');
+    const flags = (name) => (content.match(new RegExp(`^${name}=(.*)$`, 'm')) || [, ''])[1];
+    const missing = ['CFLAGS', 'LDFLAGS'].filter((name) => !/(?:^|\s)-flto/.test(flags(name)));
+    if (missing.length > 0) {
+        throw new Error(
+            `FFmpeg LTO was requested but -flto is missing from ${missing.join(' and ')}; ` +
+                'set RHINE_FFMPEG_LTO=0 only if this toolchain cannot do LTO',
+        );
+    }
+    console.log('FFmpeg LTO: -flto present in CFLAGS and LDFLAGS');
+}
+
 function main() {
     const { tree, provenance } = prepareSourceTree();
     const stamp = path.join(install, '.build.json');
@@ -222,6 +262,7 @@ function main() {
     run(path.join(tree, 'configure'), [`--prefix=${install}`, ...configureArguments], build);
     assertLgpl();
     assertAudioOnly();
+    assertLto();
     run('make', ['-j', process.env.RHINE_BUILD_JOBS || String(os.cpus().length)], build);
     run('make', ['install'], build);
     // 随包保留来源与构建参数，满足 LGPL 的源码可得性要求。
