@@ -102,11 +102,9 @@ void ScenePostProcess::prepare(QSize render, QSize display, const QJsonObject &f
             m_globals = create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 544)));
             m_constants =
                 create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Fsr1Con))));
-#ifdef Q_OS_WIN
-            // Windows 单独保存 RCAS 常量，避免同帧动态更新覆盖 EASU。
+            // 保存 RCAS 常量，避免同帧动态更新覆盖 EASU。
             m_rcasConstants =
                 create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Fsr1Con))));
-#endif
             m_sampler =
                 create(own(rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
                                            QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge)));
@@ -165,14 +163,9 @@ void ScenePostProcess::quad(QRhiCommandBuffer *commands, const QString &kind, QR
         QList<QRhiShaderResourceBinding> values{
             QRhiShaderResourceBinding::uniformBuffer(0, stages, m_globals)};
         if (kind.startsWith("fsr1_")) {
-#ifdef Q_OS_WIN
             auto *constants = kind == "fsr1_rcas" ? m_rcasConstants : m_constants;
             values.append(QRhiShaderResourceBinding::uniformBuffer(
                 1, QRhiShaderResourceBinding::FragmentStage, constants));
-#else
-            values.append(QRhiShaderResourceBinding::uniformBuffer(
-                1, QRhiShaderResourceBinding::FragmentStage, m_constants));
-#endif
         }
         for (int index = 0; index < textures.size(); ++index) {
             values.append(QRhiShaderResourceBinding::sampledTexture(
@@ -205,12 +198,8 @@ void ScenePostProcess::quad(QRhiCommandBuffer *commands, const QString &kind, QR
 void ScenePostProcess::fsrQuad(QRhiCommandBuffer *commands, const QString &kind,
                                QRhiRenderTarget *destination, QRhiTexture *source, const Fsr1Con &constants) {
     auto batch = rhi->nextResourceUpdateBatch();
-#ifdef Q_OS_WIN
     auto *buffer = kind == "fsr1_rcas" ? m_rcasConstants : m_constants;
     batch->updateDynamicBuffer(buffer, 0, sizeof(constants), &constants);
-#else
-    batch->updateDynamicBuffer(m_constants, 0, sizeof(constants), &constants);
-#endif
     commands->resourceUpdate(batch);
     quad(commands, kind, destination, {source});
 }

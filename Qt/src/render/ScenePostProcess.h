@@ -45,9 +45,7 @@ class ScenePostProcess : public SceneResources {
     bool m_historyValid = false;
     QRhiBuffer *m_globals = nullptr;
     QRhiBuffer *m_constants = nullptr;
-#ifdef Q_OS_WIN
     QRhiBuffer *m_rcasConstants = nullptr;
-#endif
     QRhiSampler *m_sampler = nullptr;
     QHash<QString, QRhiShaderResourceBindings *> m_bindings;
     QHash<QString, QRhiGraphicsPipeline *> m_pipelines;
