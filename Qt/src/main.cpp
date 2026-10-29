@@ -1,7 +1,11 @@
+#include <QtGlobal>
 #include "AppIdentity.h"
 #include "AppStorage.h"
 #include "Engine.h"
 #include "fg/FgCapability.h"
+#ifdef Q_OS_LINUX
+#include "fg/FgConfig.h"
+#endif
 #include "render/PresentationShell.h"
 #include "FrameProfiler.h"
 #include "GraphicsBackend.h"
@@ -75,13 +79,31 @@ static bool vulkanDeviceAvailable() {
     QVulkanInstance probe;
     probe.setApiVersion(QVersionNumber(1, 0));
     if (!probe.create()) {
+#ifdef Q_OS_LINUX
+        qWarning() << "Vulkan: 无法创建探测实例（loader 缺失或驱动不可用）";
+#endif
         return false;
     }
     // QVulkanInstance 不公开设备列表，直接按 Vulkan API 枚举，避免依赖 QVulkanWindow。
     quint32 devices = 0;
+#ifdef Q_OS_LINUX
+    const auto result =
+        probe.functions()->vkEnumeratePhysicalDevices(probe.vkInstance(), &devices, nullptr);
+    if (result != VK_SUCCESS) {
+        // 只报"Vulkan 不可用"会把排障推回用户：这里必须区分驱动/loader 报错与根本没有设备。
+        qWarning() << "Vulkan: vkEnumeratePhysicalDevices 失败，VkResult" << int(result);
+        return false;
+    }
+    if (devices == 0) {
+        qWarning() << "Vulkan: 物理设备数为 0（缺 /dev/dri、ICD 未安装或驱动被禁用）";
+        return false;
+    }
+    return true;
+#else
     return probe.functions()->vkEnumeratePhysicalDevices(probe.vkInstance(), &devices, nullptr) ==
                VK_SUCCESS &&
            devices > 0;
+#endif
 #else
     return false;
 #endif
@@ -463,13 +485,37 @@ int main(int argc, char **argv) {
             qCritical("GUI 回归只允许连接隔离的离线服务");
             return 1;
         }
+#ifdef Q_OS_LINUX
+        // 带上本次已经解析出的后端：后台服务据此判断在跑的界面进程是否还符合当前配置。
+        const auto attached =
+            playback->call("attach", {{"pid", double(application.applicationPid())},
+                                      {"backend", RhineGraphics::activeBackend()}});
+        if (attached["existing"].toBool()) {
+            // 这两条分支都只让本进程退出；不打日志的话，"点了没有窗口"与启动失败无法区分。
+            if (attached["restarted"].toBool()) {
+                qInfo().noquote() << "图形后端已变更，后台服务正在按新配置重建界面进程。";
+            } else {
+                qInfo().noquote() << "已有界面进程在运行，本次启动只激活该窗口（后端"
+                                  << RhineGraphics::activeBackend() << "）。";
+            }
+            return 0;
+        }
+#else
         const auto attached = playback->call("attach", {{"pid", double(application.applicationPid())}});
         if (attached["existing"].toBool()) {
             return 0;
         }
+#endif
         // 服务在界面连接断开时自行停止，退出流程里不再发送可能阻塞的同步命令。
         QObject::connect(playback.get(), &PlaybackConnection::quitRequested, &application,
                          &QCoreApplication::quit, Qt::QueuedConnection);
+#ifdef Q_OS_LINUX
+        // 图形后端切换后由服务要求重建界面。挂在 application 上而不是某个窗口对象上：
+        // 呈现层路径和直接 QML 路径都要能退出，只挂 PlaybackSessionWindow 会漏掉后者。
+        QObject::connect(
+            playback.get(), &PlaybackConnection::restartRequested, &application,
+            [] { QCoreApplication::quit(); }, Qt::QueuedConnection);
+#endif
         QTimer::singleShot(0, playback.get(), [raw = playback.get()] { raw->call("interface.ready"); });
     }
 #endif
@@ -517,8 +563,25 @@ int main(int argc, char **argv) {
     const auto platformName = QGuiApplication::platformName();
     const bool hasNativeWindowSystem =
         platformName != QStringLiteral("offscreen") && platformName != QStringLiteral("minimal");
+#ifdef Q_OS_LINUX
+    // 插帧关闭时不接管呈现层（RHINE_FG_LAYER=on 可强制接管做对照）。
+    // 依据：全屏 2560x1440、主界面列表页长按 ↓ 的实测内容帧（引擎 render/s）——
+    //   接管呈现层 20.3/s（间隔均 51~74ms）vs Qt 默认路径 27.5/s（间隔均 33.8ms），
+    //   Qt 路径高 35%，已与 OpenGL 的 31.5/s 接近。
+    // 原因：呈现层在 fg=off 时唯一做的事就是"每帧重渲重上屏"，而它把两层离屏录制、
+    // 合成与 present 全压在 GUI 线程上（QQuickRenderControl 的 render() 在调用线程执行），
+    // 直接挤掉了引擎节拍。不开插帧时它没有收益，只有成本。
+    // 代价：切换插帧从此需要重启应用才生效（呈现层在启动时决定是否接管）。
+    const bool fgForced = qEnvironmentVariable("RHINE_FG_LAYER").compare("on", Qt::CaseInsensitive) == 0;
+    const bool interpolationWanted =
+        fgForced || RhineFg::parseBool(qgetenv("RHINE_FG"), false);
+#endif
     const bool fgCandidate = !test && !args.contains("--capture") && !fgLayerDisabled &&
+#ifdef Q_OS_LINUX
+                             hasNativeWindowSystem && interpolationWanted &&
+#else
                              hasNativeWindowSystem &&
+#endif
                              PresentationShell::supportsBackend(RhineGraphics::activeBackend());
 #ifdef Q_OS_WIN
     // 呈现层启动会显示窗口并处理原生消息，必须提前接收 Explorer 的任务栏就绪通知。

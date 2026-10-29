@@ -39,6 +39,12 @@ jobs:
             node-platform: linux-x64
             artifact: Linux-x64
             distribution: '*.AppImage'
+            # 自编 FFmpeg 现在带 LTO，五个库的链接期优化要额外几分钟；45 分钟掐在半路上
+            # 比放宽上限更糟，因此单独给 Linux 留出余量。
+            timeout: 60
+            # LTO 是 Linux 产物的既定优化项（主程序 IPO + FFmpeg --enable-lto），
+            # 工具链不支持时宁可失败也不要悄悄产出一个大 1.5 MB 的包。
+            require-lto: '1'
           - name: Windows x64
             os: windows-2022
             qt-arch: win64_msvc2022_64
@@ -53,6 +59,7 @@ jobs:
       NODE_VERSION: '26.11.1'
       RHINE_BUILD_TYPE: Release
       RHINE_VERSION: ${{ inputs.release_version || '' }}
+      RHINE_REQUIRE_LTO: ${{ matrix.require-lto }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -63,6 +70,9 @@ jobs:
       - name: Select Xcode with MetalFX frame interpolation
         if: runner.os == 'macOS'
         run: bash scripts/select-xcode.sh
+      # third_party/ffmpeg 不在 CI 检出：它只服务本机开发（快速克隆、离线构建），
+      # CI 直接用 vendor/ffmpeg/source.json 锁定的发布包，浅克隆一个上百 MB 的仓库
+      # 并不比下载 15 MB 源码包快。构建脚本会校验子模块提交，缺失时自动回退发布包。
       - name: Check out enabled graphics dependencies
         shell: bash
         run: git submodule update --init --recursive FidelityFX-SDK third_party/glslang
@@ -181,8 +191,10 @@ jobs:
           sudo apt-get update
           # libvulkan-dev 提供 vulkan.h：cmake/FidelityFX.cmake 用 find_package(Vulkan QUIET)
           # 探测后端，缺头文件会静默跳过 FSR3 的 Vulkan 实现。
+          # gcc/g++/binutils 不是多余的：镜像默认预装，但 LTO 是硬需求（插件在 gcc 包里、
+          # gcc-ar/gcc-ranlib 也来自它），写进依赖清单才不会因为镜像裁剪工具链而静默失效。
           sudo apt-get install --yes --no-install-recommends \
-            cmake ninja-build file libgl1-mesa-dev libxkbcommon-dev \
+            cmake ninja-build file gcc g++ binutils libgl1-mesa-dev libxkbcommon-dev \
             libxkbcommon-x11-0 libxcb-cursor0 libvulkan-dev fontconfig fonts-noto-cjk
           # 裁剪的 MiSans 不含韩文字形，歌词通过 Qt 的系统字体回退绘制。
           # --no-install-recommends 不会自动带上 CJK 字体，需显式安装并刷新缓存。
@@ -191,6 +203,57 @@ jobs:
           # 这里只为兼容手动验证，noble 已按 t64 改名，缺失不算失败。
           sudo apt-get install --yes --no-install-recommends libfuse2t64 || \
             sudo apt-get install --yes --no-install-recommends libfuse2 || true
+          # DwarFS 镜像由 uruntime 通过 FUSE 挂载，手动跑产物时需要 fuse3。
+          sudo apt-get install --yes --no-install-recommends fuse3 || \
+            sudo apt-get install --yes --no-install-recommends libfuse3-3t64 || \
+            sudo apt-get install --yes --no-install-recommends libfuse3-3 || true
+      # LTO 的三个前提——编译器插件 liblto_plugin.so、带插件的归档器 gcc-ar/gcc-ranlib、
+      # 以及能把插件交给 ld 的驱动——缺任一项时 CMake 的 check_ipo_supported 只会返回 NO，
+      # 产物悄悄大 1.5 MB 而构建照样成功（FFmpeg 侧同样会静默丢掉 -flto）。这里在编译
+      # 任何东西之前做一次端到端验证：先只产出纯 IR 的目标文件，再交给链接器，插件缺失会
+      # 当场报 "plugin needed to handle lto object"。
+      - name: Verify LTO toolchain
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          cc --version | head -1
+          ld --version | head -1
+          plugin=$(cc -print-file-name=liblto_plugin.so)
+          if [[ ! -f "$plugin" ]]; then
+            echo "::error::GCC LTO 插件缺失：$plugin（apt 包 gcc）"
+            exit 1
+          fi
+          for tool in gcc-ar gcc-ranlib gcc-nm; do
+            if ! command -v "$tool" > /dev/null; then
+              echo "::error::$tool 缺失，LTO 静态库无法归档（apt 包 gcc）"
+              exit 1
+            fi
+          done
+          probe="$RUNNER_TEMP/lto-probe"
+          rm -rf "$probe"
+          mkdir -p "$probe"
+          cat > "$probe/value.c" <<'C'
+          int lto_probe_value(int value) { return value + 1; }
+          C
+          cat > "$probe/main.c" <<'C'
+          #include <stdio.h>
+          int lto_probe_value(int value);
+          int main(void) {
+              printf("%d\n", lto_probe_value(41));
+              return 0;
+          }
+          C
+          # -fno-fat-lto-objects 让 value.o 只含 LTO IR；链接器若加载不到插件就会失败，
+          # 这样这一步验证的是插件链路本身，而不是“能编出可执行文件”。
+          cc -O2 -flto -fno-fat-lto-objects -c "$probe/value.c" -o "$probe/value.o"
+          cc -O2 -c "$probe/main.c" -o "$probe/main.o"
+          cc -O2 -flto "$probe/value.o" "$probe/main.o" -o "$probe/lto-probe"
+          if [[ "$("$probe/lto-probe")" != "42" ]]; then
+            echo "::error::LTO 产物运行结果异常"
+            exit 1
+          fi
+          echo "LTO 可用：$plugin"
       - uses: jurplel/install-qt-action@v4
         with:
           version: '6.12.0'
@@ -232,7 +295,8 @@ jobs:
             echo "RHINE_NODE_BINARY=$RUNNER_TEMP/$distribution/bin/node" >> "$GITHUB_ENV"
             echo "RHINE_NODE_LICENSE=$RUNNER_TEMP/$distribution/LICENSE" >> "$GITHUB_ENV"
           fi
-      # appimagetool 由构建脚本按锁定版本自动下载并校验 SHA256，无需预装。
+      # Linux 打包用的 mkdwarfs 与 uruntime 由构建脚本按锁定版本自动下载并校验 SHA256，
+      # 无需预装；设置 RHINE_APPIMAGE_FS=squashfs 时改用 appimagetool，同样按锁定版本下载。
       - name: Build and deploy
         run: npm run build
         env:

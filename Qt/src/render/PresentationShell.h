@@ -1,4 +1,5 @@
 #pragma once
+#include <QtGlobal>
 
 #include "../DeferredWindowTransition.h"
 #include "../fg/FgStats.h"
@@ -177,6 +178,13 @@ class PresentationShell : public QObject {
     bool m_fgArmed = false;
     bool m_needRecreate = false;
     quint64 m_lastEngineSteps = 0;
+#ifdef Q_OS_LINUX
+    // 内容代次：区分"引擎前进"与"画面真的变了"（RHINE_PRESENT_CONTENT_ONLY=1 使用）。
+    quint64 m_lastEngineHud = 0;
+    quint64 m_lastEngineScene = 0;
+    /// 有一步正在排队时收到的唤醒：当前步结束后补跑，避免丢 tick（丢一次就少一帧）。
+    bool m_wakePending = false;
+#endif
     bool m_started = false;
     bool m_stopped = false;
     quint64 m_lastTapSerial = 0;
@@ -209,7 +217,13 @@ class PresentationShell : public QObject {
     /// 连续跳过的步数：引擎在推进却一直没有脏标记时用它兜底，避免画面冻住。
     /// 累计跳过的步数，写进统计日志，便于确认"静止时确实没在空转"。
     quint64 m_skippedSteps = 0;
+#ifdef Q_OS_LINUX
+    /// 连续跳过的步数：超过阈值就强制两层重渲一次（看门狗）。
+    /// 删掉原先"引擎 steps 变了就重渲"那个隐式兜底之后，这是唯一的漏标脏保险。
+    int m_consecutiveSkips = 0;
+#else
     /// 上次渲染时引擎的步进计数：它变了才说明场景状态真的推进了。
+#endif
     /// 排障计数：acquire 超时 / OutOfDate 的次数（空转时靠它们判断卡在哪条提前返回）。
     quint64 m_acquireTimeoutCount = 0;
     quint64 m_outOfDateCount = 0;

@@ -1,3 +1,7 @@
+#include <QtGlobal>
+#ifdef Q_OS_LINUX
+#include <ctime>
+#endif
 #include "Engine.h"
 #include "DiscGeometry.h"
 #include "RhiScene.h"
@@ -375,9 +379,17 @@ void Engine::tick() {
     m_paceStepMax = qMax(m_paceStepMax, stepNs);
     ++m_paceTicks;
     // 动态帧间隔：不设固定周期常数，帧率上限完全交给呈现侧（垂直同步/缓冲回收）。
+#ifdef Q_OS_LINUX
+    // 注意 blockedNs 的口径：它只覆盖 tick() 内部、step() 之外的微秒级开销（指针 flush、
+    // 滚轮衰减、energyIdle），**测不到呈现阻塞**——呈现工作在 PresentationShell 的另一个
+    // 定时器回调里，根本不在 tick() 的调用栈内。所以这里恒走 interval=1：渲染期间 GUI
+    // 线程被占，定时器本来就投递不进来；渲染结束后的 1ms 是留给事件处理的余量，不是限速。
+    // 若以后真要让引擎节拍感知呈现成本，必须由呈现层回传实测帧时长，不能靠这里算。
+#else
     // 用本帧实测的「呈现阻塞时长」决定要不要让出时间：
     //   · 阻塞 > 2ms：呈现自己就在限速，连轴转（0ms），不额外加延迟；
     //   · 阻塞 ≤ 2ms：说明呈现不阻塞，继续连轴转只会空转烧 CPU，让出 1ms。
+#endif
     // RHINE_TICK_MS 仍可作为排障时人为压帧的覆盖值（>0 时生效）。
     const qint64 frameNs = clock.nsecsElapsed() - enterNs;
     const qint64 blockedNs = frameNs - stepNs;
@@ -604,9 +616,31 @@ void Engine::wheel(double x, double y, double delta, bool pixels) {
 /**
  * 按顺序同步场景、音乐和 HUD 帧数据，保持绘制与命中区域一致。
  */
+#ifdef Q_OS_LINUX
+// RHINE_STEP_PROBE=1：拆开引擎每拍成本，并区分"干活"与"等待"。
+// 墙钟远大于线程 CPU 时间 => 这一拍是在阻塞（锁、GPU、内存回读），不是算得多。
+static double stepWallSum = 0, stepCpuSum = 0, stepAppSum = 0, stepRestSum = 0;
+static int stepProbeFrames = 0;
+
+static double threadCpuMs() {
+    timespec ts{};
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return double(ts.tv_sec) * 1e3 + double(ts.tv_nsec) / 1e6;
+}
+
+#endif
 void Engine::step(double time) {
     if (!ready()) {
         return;
+#ifdef Q_OS_LINUX
+    }
+    const bool stepProbe = qEnvironmentVariableIntValue("RHINE_STEP_PROBE") == 1;
+    const double stepT0 = stepProbe ? threadCpuMs() : 0.0;
+    const qint64 stepWall0 = stepProbe ? clock.nsecsElapsed() : 0;
+    QElapsedTimer stepAppTimer;
+    if (stepProbe) {
+        stepAppTimer.start();
+#endif
     }
     QElapsedTimer frameTimer;
     if (scene.isProfiling()) {
@@ -617,6 +651,9 @@ void Engine::step(double time) {
     ++m_steps;
     const bool reuse = m_sceneSleeping && !scene.changed();
     const auto object = app->step(time, m_width / (m_height / 1080), reuse);
+#ifdef Q_OS_LINUX
+    const double stepAppMs = stepProbe ? double(stepAppTimer.nsecsElapsed()) / 1e6 : 0.0;
+#endif
     if (object.isEmpty()) {
         return;
     }
@@ -763,6 +800,28 @@ void Engine::step(double time) {
         scene.timings.engineMs = frameTimer.nsecsElapsed() / 1000000.;
     }
     emit updated();
+#ifdef Q_OS_LINUX
+    if (stepProbe) {
+        const double wall = double(clock.nsecsElapsed() - stepWall0) / 1e6;
+        const double cpu = threadCpuMs() - stepT0;
+        stepWallSum += wall;
+        stepCpuSum += cpu;
+        stepAppSum += stepAppMs;
+        stepRestSum += wall - stepAppMs;
+        if (++stepProbeFrames >= 60) {
+            const double n = stepProbeFrames;
+            qInfo().noquote()
+                << QStringLiteral("拍成本: 合计 %1 ms = app->step %2 + 其余 %3 | 线程CPU %4 ms | 等待 %5 ms")
+                       .arg(stepWallSum / n, 0, 'f', 2)
+                       .arg(stepAppSum / n, 0, 'f', 2)
+                       .arg(stepRestSum / n, 0, 'f', 2)
+                       .arg(stepCpuSum / n, 0, 'f', 2)
+                       .arg((stepWallSum - stepCpuSum) / n, 0, 'f', 2);
+            stepWallSum = stepCpuSum = stepAppSum = stepRestSum = 0;
+            stepProbeFrames = 0;
+        }
+    }
+#endif
 }
 void Engine::snapshot(QString path) {
     if (m_frame.isEmpty()) {

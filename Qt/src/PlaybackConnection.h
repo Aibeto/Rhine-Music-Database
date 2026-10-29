@@ -1,4 +1,5 @@
 #pragma once
+#include <QtGlobal>
 #include <QHash>
 #include <QJsonObject>
 #include <QLocalSocket>
@@ -25,6 +26,11 @@ class PlaybackConnection : public QObject {
     void snapshotChanged();
     void activateRequested();
     void quitRequested();
+#ifdef Q_OS_LINUX
+    /// 后台服务要求按新配置重建界面（图形后端切换）：
+    /// 收到后界面进程应自行退出，但**不能**通知服务一起退出——服务要靠自己重新拉起新界面。
+    void restartRequested();
+#endif
     void disconnected();
     void diagnosticEvent(QString event, QJsonObject values);
 

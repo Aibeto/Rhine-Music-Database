@@ -1,3 +1,4 @@
+#include <QtGlobal>
 #include "NativeHud.h"
 #include "GraphicsBackend.h"
 #include "fg/FgCapability.h"
@@ -645,12 +646,24 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"FSR SHARPNESS / 锐化", "", "fsr-sharpness"});
     }
 #endif
+#ifdef Q_OS_LINUX
+    // 帧生成是独立开关，不随抗锯齿模式循环。**需要重启才生效**：呈现层是否接管窗口
+    // 在启动时按 RHINE_FG 决定（fg=off 走 Qt 默认路径，内容帧实测高 35%），
+    // 所以这里写明重启，避免用户切换后看不到变化。不可用时整行置灰并写明原因。
+#ifdef Q_OS_DARWIN
+    rows.append({"METALFX / 帧生成 · 重启生效", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
+#else
+    rows.append({"FRAME GENERATION / 帧生成 · 重启生效", fgUi.value,
+                 fgUi.clickable ? "fg" : "fg:unavailable"});
+#endif
+#else
     // 帧生成是独立开关，不随抗锯齿模式循环。呈现层在能力可用时常驻接管窗口，
     // 所以这里的开关即时生效、不需要重启；不可用时整行置灰并写明原因。
 #ifdef Q_OS_DARWIN
     rows.append({"METALFX / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
 #else
     rows.append({"FRAME GENERATION / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
+#endif
 #endif
     // 内容高度随平台可用选项变化
     constexpr double preferenceTop = 424;

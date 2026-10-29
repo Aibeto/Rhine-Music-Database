@@ -1,3 +1,4 @@
+#include <QtGlobal>
 #include "PresentationShell.h"
 #ifdef Q_OS_DARWIN
 #include "MetalFxBackend.h"
@@ -42,6 +43,13 @@ namespace {
 
 // 合成通道的 uniform：clipSpaceCorrMatrix（64）+ params vec4（16）。
 constexpr int kFgUniformSize = 64 + 16;
+#ifdef Q_OS_LINUX
+
+// 看门狗：连续跳过这么多步就强制两层重渲一次。按 60Hz 约半秒。
+// 场景里出现"没人标脏但画面该变"的路径（新加的 QML 自驱更新、Qt 信号时序变化）时，
+// 缺了它会永久冻住画面，而 CPU 很低、日志写着"正常跳过"，看起来像优化成功。
+constexpr int kSkipWatchdogSteps = 30;
+#endif
 
 QShader loadShader(const QString &name) {
     QFile f(":/shaders/" + name + ".qsb");
@@ -69,7 +77,7 @@ PresentationShell::PresentationShell(QQmlEngine &engine, Engine &backend, QStrin
       m_engine(&engine), m_backend(&backend), m_backendName(std::move(backendName)) {
 }
 
-/** 关闭请求先停止呈现；Windows 立即隐藏但保留 HWND，待输入回调退出后再清理 GPU。 */
+/** QML 快捷键与原生关闭统一等待当前回调返回，避免退出时删除正在执行的信号对象。 */
 void PresentationShell::requestQuit() {
     if (m_quitRequested || m_stopped) {
         return;
@@ -114,6 +122,7 @@ void PresentationShell::shutdown() {
     m_fg.reset();
     // 离屏 QML 即将销毁，先断开更新与输入法焦点，避免清理期间重新访问旧宿主。
     m_backend->disconnect(this);
+    // 把平台输入法接到离屏输入项上
     if (auto *inputWindow = qobject_cast<RhineRender::PresentationWindow *>(m_window)) {
         inputWindow->setInputWindow(nullptr);
     }
@@ -741,18 +750,64 @@ void PresentationShell::step() {
         return;
     }
 
+    // 引擎每走一拍就放行一次渲染。这条**不能删**：模型/纹理是异步加载的，加载完成
+    // 不一定伴随 sceneUpdated，一旦只看脏标记，3D 房间几何就会永远不出现（实测如此）。
+    // 用 steps 的意义就是"引擎前进了"，代价是没变也要重渲——这是正确性的前提。
     // 引擎计时推进不等于画面改变。两层都无更新且没有待呈现帧时让事件循环休眠。
+#ifdef Q_OS_LINUX
+    const auto engineSteps =
+        m_backend ? m_backend->performance().value(QStringLiteral("steps")).toULongLong() : 0;
+    // 内容代次精细化：引擎"步进"不等于"画面变了"。m_steps 每拍都涨，但 HUD 命令
+    // 列表与场景内容只在真正变化时才涨 hudUpdates/sceneUpdates。用这两个代次判断
+    // 是否需要上屏，才能既不丢帧也不做无内容变化的重复上屏。
+    // RHINE_PRESENT_CONTENT_ONLY=1 启用（默认仍用旧的 engineAdvanced 判据）。
+    static const bool contentOnly =
+        qEnvironmentVariableIntValue("RHINE_PRESENT_CONTENT_ONLY") == 1;
+    const auto engineHud =
+        m_backend ? m_backend->performance().value(QStringLiteral("hudUpdates")).toULongLong() : 0;
+    const auto engineScene =
+        m_backend ? m_backend->performance().value(QStringLiteral("sceneUpdates")).toULongLong() : 0;
+    const bool contentAdvanced = contentOnly
+                                     ? (engineHud != m_lastEngineHud || engineScene != m_lastEngineScene)
+                                     : (engineSteps != m_lastEngineSteps);
+    const bool engineAdvanced = m_backendName == "vulkan" && contentAdvanced;
+    // 重渲已经由内容代次剔除，但"上屏"仍然每步都做：合成一次缓存纹理很便宜，而把
+    // 上屏也一起砍掉会让 presented 从 46/s 掉到 31/s（实测），用户看到的出帧反而更少。
+    // RHINE_PRESENT_ALWAYS=0 可退回"没有新内容就不上屏"的省电行为。
+    static const bool presentAlways =
+        qEnvironmentVariableIsSet("RHINE_PRESENT_ALWAYS")
+            ? qEnvironmentVariableIntValue("RHINE_PRESENT_ALWAYS") != 0
+            : true;
+    if (!presentAlways && !m_host->contentDirty() && !engineAdvanced && !m_forcePresent &&
+         !m_pendingRealFrame) {
+#else
     const auto engineSteps = m_backend->performance().value(QStringLiteral("steps")).toULongLong();
     const bool engineAdvanced = m_backendName == "vulkan" && engineSteps != m_lastEngineSteps;
     if (!m_host->contentDirty() && !engineAdvanced && !m_forcePresent && !m_pendingRealFrame) {
+#endif
         ++m_skippedSteps;
         publishStats(false);
         if (m_backendName == "vulkan") {
+#ifdef Q_OS_LINUX
+            // 看门狗：连续跳过太久说明可能有人漏标脏，强制补渲一次把画面拉回来。
+            if (++m_consecutiveSkips >= kSkipWatchdogSteps) {
+                m_consecutiveSkips = 0;
+                m_host->markSceneDirty();
+                m_host->markOverlayDirty();
+            }
+            // 兜底轮询而已，主通路是 watch() 接上的 renderRequested/sceneChanged。
+            // 固定 4ms：不由屏幕刷新率推导，出帧上限只由每帧工作量决定。
+#endif
             scheduleNext(idle ? 100 : 4);
         }
         return;
     }
     m_lastEngineSteps = engineSteps;
+#ifdef Q_OS_LINUX
+    m_lastEngineHud = engineHud;
+    m_lastEngineScene = engineScene;
+    m_consecutiveSkips = 0;
+#endif
 
     // 上一步留下的真实帧还没上屏：这一步只做它的呈现。
     // 插值帧与真实帧因此拆进相邻的两个调度步——一步一次 present，事件循环在两者
@@ -812,6 +867,8 @@ void PresentationShell::step() {
             qWarning().noquote() << "FG: acquire 超时（窗口不可见/合成器未取图），累计"
                                  << m_acquireTimeoutCount;
         }
+        // 立即重试：出帧优先。acquire 超时通常意味着窗口不可见或合成器未取图，
+        // 这里不做节流，避免把上限压在人为延迟上。
         scheduleNext();
         return;
     }
@@ -850,6 +907,10 @@ void PresentationShell::step() {
     reportStats();
     // 新更新和待呈现的真实帧继续排队；其余情况等待下一次内容更新。
     if (m_backendName == "vulkan") {
+        // 尾部立刻自续：关掉 vsync 时这个应用要的是"能跑多快跑多快"，限速会把帧率
+        // 钉死在刷新率上，与设计意图相反。
+        // 空转（同一画面反复提交）不再靠限速解决，而是靠 SceneLayerHost 的脏帧剔除：
+        // 没有新内容时这里会自动落进上面的跳过分支，不会再重复渲染。
         scheduleNext(idle ? 100 : 0);
     } else if (m_pendingRealFrame || m_host->contentDirty()) {
         scheduleNext();
@@ -897,6 +958,13 @@ void PresentationShell::scheduleNext(int delayMs) {
     if (!m_timer || m_stopped || m_quitRequested || m_failed) {
         return;
     }
+#ifdef Q_OS_LINUX
+    if (delayMs == 0 && m_timer->isActive()) {
+        // 已经排着一步：不重启定时器，只记下这次唤醒，等当前步跑完再补。
+        m_wakePending = true;
+        return;
+    }
+#endif
     if (m_stepClock.isValid()) {
         m_stepEndNs = m_stepClock.nsecsElapsed(); // 空档计时的起点
     }
@@ -935,7 +1003,7 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
     }
     switch (event->type()) {
     case QEvent::Close:
-        // 消费关闭事件以保留原生窗口；GPU 清理必须等待发起关闭的 QML 回调返回。
+        // 关闭可能来自 QML 按钮；先拦截原生销毁，再在输入栈退出后拆交换链并结束进程。
         event->ignore();
         requestQuit();
         return true;
@@ -1105,13 +1173,35 @@ bool PresentationShell::start() {
 
     m_timer = new QTimer(this);
     m_timer->setTimerType(Qt::PreciseTimer);
+#ifdef Q_OS_LINUX
+    // 跑完一步后，如果期间又有唤醒被压住，立刻补一步：丢唤醒会让出帧数直接减半
+    // （实测 tick 22/s 只出 10.6 帧，正是这里把相邻两次唤醒合并掉了）。
+    connect(m_timer, &QTimer::timeout, this, [this] {
+        step();
+        if (m_wakePending) {
+            m_wakePending = false;
+            scheduleNext(0);
+        }
+    });
+#else
     connect(m_timer, &QTimer::timeout, this, &PresentationShell::step);
+#endif
+    // 内容代次：引擎真的产出了新场景/新 HUD 时才让图层重渲。
+    // Qt 自己的 renderRequested/sceneChanged 每帧有数十次噪音，不能用来判脏。
     connect(m_backend, &Engine::sceneUpdated, this, [this] {
+#ifdef Q_OS_LINUX
+        m_host->requestSceneContent();
+#else
         m_host->markSceneDirty();
+#endif
         scheduleNext();
     });
     connect(m_backend, &Engine::hudUpdated, this, [this] {
+#ifdef Q_OS_LINUX
+        m_host->requestOverlayContent();
+#else
         m_host->markOverlayDirty();
+#endif
         scheduleNext();
     });
 
@@ -1209,7 +1299,18 @@ bool PresentationShell::start() {
                                  << m_acquireTimeoutCount << "outOfDate" << m_outOfDateCount << "visible"
                                  << (m_window && m_window->isVisible()) << "pendingReal" << m_pendingRealFrame
                                  << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1) << "dirty"
+#ifdef Q_OS_LINUX
+                                 << (m_host ? m_host->contentDirty() : false) << "force" << m_forcePresent
+                                 << "| 3D层" << QString::number(m_host->sceneLayerMs(), 'f', 1) << "ms"
+                                 << "(打磨" << QString::number(m_host->scenePolishMs(), 'f', 1)
+                                 << "起帧" << QString::number(m_host->sceneBeginMs(), 'f', 1)
+                                 << "同步" << QString::number(m_host->sceneSyncMs(), 'f', 1)
+                                 << "录制" << QString::number(m_host->sceneRecordMs(), 'f', 1)
+                                 << "提交等待" << QString::number(m_host->sceneSubmitMs(), 'f', 1) << ")"
+                                 << "UI层" << QString::number(m_host->overlayLayerMs(), 'f', 1) << "ms";
+#else
                                  << (m_host ? m_host->contentDirty() : false) << "force" << m_forcePresent;
+#endif
         });
         diag->start();
     }

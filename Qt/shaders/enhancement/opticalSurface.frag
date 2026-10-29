@@ -22,6 +22,11 @@ layout(binding = 4) uniform sampler2D label;
 layout(binding = 5) uniform sampler2D cover;
 layout(binding = 6) uniform sampler2D normalAtlas;
 layout(location = 0) out vec4 fragColor;
+#ifdef RHINE_SINGLE_PASS_MOTION
+// 第二个颜色附件：运动矢量（RG = 屏幕 UV 位移，BA 预留给 FSR3）。
+layout(location = 1) out vec4 velocityOut;
+layout(location = 12) in vec2 v_velocity;
+#endif
 /** 只插值烘焙光场的相邻高度切片；没有实时光源求值、光线追踪或折射背景采样。 */
 vec3 bakedIllumination() {
     float lower = floor(v_lightUv.z);
@@ -48,6 +53,11 @@ vec3 keyLight(vec3 base, float gloss) {
     return base * (0.55 + 0.45 * ndl) + vec3(spec);
 }
 void main() {
+#ifdef RHINE_SINGLE_PASS_MOTION
+    // 先写运动矢量：本函数有多处提前 return（背板、透明、阴影专用），
+    // 提前返回的像素仍保留顶点阶段算出的正确速度。
+    velocityOut = vec4(v_velocity, 0.0, 1.0);
+#endif
     if (m.flags.x == 1.0) {
         if (!gl_FrontFacing && v_mode > 0.5) {
             // 素面封底：封面纸背不承载印刷内容，给一层哑光纸背底色。

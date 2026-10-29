@@ -1,3 +1,4 @@
+#include <QtGlobal>
 #include "FrameProfiler.h"
 
 #include "fg/FgCapability.h"
@@ -352,7 +353,14 @@ void FrameProfiler::sample() {
     m_metrics.insert("fgDisplaySize", fg.displaySize);
     if (fg.layerActive) {
         // 呈现层接管时，屏幕上真正发生的事只有它知道：用它的间隔与计数覆盖。
+#ifdef Q_OS_LINUX
+        // qtFps 在这里只是"场景渲染帧"：呈现计数含插值帧与重复帧，直接当帧率会让人
+        // 误判 Vulkan 比 OpenGL 快，而动画推进其实更慢。标题上的数字另由下面的
+        // headlineFps 决定，呈现/渲染/插值三个数在帧生成详情块里都能看到。
+        m_metrics.insert("qtFps", m_metrics.value("sceneFps"));
+#else
         m_metrics.insert("qtFps", fgPresentedFps);
+#endif
         m_metrics.insert("presentCount", qulonglong(fg.presented));
         m_metrics.insert("gapSamples", fg.sampleCount);
         m_metrics.insert("gapP50Ms", fg.gapP50Ms);
@@ -367,6 +375,14 @@ void FrameProfiler::sample() {
         if (!fg.backendName.isEmpty())
             m_metrics.insert("gpuBackend", fg.backendName);
     }
+#ifdef Q_OS_LINUX
+    // 标题帧率的口径在这里定：插帧真的在出帧时，屏幕上每秒多出来的那些画面就是插值帧，
+    // 只报渲染帧会明显低于肉眼所见。取渲染+插值而不是呈现计数——呈现还含强制重渲的
+    // 重复帧，用它当帧率会虚高。其余情况沿用原口径（未接管即 Qt 帧率，接管即场景渲染帧）。
+    const bool interpolating = fg.layerActive && fg.interpolationAvailable && fg.interpolationWanted;
+    m_metrics.insert("headlineFps", interpolating ? fgRenderFps + fgInterpolatedFps
+                                                  : m_metrics.value("qtFps").toDouble());
+#endif
     m_previousSampleNs = now;
     m_previousCpuNs = process.cpuNanoseconds;
     m_previousPresents = count;
@@ -402,25 +418,49 @@ void FrameProfiler::formatMetrics() {
     const auto residentBytes = m_metrics.value("mainProcessResidentBytes").toLongLong();
     const auto cpu = m_metrics.value("mainProcessCpuOneCorePercent").toDouble();
     const bool fgActive = m_metrics.value("fgLayerActive").toBool();
+#ifdef Q_OS_LINUX
+    // 帧率口径由 sample() 的 headlineFps 决定：插帧真的在出帧时是"渲染+插值"，其余情况
+    // 是场景渲染帧。这里只负责让"%2"的状态说明和那个数字对得上，别再自己挑数字。
+    const bool fgAvailable = fgActive && m_metrics.value("fgInterpolationAvailable").toBool();
+    const bool interpolating = fgAvailable && m_metrics.value("fgInterpolationWanted").toBool();
+#else
     // 呈现层接管后 qtFps 已经被替换成它的实测呈现帧率（见 sample()），所以 headline
     // 的结构不用变，变的只是"%2"那段状态说明要讲清楚现在是不是在插值。
+#endif
     QString stateLabel;
     if (!fgActive) {
         stateLabel = shown ? (idle ? QStringLiteral("按需休眠") : QStringLiteral("活动"))
                            : QStringLiteral("后台");
+#ifdef Q_OS_LINUX
+    } else if (!fgAvailable) {
+#else
     } else if (!m_metrics.value("fgInterpolationAvailable").toBool()) {
+#endif
         stateLabel = QStringLiteral("帧生成 · 仅合成");
+#ifdef Q_OS_LINUX
+    } else if (!interpolating) {
+#else
     } else if (!m_metrics.value("fgInterpolationWanted").toBool()) {
+#endif
         stateLabel = QStringLiteral("帧生成 · 插值关");
     } else if (!shown) {
         stateLabel = QStringLiteral("后台");
     } else if (idle) {
         stateLabel = QStringLiteral("帧生成 · 按需休眠");
     } else {
+#ifdef Q_OS_LINUX
+        // 插值帧已经算进前面的数字里了，标签必须写清楚，否则会看成纯渲染帧率。
+        stateLabel = QStringLiteral("渲染+插值");
+#else
         stateLabel = QStringLiteral("帧生成 · 插值中");
+#endif
     }
     m_headline = QStringLiteral("%1 FPS · %2 · %3")
+#ifdef Q_OS_LINUX
+                     .arg(number("headlineFps"), stateLabel,
+#else
                      .arg(number("qtFps"), stateLabel,
+#endif
                           m_metrics.value("fgPresentMode").toString());
     const auto memory = residentBytes < 0 ? QStringLiteral("不可用")
                                           : QString::number(residentBytes / 1048576., 'f', 1) + " MiB";

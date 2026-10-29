@@ -151,6 +151,29 @@ Optional alternative audio matching uses the unchanged @unblockneteasemusic/serv
 Source: https://github.com/UnblockNeteaseMusic/server
 Its source and licenses are preserved in the packaged dependency directory.
 
+## FFmpeg
+
+Linux 部署包随附自编的 FFmpeg：Qt 6 Multimedia 的 FFmpeg 后端只用于音频解码，而发行版 libavcodec
+动态依赖 x265、aom、SvtAv1Enc 等编码器库，因此本仓库按 `scripts/prepare-linux-ffmpeg.cjs` 自编一份，
+只保留音频能力：解码器按 `vendor/ffmpeg/decoders-linux.json` 的音频白名单启用（HEVC、H.264、VP9、
+AV1 等视频解码器不编译），解复用器保持全开以识别各类容器，parser 与 bitstream filter 只留音频相关
+部分；关闭编码器、复用器、avdevice、avfilter、硬件加速与命令行工具，不自动探测外部库。
+
+构建不启用 `--enable-gpl`，也不启用任何非自由组件，产物为 **LGPL-2.1-or-later**（脚本在 configure
+之后断言这一点）。因此不链接 x264/x265/aom/dav1d 等 GPL 或体积巨大的第三方库。Qt 后端以共享库方式
+动态链接，随包保留 `third-party/FFmpeg/COPYING.LGPLv2.1` 许可全文，以及来源与构建参数
+（`third-party/FFmpeg/source.json`、`build.json`）；可替换性由随包共享库满足。
+
+本项目源码为 MIT。FFmpeg 以共享库形式被 Qt 后端动态链接，**本项目的 MIT 许可不因此改变**：随包二进制中
+只有 FFmpeg 这五个共享库受 LGPL-2.1-or-later 约束，其余部分仍按 MIT 分发。若改用 `--enable-gpl` 或
+链接 GPL 专属组件（x264、x265 等），FFmpeg 将变为 GPL-2.0-or-later，整个组合分发物都须按 GPL-2.0 提供
+并要求开放应用自身的完整对应源码——这与本项目的 MIT 分发方式冲突，因此构建脚本明确禁止该配置。
+
+版本、下载地址与 SHA-256 见 `vendor/ffmpeg/source.json`（与 iOS 侧同一个锁定版本，保证 SONAME 与
+Qt 后端一致）；完整源码可据此从上游获取。仓库若以 submodule 方式纳入 FFmpeg，脚本会直接使用该
+源码树。设置 `RHINE_FFMPEG=system` 或 SONAME 与 Qt 后端不一致时回退发行版库，此时随包库受发行版
+构建的 FFmpeg 许可约束（同样为 LGPL 或 GPL，取决于发行版配置）。
+
 ## 酷狗音乐 API
 
 KuGouMusicApi，MIT。来源：https://github.com/MakcRe/KuGouMusicApi ，锁定提交

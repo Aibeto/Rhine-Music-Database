@@ -371,6 +371,11 @@ const linuxExcludedLibraries = new Set([
     'libpulse.so.0',
     'libasound.so.2',
 ]);
+// 图片格式只留窗口与封面真正会用到的几种（png 内置于 QtGui，无需插件）。
+// pdf 会经 libopenjp2 → libproxy/libpxbackend/duktape/nghttp2/ngtcp2/krb5 拖进约 10 MB；
+// tiff 带入 libtiff/libjbig，tga/icns/wbmp 在桌面 Linux 上不会被遇到。
+const linuxImageFormatPlugins = /^libq(?:jpeg|gif|ico|svg|webp)\.so$/;
+// xcb 扩展、Wayland 后端与音频服务跟随发行版，版本差异由用户系统统一升级。
 // xcb 核心与 XKB 扩展、Wayland 后端与音频服务跟随发行版，版本差异由用户系统统一升级。
 // xcb-util 系列（光标、输入法、render-util 等）不在此列：它们只在装有桌面的系统上出现，
 // 缺了会让 X11 插件退出，因此随包分发。
@@ -462,7 +467,7 @@ function linuxQtTool(qt, name) {
  * 复制插件、QML 模块与 ELF 依赖闭包
  * 依赖按 ldd 结果递归收集，只跳过系统图形栈与 glibc，避免与用户驱动冲突。
  */
-function deployLinuxRuntime(qt, app, binary) {
+function deployLinuxRuntime(qt, app, binary, ffmpegLibraries = new Map()) {
     const libraries = path.join(app, 'usr/lib');
     const plugins = path.join(app, 'usr/plugins');
     fs.mkdirSync(libraries, {
@@ -499,6 +504,9 @@ function deployLinuxRuntime(qt, app, binary) {
                 folder === 'platforms' &&
                 !/^libq(?:xcb|wayland(?:-\w+)?|offscreen|minimal)\.so$/.test(file)
             ) {
+                continue;
+            }
+            if (folder === 'imageformats' && !linuxImageFormatPlugins.test(file)) {
                 continue;
             }
             const destination = path.join(plugins, folder, file);
@@ -558,6 +566,26 @@ function deployLinuxRuntime(qt, app, binary) {
     }
     // 插件自身也引用 Qt 与音视频库；与程序一起进入同一个依赖闭包。
     const deployed = new Set();
+    // ldd 打印的是完整传递闭包：系统 libavcodec 链接的 x265/aom/SvtAv1Enc 等
+    // 虽然没有任何文件直接引用，也会出现在列上。照单全收会把整条编码器链打进包，
+    // 因此按 DT_NEEDED 只跟随直接依赖，间接条目由被引用方自己入队后再展开。
+    const directNeeded = (file) => {
+        const dynamic = spawnSync('readelf', ['-d', file], {
+            encoding: 'utf8',
+        });
+        if (dynamic.status !== 0) {
+            // 读不出动态段（非 ELF 或缺少 readelf）时退回闭包，宁大勿缺。
+            return null;
+        }
+        const needed = new Set();
+        for (const line of (dynamic.stdout || '').split('\n')) {
+            const match = /\(NEEDED\).*\[(\S+)\]/.exec(line);
+            if (match) {
+                needed.add(match[1]);
+            }
+        }
+        return needed;
+    };
     while (sources.length) {
         const source = sources.pop();
         const result = spawnSync('ldd', [source], {
@@ -566,6 +594,7 @@ function deployLinuxRuntime(qt, app, binary) {
         if (result.status !== 0) {
             continue;
         }
+        const direct = directNeeded(source);
         for (const line of result.stdout.split('\n')) {
             const match = /^\s*(\S+) => (\S+) \(0x[0-9a-f]+\)$/.exec(line);
             if (!match) {
@@ -577,7 +606,24 @@ function deployLinuxRuntime(qt, app, binary) {
                 continue;
             }
             name = path.basename(name);
-            if (deployed.has(name) || isExcludedLinuxLibrary(name) || !fs.existsSync(location)) {
+            if (direct && !direct.has(name)) {
+                continue;
+            }
+            if (deployed.has(name) || isExcludedLinuxLibrary(name)) {
+                continue;
+            }
+            // 自编的 FFmpeg 不链接发行版的编码器库：用我们的文件替换，
+            // 之后按替换后文件的直接依赖继续展开，系统那份的依赖链不再进入队列。
+            const replacement = ffmpegLibraries.get(name);
+            if (replacement) {
+                deployed.add(name);
+                const target = path.join(libraries, name);
+                fs.copyFileSync(replacement, target);
+                fs.chmodSync(target, 0o755);
+                sources.push(target);
+                continue;
+            }
+            if (!fs.existsSync(location)) {
                 continue;
             }
             deployed.add(name);
@@ -650,6 +696,128 @@ function resolveAppImageTool(architecture) {
     return tool;
 }
 
+/**
+ * 下载并校验锁定版本的可执行文件
+ * 校验和随版本固定，构建机不需要预装，换版本时必须同步更新。
+ */
+function downloadPinnedExecutable(directory, name, url, checksum) {
+    fs.mkdirSync(directory, {
+        recursive: true,
+    });
+    const file = path.join(directory, name);
+    if (!fs.existsSync(file)) {
+        run('curl', ['--fail', '--location', '--retry', '3', '--output', file, url]);
+        const digest = spawnSync('sha256sum', [file], {
+            encoding: 'utf8',
+        }).stdout.split(' ')[0];
+        if (digest !== checksum) {
+            fs.rmSync(file, {
+                force: true,
+            });
+            throw new Error(`${name} checksum mismatch: ${digest}`);
+        }
+        fs.chmodSync(file, 0o755);
+    }
+    return file;
+}
+
+// DwarFS 打包用到的两个上游工具，同样按版本锁定。
+// uruntime 取 -lite 变体：它只内嵌 MIT 许可的 dwarfs 读取器，
+// 而完整变体会把 GPL-3.0 的 mkdwarfs 一起塞进运行时。
+const uruntimeVersion = 'v0.7.1';
+const uruntimeChecksums = {
+    x86_64: 'f19d2a58b5f7cb372b8a88b1e9414fd118d8da6d2c555cf3e7c0bac9373b8af9',
+    // aarch64: 'bfcb5d2198d675419207345219766182cffa2515754ff813267118277156a07d',
+};
+const mkdwarfsVersion = '0.15.8';
+const mkdwarfsChecksums = {
+    x86_64: '0ed66df82f9bb6671c1f898404ff4d57c263460078d46dbac8efb9d8eec271b7',
+    // aarch64: 'f21cbc33840bbffe410c7043fab85e0d1b4eee86d77bcc0fbf3a51b94fc4b222',
+};
+
+/**
+ * 取得可用的 mkdwarfs
+ * 优先 MKDWARFS 指定的可执行文件，其次系统 PATH，最后下载锁定的 dwarfs-universal。
+ * dwarfs-universal 按 argv[0] 的工具名分派，所以落地文件名必须是 mkdwarfs。
+ */
+function resolveDwarfsTool(architecture) {
+    if (process.env.MKDWARFS) {
+        return process.env.MKDWARFS;
+    }
+    const system = spawnSync('mkdwarfs', ['--version'], {
+        encoding: 'utf8',
+    });
+    if (!system.error) {
+        return 'mkdwarfs';
+    }
+    return downloadPinnedExecutable(
+        path.join('output', 'dwarfs'),
+        'mkdwarfs',
+        `https://github.com/mhx/dwarfs/releases/download/v${mkdwarfsVersion}` +
+            `/dwarfs-universal-${mkdwarfsVersion}-Linux-${architecture}`,
+        mkdwarfsChecksums[architecture],
+    );
+}
+
+/** 取得 AppImage 运行时：DwarFS 镜像由 uruntime 挂载，squashfs 由 appimagetool 自带。 */
+function resolveDwarfsRuntime(architecture) {
+    if (process.env.URUNTIME) {
+        return process.env.URUNTIME;
+    }
+    return downloadPinnedExecutable(
+        path.join('output', 'dwarfs'),
+        `uruntime-${architecture}`,
+        `https://github.com/VHSgunzo/uruntime/releases/download/${uruntimeVersion}` +
+            `/uruntime-appimage-dwarfs-lite-${architecture}`,
+        uruntimeChecksums[architecture],
+    );
+}
+
+/**
+ * 生成 DwarFS 版 AppImage
+ * mkdwarfs 直接输出带运行时的完整文件，跨文件去重后体积明显小于 squashfs。
+ * -S 越大跨文件去重越充分，但随机读取要解压更多数据，启动变慢。
+ */
+const dwarfsCompressionOptions = (process.env.RHINE_DWARFS_OPTIONS || 'zstd:level=22 -S26 -B2').split(' ');
+
+function packageDwarfsAppImage(app, image, architecture) {
+    run(
+        resolveDwarfsTool(architecture),
+        [
+            '--force',
+            '--order=path',
+            '--set-owner',
+            '0',
+            '--set-group',
+            '0',
+            '--no-history',
+            '--no-create-timestamp',
+            '--header',
+            resolveDwarfsRuntime(architecture),
+            '--input',
+            app,
+            '-C',
+            dwarfsCompressionOptions[0],
+            ...dwarfsCompressionOptions.slice(1),
+            '--output',
+            image,
+        ],
+        {
+            ARCH: architecture,
+        },
+    );
+    fs.chmodSync(image, 0o755);
+    return image;
+}
+
+// 压缩参数：等级拉到上限，块大小提到 1 MiB（覆盖 appimagetool 预设的 128 KiB）。
+// appimagetool 自带的 mksquashfs 是静态构建的 squashfs-tools-ng，只编译了 zstd：
+// `mksquashfs: Compressor "xz" is not supported! Compressors available: zstd`。
+// 所以 xz 与只属于 xz 的 -Xbcj 过滤器在这里都不可用，改用 zstd 最高等级逼近 xz 的体积。
+// 每项按进程参数逐词传递，与命令行上逐个引用后的分词结果一致。
+const appImageCompression = 'zstd';
+const appImageSquashfsOptions = ['-Xcompression-level', '22', '-b', '1048576'];
+
 function packageAppImage(app) {
     const architecture = process.arch === 'arm64' ? 'aarch64' : 'x86_64';
     const image = path.resolve(
@@ -658,8 +826,22 @@ function packageAppImage(app) {
     fs.rmSync(image, {
         force: true,
     });
+    pruneLinuxAppDir(app);
+    // 默认走 DwarFS：跨文件去重后体积明显更小。挂载需要 FUSE，
+    // 没有 FUSE 的机器上 uruntime 会退化成解包运行；RHINE_APPIMAGE_FS=squashfs 可回退。
+    if (process.env.RHINE_APPIMAGE_FS !== 'squashfs') {
+        return packageDwarfsAppImage(app, image, architecture);
+    }
+    // 透传参数用等号形式书写，避免以短横线开头的值被当作新选项。
+    const args = [
+        '--appimage-extract-and-run',
+        `--comp=${appImageCompression}`,
+        ...appImageSquashfsOptions.map((option) => `--mksquashfs-opt=${option}`),
+        app,
+        image,
+    ];
     // 无 FUSE 的机器（容器、CI）也能打包；有 FUSE 时行为一致。
-    run(resolveAppImageTool(architecture), ['--appimage-extract-and-run', app, image], {
+    run(resolveAppImageTool(architecture), args, {
         ARCH: architecture,
     });
     return image;
@@ -680,6 +862,149 @@ function sharedObjects(directory) {
         }
     }
     return found;
+}
+
+/**
+ * 递归列出目录下的全部文件
+ * 显式递归而不依赖 readdirSync 的 recursive 选项，兼容旧版 Node。
+ */
+function listFiles(directory) {
+    const found = [];
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+            found.push(...listFiles(full));
+        } else {
+            found.push(full);
+        }
+    }
+    return found;
+}
+
+// 发行版 Qt 的安装规则会把开发期文件一起装进前缀目录，运行时一律用不到。
+// 只删这些确定无用的部分：程序、Qt 与 FFmpeg 的共享库本身都是运行必需的。
+const linuxPrunedDirectories = [
+    'usr/include',
+    'usr/lib/cmake',
+    'usr/lib/pkgconfig',
+    'usr/share/man',
+    'usr/share/doc',
+    'usr/share/gtk-doc',
+];
+const linuxPrunedSuffixes = ['.a', '.la', '.prl'];
+
+/**
+ * 准备随包的自编 FFmpeg
+ * 返回 SONAME 到本机路径的替换表；表为空表示继续沿用发行版库。
+ */
+function prepareLinuxFFmpeg(qt) {
+    if (process.env.RHINE_FFMPEG === 'system') {
+        return new Map();
+    }
+    run(process.execPath, ['scripts/prepare-linux-ffmpeg.cjs']);
+    const libraries = new Map();
+    const directory = path.join('output/dependencies/ffmpeg-linux/install/lib');
+    for (const file of fs.readdirSync(directory)) {
+        if (/\.so(?:\.\d+)*$/.test(file)) {
+            libraries.set(file, path.join(directory, file));
+        }
+    }
+    // Qt 的 FFmpeg 后端只认构建时链接的 SONAME。对不上时宁可包大，也不能没声音。
+    const plugin = path.join(linuxQtQuery(qt, 'QT_INSTALL_PLUGINS'), 'multimedia/libffmpegmediaplugin.so');
+    const required = [];
+    if (fs.existsSync(plugin)) {
+        const dynamic = spawnSync('readelf', ['-d', plugin], {
+            encoding: 'utf8',
+        });
+        for (const line of (dynamic.stdout || '').split('\n')) {
+            const match = /\[(lib(?:av\w+|sw\w+)\.so\.\d+)\]/.exec(line);
+            if (match) {
+                required.push(match[1]);
+            }
+        }
+    }
+    const missing = required.filter((name) => !libraries.has(name));
+    if (missing.length) {
+        const provided = [...libraries.keys()]
+            .filter((name) => /\.so\.\d+$/.test(name))
+            .sort()
+            .join(', ');
+        console.warn(
+            `Self-built FFmpeg does not provide ${missing.join(', ')}; keep the distribution libraries`,
+        );
+        console.warn(`Self-built FFmpeg provides: ${provided || '(none)'}`);
+        console.warn(
+            'Falling back to the distribution libraries also pulls in libx264/libx265/libaom/libvpx/libdav1d/librav1e/libSvtAv1Enc.',
+        );
+        return new Map();
+    }
+    return libraries;
+}
+
+/**
+ * 部署完成后核对随包的 FFmpeg 与视频编码库
+ * 自编 FFmpeg 生效时，这七个编码器库不该有任何引用方；仍被引用则说明回退或漏替换，
+ * 无人引用则说明依赖闭包又被打成了传递闭包（会白白多出几十 MB）。
+ */
+function reportLinuxBundle(app, ffmpegLibraries) {
+    const directory = path.join(app, 'usr/lib');
+    if (!fs.existsSync(directory)) {
+        return;
+    }
+    const encoderPattern = /^lib(?:aom|x264|x265|vpx|dav1d|rav1e|SvtAv1Enc)\.so/;
+    const encoders = fs.readdirSync(directory).filter((name) => encoderPattern.test(name));
+    if (!encoders.length) {
+        return;
+    }
+    const describe = (names) => {
+        const total = names.reduce((sum, name) => sum + fs.statSync(path.join(directory, name)).size, 0);
+        return `${names.length} 个库合计 ${(total / 1048576).toFixed(1)} MB: ${names.join(', ')}`;
+    };
+    const dependents = new Map();
+    for (const name of fs.readdirSync(directory)) {
+        const file = path.join(directory, name);
+        if (encoderPattern.test(name) || !fs.lstatSync(file).isFile()) {
+            continue;
+        }
+        const dynamic = spawnSync('readelf', ['-d', file], {
+            encoding: 'utf8',
+        });
+        for (const line of (dynamic.stdout || '').split('\n')) {
+            const match = /\(NEEDED\).*\[(\S+)\]/.exec(line);
+            if (match && encoderPattern.test(match[1])) {
+                dependents.set(match[1], [...(dependents.get(match[1]) || []), name]);
+            }
+        }
+    }
+    const used = encoders.filter((name) => dependents.has(name));
+    const orphaned = encoders.filter((name) => !dependents.has(name));
+    if (ffmpegLibraries.size && orphaned.length) {
+        throw Error(`自编 FFmpeg 已生效，但包里仍有无人引用的编码器库（${describe(orphaned)}）`);
+    }
+    if (used.length) {
+        const detail = used.map((name) => `${name} ← ${dependents.get(name).join(', ')}`).join('; ');
+        console.warn(`包内含 ${describe(used)}，由非 FFmpeg 库直接引用：${detail}`);
+    }
+    if (orphaned.length) {
+        console.warn(`包内含 ${describe(orphaned)}；自编 FFmpeg 未生效时会由发行版 libavcodec 带入。`);
+    }
+}
+
+/** 删除 AppDir 里的开发期文件，压缩前再清一次，避免部署顺序影响结果。 */
+function pruneLinuxAppDir(app) {
+    for (const relative of linuxPrunedDirectories) {
+        fs.rmSync(path.join(app, relative), {
+            recursive: true,
+            force: true,
+        });
+    }
+    for (const file of listFiles(path.join(app, 'usr'))) {
+        if (linuxPrunedSuffixes.some((suffix) => file.endsWith(suffix))) {
+            fs.rmSync(file, {
+                force: true,
+            });
+        }
+    }
 }
 
 /**
@@ -737,6 +1062,8 @@ function deployApp(qt, config, existingBundle = '') {
         fs.renameSync(app, app + '.previous-' + Date.now());
     }
     const resources = path.join(app, resourceDirectory);
+    // Linux 先备好自编的 FFmpeg，再进入依赖闭包，避免把发行版的编码器库收进来。
+    const ffmpegLibraries = linux ? prepareLinuxFFmpeg(qt) : new Map();
     if (mac && !existingBundle) {
         fs.cpSync('output/qt-build/RhineMusicDatabase.app', app, {
             recursive: true,
@@ -856,7 +1183,8 @@ function deployApp(qt, config, existingBundle = '') {
     }
     if (linux) {
         prepareLinuxAppDir(app);
-        deployLinuxRuntime(qt, app, path.join(app, 'usr/bin/RhineMusicDatabase'));
+        deployLinuxRuntime(qt, app, path.join(app, 'usr/bin/RhineMusicDatabase'), ffmpegLibraries);
+        reportLinuxBundle(app, ffmpegLibraries);
     }
     // 先部署 Qt，再装入大量 SDK 文件，避免部署工具逐个扫描非原生依赖。
     run(process.execPath, ['scripts/package-resources.cjs', resources]);
@@ -870,6 +1198,17 @@ function deployApp(qt, config, existingBundle = '') {
     fs.copyFileSync(path.join('vendor/taglib/source.json'), path.join(thirdParty, 'taglib/source.json'));
     fs.copyFileSync(path.join('vendor/utfcpp/LICENSE'), path.join(thirdParty, 'utfcpp/LICENSE'));
     fs.copyFileSync(path.join('vendor/utfcpp/source.json'), path.join(thirdParty, 'utfcpp/source.json'));
+    // 随包的 FFmpeg 以 LGPL-2.1-or-later 构建，许可全文、来源与构建参数一起进包。
+    if (ffmpegLibraries.size) {
+        const ffmpeg = path.join(thirdParty, 'FFmpeg');
+        fs.mkdirSync(ffmpeg, { recursive: true });
+        fs.cpSync('licenses/FFmpeg', ffmpeg, { recursive: true });
+        fs.copyFileSync('vendor/ffmpeg/source.json', path.join(ffmpeg, 'source.json'));
+        fs.copyFileSync(
+            path.join('output/dependencies/ffmpeg-linux/install/build.json'),
+            path.join(ffmpeg, 'build.json'),
+        );
+    }
     fs.copyFileSync('vendor/qrcodegen/qrcodegen.hpp', path.join(resources, 'qrcodegen-LICENSE.hpp'));
     fs.cpSync('licenses/Qt', path.join(resources, 'Qt-Licenses'), {
         recursive: true,

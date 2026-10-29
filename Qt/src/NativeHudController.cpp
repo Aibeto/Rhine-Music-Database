@@ -1,3 +1,4 @@
+#include <QtGlobal>
 #include "fg/FgConfig.h"
 #include "GraphicsBackend.h"
 #include "NativeHud.h"
@@ -730,9 +731,16 @@ void NativeHud::action(QString value) {
             qputenv("RHINE_RENDER_SCALE", QByteArray::number(clamped));
         }
     } else if (value == "fg") {
+#ifdef Q_OS_LINUX
+        // 帧生成与抗锯齿模式互不影响。**需要重启才生效**：呈现层是否接管窗口在启动时
+        // 按 RHINE_FG 决定（fg=off 走 Qt 默认路径，内容帧实测高 35%）。这里仍然写入
+        // 环境变量，保证设置页显示与持久化偏好一致。转换规则与 Host::setPreference
+        // 共用同一个函数，免得两处对"什么才算 on"产生分歧。
+#else
         // 帧生成与抗锯齿模式互不影响；呈现层每帧读取 RHINE_FG，切换后下一帧生效，
         // 所以这个开关是设置页里唯一不需要重启的偏好。转换规则与 Host::setPreference
         // 共用同一个函数，免得两处对"什么才算 on"产生分歧。
+#endif
         const auto enabled = m_host->preference("fg") == "on";
         const auto next = enabled ? QStringLiteral("off") : QStringLiteral("on");
         m_host->setPreference("fg", next);

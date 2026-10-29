@@ -1,4 +1,5 @@
 #pragma once
+#include <QtGlobal>
 
 #include <QString>
 
@@ -116,7 +117,18 @@ inline FrameGenerationUi frameGenerationUi(bool compiledIn, bool presentLayerAct
         return {false, reason};
     }
     if (!presentLayerActive) {
+#ifdef Q_OS_LINUX
+        // fg=off 启动时呈现层**本来就不接管**（内容帧实测高 35%），这不是故障，
+        // 而是"当前设置就是关的"。此时必须允许用户点开，否则开关永远打不开。
+        if (!preferenceOn) {
+            return {true, QStringLiteral("关闭")};
+        }
+        // 用户已打开偏好，但本次进程启动时还是关的 → 呈现层没接管。这不是错误，
+        // 而是"下次启动才生效"，提示重启而不是判死。
+        return {true, QStringLiteral("已开启 · 重启生效")};
+#else
         return {false, QStringLiteral("呈现层未接管")};
+#endif
     }
     /// 接管了却没有上下文又没留原因，属于不该发生的状态，宁可置灰也不假装能开。
     return {false, QStringLiteral("插值暂不可用")};

@@ -1,3 +1,4 @@
+#include <QtGlobal>
 #include "PlaybackConnection.h"
 #include "AppStorage.h"
 #include <QCoreApplication>
@@ -172,6 +173,10 @@ void PlaybackConnection::readMessages() {
             emit activateRequested();
         } else if (message["event"] == "quit") {
             emit quitRequested();
+#ifdef Q_OS_LINUX
+        } else if (message["event"] == "restart") {
+            emit restartRequested();
+#endif
         } else if (message["event"] == "diagnostic") {
             emit diagnosticEvent(message["name"].toString(), message["values"].toObject());
         }

@@ -1,4 +1,5 @@
 #pragma once
+#include <QtGlobal>
 
 #include <QByteArray>
 #include <QString>
@@ -73,6 +74,16 @@ inline bool parseBool(const QByteArray &raw, bool fallback)
     return fallback;
 }
 
+#ifdef Q_OS_LINUX
+/**
+ * 设置页写完偏好后调用：把偏好值转成 RHINE_FG。
+ *
+ * 注意：**呈现层是否接管窗口在启动时决定**（fg=off 走 Qt 默认路径，内容帧实测高 35%），
+ * 所以这个开关需要重启才生效。这里仍然同步环境变量，是为了让"重启前的当前进程"
+ * 与持久化偏好保持一致，避免设置页显示与实际状态打架。
+ * 抽成函数是为了能在没有 GPU 的机器上单测这条链路。
+ */
+#else
 /**
  * 设置页写完偏好后调用：把偏好值转成 RHINE_FG。
  *
@@ -80,6 +91,7 @@ inline bool parseBool(const QByteArray &raw, bool fallback)
  * 而设置页改的是持久化偏好。两处若不同步，表现就是"点了没反应"。
  * 抽成函数是为了能在没有 GPU 的机器上单测这条链路。
  */
+#endif
 inline void applyInterpolationPreference(const QString &value)
 {
     qputenv("RHINE_FG", value == QLatin1String("on") ? "on" : "off");

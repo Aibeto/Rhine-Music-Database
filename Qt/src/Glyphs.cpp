@@ -1,3 +1,4 @@
+#include <QtGlobal>
 #include "Glyphs.h"
 #include <QFile>
 #include <QCoreApplication>
@@ -9,6 +10,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLinearGradient>
+#ifdef Q_OS_LINUX
+#include <QElapsedTimer>
+#include <QStringList>
+#include <algorithm>
+#endif
 #include <QRadialGradient>
 #include <QRegularExpression>
 #include <cmath>
@@ -428,10 +434,22 @@ void Glyphs::art(QPainter &c, QString key, double x, double y, double size, int 
 void Glyphs::commands(QPainter &c, const QJsonArray &commands, std::function<QImage(QString)> image) {
     QMutexLocker lock(&mutex);
     c.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+#ifdef Q_OS_LINUX
+    // 分段探针（RHINE_HUD_PROBE=1）：按操作类型累计 QPainter 耗时，判断该缓存哪一类。
+    static const bool opTiming = qEnvironmentVariableIntValue("RHINE_HUD_PROBE") == 1;
+    static QHash<QString, double> opMs;
+    static int opFrames = 0;
+    QElapsedTimer opClock;
+#endif
     for (auto v : commands) {
         const auto a = v.toArray();
         auto op = a[0].toString();
         auto n = [&](int i) { return a[i].toDouble(); };
+#ifdef Q_OS_LINUX
+        if (opTiming) {
+            opClock.start();
+        }
+#endif
         if (op == "save") {
             c.save();
         } else if (op == "restore") {
@@ -510,6 +528,31 @@ void Glyphs::commands(QPainter &c, const QJsonArray &commands, std::function<QIm
                 c.drawImage(QRectF(n(2), n(3), n(4), n(5)), img);
             }
         }
+#ifdef Q_OS_LINUX
+        if (opTiming) {
+            opMs[op] += double(opClock.nsecsElapsed()) / 1e6;
+        }
+    }
+    if (opTiming && ++opFrames % 30 == 0) {
+        QStringList parts;
+        QList<QPair<double, QString>> sorted;
+        for (auto it = opMs.cbegin(); it != opMs.cend(); ++it) {
+            sorted.append({it.value(), it.key()});
+        }
+        std::sort(sorted.begin(), sorted.end(), [](const auto &l, const auto &r) { return l.first > r.first; });
+        double total = 0.0;
+        for (const auto &row : sorted) {
+            total += row.first;
+        }
+        for (int i = 0; i < sorted.size() && i < 6; ++i) {
+            parts << QStringLiteral("%1 %2ms(%3%)")
+                         .arg(sorted[i].second)
+                         .arg(sorted[i].first / 30.0, 0, 'f', 1)
+                         .arg(total > 0 ? sorted[i].first * 100 / total : 0, 0, 'f', 0);
+        }
+        qWarning().noquote() << "HUD 分项: 每帧共" << QString::number(total / 30.0, 'f', 2) << "ms |" << parts.join(" ");
+        opMs.clear();
+#endif
     }
 }
 QImage Glyphs::label(const QJsonObject &value) {

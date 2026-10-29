@@ -1,4 +1,5 @@
 #pragma once
+#include <QtGlobal>
 #include "MusicPlayer.h"
 #include "InterfaceSession.h"
 #include <QLocalServer>
@@ -27,6 +28,11 @@ class PlaybackService : public QObject {
     QLocalServer m_server;
     QHash<QLocalSocket *, Client> m_clients;
     QPointer<QLocalSocket> m_gui;
+#ifdef Q_OS_LINUX
+    /// 当前界面进程启动时解析出的图形后端；与本次启动的解析结果不同即需要重建界面。
+    QString m_guiBackend;
+    bool m_restartingInterface = false;
+#endif
     InterfaceSession m_interfaceSession;
     QTimer m_poll;
     QTimer m_save;
