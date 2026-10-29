@@ -596,7 +596,8 @@ void MusicPlayer::next(int direction, bool ended) {
     if (queue.isEmpty()) {
         return;
     }
-    if (ended && mode == "one") {
+    // 单曲循环的前后项都指向当前歌曲，手动切换与播放结束共用队列播放路径。
+    if (mode == "one") {
         play(current, std::nullopt, index);
         return;
     }

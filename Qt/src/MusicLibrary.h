@@ -174,6 +174,7 @@ class MusicLibrary : public QObject {
     QSet<QString> subscriptions;
     QHash<QString, QString> subscriptionStates;
     void loadSubscriptionStatus(const QJsonObject &value);
+    std::optional<bool> songLiked(const QJsonObject &value) const;
     QJsonObject capabilities;
     QString vipLevel = "unknown";
     void refreshQQFeatures();
@@ -214,6 +215,10 @@ class MusicLibrary : public QObject {
     quint64 m_wikiGeneration = 0;
     quint64 m_suggestGeneration = 0;
     quint64 m_subscriptionGeneration = 0;
+    quint64 m_playbackLikeGeneration = 0;
+    QString m_playbackLikeContext;
+    void refreshPlaybackLike();
+    void resetLikeState();
     quint64 m_loginGeneration = 0;
     quint64 m_cooldownGeneration = 0;
     qint64 m_smsRetryAtMs = 0;

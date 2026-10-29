@@ -106,6 +106,7 @@ class NativeHud : public QObject {
     double width = 1920;
     double lastTime = 0;
     UiMotion::SurfaceMotion motion;
+    std::optional<QRectF> playerBounds;
     std::optional<QRectF> playerSeekRect;
     std::optional<QRectF> playerVolumeRect;
 

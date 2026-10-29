@@ -74,6 +74,74 @@ void MusicLibrary::loadSubscriptionStatus(const QJsonObject &value) {
         [accountAlive, selectionAlive] { return accountAlive() && selectionAlive(); });
 }
 
+/** 重置喜欢列表状态 */
+void MusicLibrary::resetLikeState() {
+    writeLoading = false;
+    ++m_playbackLikeGeneration;
+    m_playbackLikeContext.clear();
+    likedIDs.reset();
+    lists[1] = {};
+    totals[1] = 0;
+    likedCursor = 0;
+    hasMore[1] = true;
+    subscriptionStates.clear();
+}
+
+/** 读取当前账号下的歌曲喜欢状态 */
+std::optional<bool> MusicLibrary::songLiked(const QJsonObject &value) const {
+    if (uid.isEmpty() || value["kind"] != "song" || value.value("provider").toString(provider) != provider ||
+        !canMutate("/like")) {
+        return std::nullopt;
+    }
+    if (provider == "qq") {
+        const auto state = subscriptionStates.value(value["key"].toString());
+        if (state == "subscribed" || state == "not-subscribed") {
+            return state == "subscribed";
+        }
+    } else if (likedIDs) {
+        return MusicData::indexOf(*likedIDs, value["id"]) >= 0;
+    }
+    if (MusicData::indexOfId(lists[1], value["id"].toString()) >= 0) {
+        return true;
+    }
+    return std::nullopt;
+}
+
+/** 为正在播放的歌曲补齐喜欢状态 */
+void MusicLibrary::refreshPlaybackLike() {
+    const auto track = player.current;
+    if (writeLoading || uid.isEmpty() || track["kind"] != "song" ||
+        track.value("provider").toString(provider) != provider || !canMutate("/like")) {
+        return;
+    }
+    const auto context = provider + ":" + uid + ":" + QString::number(m_accountGeneration) + ":" +
+                         (provider == "qq" ? track["key"].toString() : QStringLiteral("likedIDs"));
+    if (songLiked(track).has_value() || m_playbackLikeContext == context) {
+        return;
+    }
+    m_playbackLikeContext = context;
+    const auto token = ++m_playbackLikeGeneration;
+    const auto accountAlive = valid(m_accountGeneration, &m_accountGeneration);
+    const auto readAlive = valid(token, &m_playbackLikeGeneration);
+    const auto source = provider;
+    const auto key = track["key"].toString();
+    api.call(
+        source == "qq" ? "subscriptionStatus" : "likedIDs",
+        source == "qq" ? QJsonArray{"song", track["id"]} : QJsonArray{uid},
+        [this, source, key](MusicReply result) {
+            if (!result.ok()) {
+                return;
+            }
+            if (source == "qq") {
+                subscriptionStates[key] = result.value.toString("unknown");
+            } else if (result.value.isArray()) {
+                likedIDs = result.value.toArray();
+            }
+            changed();
+        },
+        [accountAlive, readAlive] { return accountAlive() && readAlive(); });
+}
+
 /** 写操作串行化并核对账号代数；成功后才更新本地集合和失效元数据缓存。 */
 void MusicLibrary::mutate(QString route, QJsonObject values, std::function<void(QJsonObject)> success,
                           Completion done) {
@@ -92,6 +160,8 @@ void MusicLibrary::mutate(QString route, QJsonObject values, std::function<void(
         return;
     }
     writeLoading = true;
+    ++m_playbackLikeGeneration;
+    m_playbackLikeContext.clear();
     if (provider == "qq") {
         ++m_subscriptionGeneration;
     }

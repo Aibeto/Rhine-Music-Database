@@ -98,6 +98,27 @@ Item {
             event.accepted = rhine.keyEvent(event.key, event.modifiers, event.text);
         }
     }
+    // 阻止事件进入资料库
+    MouseArea {
+        objectName: "playerBarInputShield"
+        property var region: rhine.state.playerBounds
+        visible: !!region
+        x: region ? region.x * overlay.stageScale : 0
+        y: region ? region.y * overlay.stageScale : 0
+        width: region ? region.width * overlay.stageScale : 0
+        height: region ? region.height * overlay.stageScale : 0
+        hoverEnabled: true
+        acceptedButtons: Qt.AllButtons
+        cursorShape: Qt.ArrowCursor
+        onEntered: {
+            rhine.pointer("pointercancel", 0, 0);
+            rhine.pointer("pointerleave", 0, 0);
+        }
+        onPressed: inputLayer.forceActiveFocus()
+        onWheel: function (wheel) {
+            wheel.accepted = true;
+        }
+    }
     // ── 键盘快捷键（原来放在 Main.qml 的 Window 里，两条路径现在共用这一份） ──
     //
     // 为什么 context 要跟着宿主变：
@@ -319,7 +340,8 @@ Item {
             visible: !!region
             enabled: visible && !rhine.state.closing
             x: region ? region.x * overlay.stageScale : 0
-            y: region ? (region.y + (rhine.state.modal ? rhine.state.modalOffset || 0 : 0)) * overlay.stageScale : 0
+            // 播放栏固定在窗口下沿，不随弹窗入场偏移。
+            y: region ? region.y * overlay.stageScale : 0
             width: region ? region.width * overlay.stageScale : 0
             height: region ? region.height * overlay.stageScale : 0
             cursorShape: Qt.PointingHandCursor

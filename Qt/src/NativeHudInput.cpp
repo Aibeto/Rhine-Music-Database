@@ -9,6 +9,9 @@ void NativeHud::wheel(double x, double y, double delta, std::optional<int> steps
     if (frame.isEmpty() || !std::isfinite(delta)) {
         return;
     }
+    if (playerBounds && playerBounds->contains(x, y)) {
+        return;
+    }
     const auto step = steps.value_or(delta < 0 ? 1 : -1);
     // 鼠标滚轮按帧平滑时角度增量只在首帧出现，后续只补送连续距离。
     if (delta == 0 && step == 0 && distance.value_or(0.) == 0) {

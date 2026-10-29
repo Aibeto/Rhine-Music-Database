@@ -154,6 +154,10 @@ void MusicLibrary::restoreAccount(Completion done) {
             restoringAccount = false;
             if (result.ok()) {
                 const auto values = result.value.toArray();
+                if (uid != values.at(0).toString()) {
+                    ++m_accountGeneration;
+                    resetLikeState();
+                }
                 uid = values.at(0).toString();
                 nickname = values.at(1).toString();
                 rememberIdentityName(provider, nickname);
@@ -479,6 +483,9 @@ void MusicLibrary::confirmLogin(quint64 token, bool captcha) {
             ++m_accountGeneration;
             restoringAccount = false;
             m_accountError.clear();
+            if (uid != result.value.toArray().at(0).toString()) {
+                resetLikeState();
+            }
             uid = result.value.toArray().at(0).toString();
             nickname = result.value.toArray().at(1).toString();
             rememberIdentityName(provider, nickname);

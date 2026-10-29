@@ -149,6 +149,8 @@ set(RHINE_APP_SOURCES
     Qt/src/NativeHudInput.cpp
     Qt/src/NativeHudDetail.cpp
     Qt/src/NativeHudPlayer.cpp
+    Qt/src/PlayerBar.h
+    Qt/src/PlayerBar.cpp
     Qt/src/NativeHudLibrary.cpp
     Qt/src/NativeHudModal.cpp
     Qt/src/NativeHudBoot.cpp

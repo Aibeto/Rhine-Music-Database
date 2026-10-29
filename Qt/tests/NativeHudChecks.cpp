@@ -1,6 +1,8 @@
 #include "NativeHud.h"
+#include "NativeApplication.h"
 #include "MusicData.h"
 #include "MusicDiscover.h"
+#include "PlayerBar.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QThread>
@@ -251,10 +253,144 @@ bool checkSorting(const QString &root, Glyphs &glyphs, const QJsonObject &conten
 }
 }
 
+namespace {
+/** 验证同一展示组件在嵌入与浮窗组合下的交互边界，不复制绘制实现。 */
+bool checkPlayerBar(Glyphs &glyphs) {
+    PlayerBar::State state;
+    state.title = "Control's Wishes / 很长的歌曲标题用于验证文本裁切边界";
+    state.artist = "塞壬唱片-MSR";
+    state.album = "孤星";
+    state.hasTrack = true;
+    state.canLike = true;
+    state.likeKnown = true;
+    state.seekable = true;
+    state.durationMs = 195000;
+    state.positionMs = 102000;
+    for (const auto width : {1280.0, 1920.0, 2560.0}) {
+        const QRectF row(0, 984, width, PlayerBar::RowHeight);
+        const auto drawing = PlayerBar::render(state, row, false, glyphs);
+        if (!drawing.seek || !drawing.volume || !drawing.inputBounds.contains(*drawing.seek) ||
+            !row.contains(*drawing.volume) || !hasAction(drawing.hits, "player:lyrics") ||
+            !hasAction(drawing.hits, "player:open")) {
+            qCritical() << "Player bar lost seeking, volume, lyrics or queue";
+            return false;
+        }
+        for (const auto &value : drawing.hits) {
+            const auto hit = value.toObject();
+            const QRectF bounds(hit["x"].toDouble(), hit["y"].toDouble(), hit["width"].toDouble(),
+                                hit["height"].toDouble());
+            if (!drawing.inputBounds.contains(bounds) || !hit["fixed"].toBool()) {
+                qCritical() << "Player bar hit escaped its row";
+                return false;
+            }
+        }
+        const auto lyrics = getHit(drawing.hits, "player:lyrics");
+        const auto toggle = getHit(drawing.hits, "player:toggle");
+        const QRectF toggleRect(toggle["x"].toDouble(), toggle["y"].toDouble(), toggle["width"].toDouble(),
+                                toggle["height"].toDouble());
+        if (drawing.seek->left() != row.left() || drawing.seek->width() != row.width() ||
+            drawing.seek->top() >= row.top() || toggleRect.center() != row.center() ||
+            lyrics["y"].toDouble() < drawing.seek->bottom()) {
+            qCritical() << "Full-width boundary seek or centered player layout regressed";
+            return false;
+        }
+    }
+    // 新增操作不能压住歌曲入口，四种模式的命中中心与主播放键一致。
+    for (const auto &mode : {QString("off"), QString("all"), QString("one"), QString("shuffle")}) {
+        state.mode = mode;
+        const auto drawing = PlayerBar::render(state, {0, 984, 1920, PlayerBar::RowHeight}, false, glyphs);
+        for (const auto &action : {QString("music:like-current"), QString("player:mode")}) {
+            const auto hit = getHit(drawing.hits, action);
+            if (hit.isEmpty() || hit["y"].toDouble() + hit["height"].toDouble() / 2 != 1032) {
+                qCritical() << "Player accessory lost its centered action";
+                return false;
+            }
+        }
+        int lyricsTargets = 0;
+        for (const auto &value : drawing.hits) {
+            lyricsTargets += value.toObject()["action"] == "player:lyrics" ? 1 : 0;
+        }
+        if (lyricsTargets != 2) {
+            qCritical() << "Song and lyric button must share the lyrics action";
+            return false;
+        }
+    }
+    // 用实际字形绘制器确认进度竖线跨过交界线，而不是只检查命令坐标。
+    const auto drawing = PlayerBar::render(state, {0, 984, 1920, PlayerBar::RowHeight}, false, glyphs);
+    QImage image(1920, 1080, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    QPainter painter(&image);
+    glyphs.commands(painter, drawing.commands, [](QString) { return QImage(); });
+    painter.end();
+    const auto markerX = qRound(1920 * state.positionMs / state.durationMs);
+    if (image.pixelColor(markerX, 981).alpha() == 0 || image.pixelColor(markerX, 989).alpha() == 0) {
+        qCritical() << "Progress marker must remain visible above and below the boundary";
+        return false;
+    }
+    state.hasTrack = false;
+    state.canLike = false;
+    state.seekable = false;
+    state.applicationVolume = false;
+    const auto empty = PlayerBar::render(state, {0, 0, 1920, PlayerBar::RowHeight}, true, glyphs);
+    if (empty.seek || empty.volume || hasAction(empty.hits, "player:lyrics")) {
+        qCritical() << "Unavailable player operations remained interactive";
+        return false;
+    }
+    return true;
+}
+
+/** 留白输入不能触发详情返回、关闭弹窗或滚动后方队列。 */
+bool checkPlayerInput(const QString &root, Glyphs &glyphs, const QJsonObject &content) {
+    Host host(root, true);
+    NativeScene scene(root);
+    scene.review("detail");
+    NativeApplication app(&host, &glyphs, &scene, content);
+    app.music.current = song(1);
+    const QJsonObject frame{{"mode", "detail"}, {"detail", 1}};
+    app.hud.draw(frame, 1920, 50);
+    for (const auto x : {600.0, 1350.0}) {
+        app.pointer("pointermove", x, 1040);
+        app.pointer("pointerdown", x, 1040);
+        app.pointer("pointerup", x, 1040);
+        if (scene.mode() != "detail") {
+            qCritical() << "Player whitespace navigated the underlying library";
+            return false;
+        }
+    }
+    for (int index = 0; index < 20; ++index) {
+        app.music.player.queue.append(song(index));
+    }
+    app.hud.openModal("player");
+    app.hud.draw(frame, 1920, 50);
+    app.hud.queueOffset = 2;
+    for (const auto x : {600.0, 1350.0}) {
+        app.pointer("pointerdown", x, 1040);
+        app.pointer("pointerup", x, 1040);
+        app.hud.wheel(x, 1040, -120);
+    }
+    // 按下留白后移出播放栏再释放，同样不能构成弹窗外点击。
+    app.pointer("pointerdown", 600, 1040);
+    app.pointer("pointerup", 600, 100);
+    if (app.hud.closing || app.hud.queueOffset != 2) {
+        qCritical() << "Player whitespace closed or scrolled the underlying panel";
+        return false;
+    }
+    app.hud.closeModal();
+    app.hud.draw({{"mode", "boot"}}, 1920, 100);
+    if (app.hud.playerBounds || !app.hud.state()["playerBounds"].isNull()) {
+        qCritical() << "Hidden player retained its input shield";
+        return false;
+    }
+    return true;
+}
+}
+
 bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
     Host host(root, true);
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
     bool ok = checkSorting(root, glyphs, content);
+    ok &= checkPlayerBar(glyphs);
+    ok &= checkPlayerInput(root, glyphs, content);
     int testCount = 0;
 
     // 测试所有平台和主题组合
@@ -274,6 +410,16 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
 
             // === 测试 1: 基础面板渲染 ===
             QJsonObject archiveFrame{{"mode", "archive"}, {"selected", 0}, {"detail", 1}, {"viewer", false}};
+            hud.draw(archiveFrame, 1920, 50);
+
+            // 封面与名称共享歌词入口，动作必须沿用现有页面迁移。
+            const auto lyricsTarget = getHit(hud.hits, "player:lyrics");
+            hud.action(lyricsTarget["action"].toString());
+            if (lyricsTarget.isEmpty() || !hud.lyricsMode || requestedMode != "detail") {
+                qCritical() << "Player song target failed to open lyrics";
+                ok = false;
+            }
+            hud.lyricsMode = false;
             hud.draw(archiveFrame, 1920, 50);
 
             if (hud.commands.isEmpty()) {
@@ -466,7 +612,7 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                 const auto action = hit["action"].toString();
                 if (action == "close-modal") {
                     headerFixed = hit == settingsCloseHit;
-                } else if (!action.startsWith("settings:scroll-") && !action.startsWith("player:")) {
+                } else if (!action.startsWith("settings:scroll-") && !hit["fixed"].toBool()) {
                     const double hitTop = hit["y"].toDouble();
                     const double hitBottom = hitTop + hit["height"].toDouble();
                     const double viewportTop = bounds.top() + NativeHud::SettingsViewportTop;

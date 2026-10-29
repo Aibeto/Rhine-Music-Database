@@ -179,6 +179,7 @@ QJsonObject NativeHud::state() const {
     return {{"inputX", bounds.x() + 53},
             {"inputY", bounds.y() + 180},
             {"inputWidth", bounds.width() - 106},
+            {"playerBounds", rect(playerBounds)},
             {"seek", rect(playerSeekRect)},
             {"volume", rect(playerVolumeRect)},
             {"loginMethod", m_music->loginMethod},
@@ -224,6 +225,7 @@ void NativeHud::draw(QJsonObject next, double stageWidth, double time) {
     lastTime = time;
     commands = {};
     hits = {};
+    playerBounds.reset();
     playerSeekRect.reset();
     playerVolumeRect.reset();
     if (!trackListMode || frame["mode"] != "archive" || frame["viewer"].toBool() ||

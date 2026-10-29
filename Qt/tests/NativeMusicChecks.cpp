@@ -67,6 +67,103 @@ QString createTestAudio(QTemporaryDir &dir) {
     audio.close();
     return QUrl::fromLocalFile(audio.fileName()).toString();
 }
+
+/** 固定响应覆盖首次读取、切歌、写入失败、重复点击及退出账号的过期回包。 */
+bool checkPlaybackLikes(const QString &root) {
+    Host host(root, true);
+    MusicLibrary music(&host, {});
+    music.provider = "netease";
+    music.api.provider = "netease";
+    music.uid = "42";
+    int reads = 0;
+    int writes = 0;
+    bool fail = false;
+    host.fixture = [&](QString route, QJsonObject) {
+        if (route.endsWith("/likedIDs")) {
+            ++reads;
+            return QJsonObject{{"body", QJsonObject{{"code", 200}, {"value", QJsonArray{"1"}}}}};
+        }
+        if (route == "/like") {
+            ++writes;
+            return QJsonObject{{"body", QJsonObject{{"code", fail ? 500 : 200}}}};
+        }
+        return QJsonObject{{"body", QJsonObject{{"code", 200}}}};
+    };
+    music.player.current = song("1");
+    music.player.changed();
+    music.player.current = song("2");
+    music.player.changed();
+    if (!waitFor([&] { return music.songLiked(song("2")).has_value(); }) || reads != 1 ||
+        !music.songLiked(song("1")).value_or(false) || music.songLiked(song("2")).value_or(true)) {
+        qCritical() << "Playback likes failed initial lookup or track switch";
+        return false;
+    }
+    music.like(music.player.current);
+    music.like(music.player.current);
+    music.player.current = song("1");
+    music.player.changed();
+    if (!waitFor([&] { return !music.writeLoading; }) || writes != 1 ||
+        !music.songLiked(song("2")).value_or(false)) {
+        qCritical() << "Playback like write changed the wrong track or accepted duplicate click";
+        return false;
+    }
+    fail = true;
+    music.like(song("2"));
+    if (!waitFor([&] { return !music.writeLoading; }) || !music.songLiked(song("2")).value_or(false)) {
+        qCritical() << "Failed unlike changed the confirmed heart";
+        return false;
+    }
+    fail = false;
+    music.like(song("1"));
+    music.logout();
+    if (!waitFor([&] { return writes == 3; }) || !music.lists[1].isEmpty() ||
+        music.songLiked(song("1")).has_value()) {
+        qCritical() << "Old account like response contaminated logged-out state";
+        return false;
+    }
+    return true;
+}
+
+/** QQ 单曲状态必须按当前播放曲目隔离，写入结果优先于写入前的状态读取。 */
+bool checkQQPlaybackLikes(const QString &root) {
+    Host host(root, true);
+    MusicLibrary music(&host, {});
+    music.provider = "qq";
+    music.api.provider = "qq";
+    music.uid = "42";
+    const auto first = MusicData::item("song", "1", "歌曲一", "歌手", "qq");
+    const auto second = MusicData::item("song", "2", "歌曲二", "歌手", "qq");
+    host.fixture = [&](QString route, QJsonObject parameters) {
+        QJsonValue value;
+        if (route.endsWith("/subscriptionStatus")) {
+            value = parameters["args"].toArray().at(1) == "1" ? "subscribed" : "not-subscribed";
+        } else if (route.endsWith("/mutate")) {
+            value = QJsonObject{{"liked", true}};
+        }
+        return QJsonObject{{"body", QJsonObject{{"code", 200}, {"value", value}}}};
+    };
+    music.player.current = first;
+    music.player.changed();
+    music.player.current = second;
+    music.player.changed();
+    if (!waitFor([&] { return music.songLiked(second).has_value(); }) ||
+        music.songLiked(second).value_or(true)) {
+        qCritical() << "QQ old track response replaced current heart";
+        return false;
+    }
+    music.subscriptionStates.clear();
+    music.player.current = first;
+    music.player.changed();
+    music.player.current = second;
+    music.player.changed();
+    music.like(second);
+    if (!waitFor([&] { return !music.writeLoading; }) || !music.songLiked(second).value_or(false)) {
+        qCritical() << "QQ stale status read replaced successful like";
+        return false;
+    }
+    return true;
+}
+
 }
 
 bool runNativeSessionChecks(const QString &root, const QString &audioURL);
@@ -278,6 +375,8 @@ bool runNativeMusicChecks(const QString &root) {
     check(normalizedSong.contains("id") && normalizedSong.contains("title"), "music data structure");
 
     library.player.stop();
+    ok &= checkPlaybackLikes(root);
+    ok &= checkQQPlaybackLikes(root);
     ok &= runNativeSessionChecks(root, audioURL);
     host.shutdown();
     qInfo() << "Native music core tests:" << testCount << (ok ? "passed" : "FAILED");

@@ -66,6 +66,7 @@ MusicLibrary::MusicLibrary(Host *host, const QJsonObject &content, QObject *pare
             details[coverKey] = current;
             changed();
         }
+        refreshPlaybackLike();
         ++revision;
         emit playbackInvalidated();
     });
@@ -79,6 +80,7 @@ MusicApi::Valid MusicLibrary::valid(quint64 token, const quint64 *counter) {
 }
 
 void MusicLibrary::changed() {
+    refreshPlaybackLike();
     ++revision;
     emit invalidated();
 }

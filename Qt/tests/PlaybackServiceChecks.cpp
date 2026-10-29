@@ -184,6 +184,44 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
                      connection->snapshot()["interfacePid"].toInteger() == panel.processId();
           }),
           "GUI attaches to the playback service");
+    // 通过真实 EOF 驱动服务，不用 next(ended=true) 替代解码器结束事件。
+    if (output && panelReady) {
+        connection->call("player.play", {{"track", queue[1]}, {"source", queue}});
+        connection->call("player.mode", {{"value", "one"}});
+        check(waitFor([&] {
+                  connection->call("hello");
+                  return connection->snapshot()["state"].toObject()["seekable"].toBool();
+              }),
+              "repeat fixture becomes seekable");
+        for (int cycle = 0; cycle < 2; ++cycle) {
+            const auto before = connection->snapshot()["state"].toObject()["ended"].toInteger();
+            connection->call("player.seek", {{"value", 0.997}});
+            const auto repeated = waitFor([&] {
+                connection->call("hello");
+                const auto snapshot = connection->snapshot();
+                const auto state = snapshot["state"].toObject();
+                return state["ended"].toInteger() > before && !snapshot["loading"].toBool() &&
+                       state["position"].toDouble() < 2000 && state["requested"].toBool();
+            });
+            check(repeated && connection->snapshot()["index"].toInt(-1) == 1 &&
+                      connection->snapshot()["current"].toObject()["id"] == "1" &&
+                      connection->snapshot()["mode"] == "one",
+                  "single repeat keeps current track across real EOF with GUI attached");
+        }
+        connection->call("player.next", {{"direction", 1}});
+        check(connection->snapshot()["index"].toInt(-1) == 1 &&
+                  connection->snapshot()["current"].toObject()["id"] == "1",
+              "single repeat resolves next to the current queue item");
+        connection->call("player.next", {{"direction", -1}});
+        check(connection->snapshot()["index"].toInt(-1) == 1 &&
+                  connection->snapshot()["current"].toObject()["id"] == "1",
+              "single repeat resolves previous to the current queue item");
+        connection->call("player.mode", {{"value", "all"}});
+        connection->call("player.next", {{"direction", 1}});
+        check(connection->snapshot()["index"].toInt(-1) == 2,
+              "leaving single repeat restores queue advancement");
+        connection->call("player.pause", {{"paused", true}});
+    }
     // 服务生命周期与界面绑定：界面进程结束（含崩溃）就必须停止播放并退出。
     panel.kill();
     panel.waitForFinished();

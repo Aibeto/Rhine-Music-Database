@@ -107,7 +107,8 @@ QJsonObject NativeApplication::step(double time, double width, bool reuseScene) 
         if (++nacFrames >= 60) {
             const double n = nacFrames;
             qInfo().noquote()
-                << QStringLiteral("app->step 内部: 场景采样 %1 ms | HUD 绘制 %2 ms | 其余(观察+返回拷贝) %3 ms")
+                << QStringLiteral(
+                       "app->step 内部: 场景采样 %1 ms | HUD 绘制 %2 ms | 其余(观察+返回拷贝) %3 ms")
                        .arg(nacSampleSum / n, 0, 'f', 2)
                        .arg(nacDrawSum / n, 0, 'f', 2)
                        .arg(nacRestSum / n, 0, 'f', 2);
@@ -136,6 +137,14 @@ void NativeApplication::mediaAction(QString action) {
 }
 
 void NativeApplication::pointer(QString type, double x, double y) {
+    // 播放栏覆盖场景；在原生分发边界也隔离留白，防止后端调用穿透或残留拖动。
+    if (hud.playerBounds && hud.playerBounds->contains(x, y)) {
+        m_dragging = false;
+        m_moved = false;
+        m_scene->pointer("pointercancel", 0, 0);
+        m_scene->pointer("pointerleave", 0, 0);
+        return;
+    }
     if (!hud.modal.isEmpty()) {
         // 弹窗外只接受完整点击，拖动、取消和面板内部留白都不触发返回。
         if (type == "pointerdown") {
