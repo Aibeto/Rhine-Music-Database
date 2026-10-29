@@ -220,12 +220,20 @@ MusicApi::Valid MusicPlayer::valid(quint64 generation) {
     return [owner = QPointer(this), generation] { return owner && owner->m_generation == generation; };
 }
 
-void MusicPlayer::enqueue(const QJsonObject &track, bool next) {
+/** 去除非当前项中的同曲目，再插到队尾或当前项之后；不切歌、不改变暂停意图。 */
+bool MusicPlayer::enqueue(const QJsonObject &track, bool next) {
     if (remoteCommand("enqueue", {{"track", track}, {"next", next}})) {
-        return;
+        if (!m_host->playbackConnection()->error().isEmpty()) {
+            return false;
+        }
+        if (next) {
+            const auto position = std::max(0, index + 1);
+            return position < queue.size() && identity(queue.at(position).toObject()) == identity(track);
+        }
+        return !queue.isEmpty() && identity(queue.last().toObject()) == identity(track);
     }
     if (track["kind"] != "song" || (m_api->provider == "local") != (track["provider"] == "local")) {
-        return;
+        return false;
     }
     for (qsizetype i = 0; i < queue.size(); ++i) {
         if (i != index && identity(queue.at(i).toObject()) == identity(track)) {
@@ -238,6 +246,7 @@ void MusicPlayer::enqueue(const QJsonObject &track, bool next) {
     }
     queue.insert(next ? std::max(0, index + 1) : queue.size(), track);
     emit changed();
+    return true;
 }
 
 /** 停止旧音源并推进代数，先完成元数据再交付播放；迟到的地址不能恢复旧曲目。 */

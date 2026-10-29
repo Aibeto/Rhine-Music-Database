@@ -1,5 +1,6 @@
 #include "NativeHud.h"
 #include "MusicData.h"
+#include "SongDetailCard.h"
 #include <algorithm>
 #include <cmath>
 
@@ -63,7 +64,7 @@ void NativeHud::detail(double width, double opacity) {
     if (!lyricsMode) {
         const auto bounds = detailBounds(width);
         fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(),
-             dark ? QJsonArray{0.08, 0.095, 0.09, 0.96} : QJsonArray{0.929, 0.922, 0.894, 0.96});
+             dark ? QJsonArray{0.08, 0.095, 0.09, 0.96} : QJsonArray{0.973, 0.969, 0.933, 0.96});
     }
     button("← 返回资料库   ESC", 59, 211, 360, 54, "back", 20, "demibold");
     limited(item["id"].toString(), 60, 845, 37, 330);
@@ -75,7 +76,28 @@ void NativeHud::detail(double width, double opacity) {
         restore();
         return;
     }
-    text("SONG ID / " + item["id"].toString(), x, 278, 12);
+    // 控制器只整理真实数据与可用动作，独立卡片组件只负责绘制。
+    SongDetailCard::Model card;
+    card.x = x;
+    card.width = usable;
+    card.dark = dark;
+    card.local = music.isLocal();
+    card.id = item["id"].toString();
+    card.title = item["title"].toString();
+    const auto titleLines = m_glyphs->wrap(card.title, usable, 32, "bold");
+    card.titleLines = titleLines.mid(0, 2);
+    if (titleLines.size() > 2) {
+        card.titleLines[1] += "…";
+    }
+    card.artist = item["artist"].toString();
+    card.album = item["album"].toString();
+    card.duration = MusicData::time(item);
+    card.tab = tab;
+    card.trackCount = music.tracks.size();
+    card.playback = "面板内播放";
+    if (PlatformFeatures::OfficialPlayback) {
+        card.playback = music.isLocal() ? "本地文件 / 面板内播放" : "面板内播放 / 官方入口";
+    }
     const auto &player = music.player;
     const bool isCurrent = MusicPlayer::identity(item) == MusicPlayer::identity(player.current) &&
                            !player.loading && !player.failed;
@@ -84,38 +106,15 @@ void NativeHud::detail(double width, double opacity) {
         quality = MusicPlayer::localQuality(item);
     }
     const auto badgeProvider = music.isLocal() ? QStringLiteral("netease") : music.provider;
-    const auto badgeKey = "quality:" + badgeProvider + "-" + quality;
-    const auto badge = quality.isEmpty() ? QImage() : m_host->image(badgeKey);
-    double badgeWidth = 0;
+    card.badgeKey = "quality:" + badgeProvider + "-" + quality;
+    const auto badge = quality.isEmpty() ? QImage() : m_host->image(card.badgeKey);
+    if (!badge.isNull()) {
+        card.badgeWidth = std::min(22.0 * badge.width() / badge.height(), (usable - gap) / 2 - 12);
+    }
     if (!quality.isEmpty()) {
-        if (!music.isLocal()) {
-            hit(width * 0.927 - 55, 300, 110, 48, "quality:open", "音质说明与切换");
-        }
-        if (!badge.isNull()) {
-            constexpr double badgeHeight = 25;
-            badgeWidth = badgeHeight * badge.width() / badge.height();
-            const auto badgeX = width * 0.927 - badgeWidth / 2;
-            if (music.provider == "kugou") {
-                fill(badgeX - 8, 307, badgeWidth + 16, badgeHeight + 10, {0.30, 0.33, 0.26, 1});
-            }
-            image(badgeKey, badgeX, 312, badgeWidth, badgeHeight);
-        } else {
-            // 平台没有独立图标的普通档位用文字说明，不伪造官方徽标。
-            const auto label = quality == "standard" ? QStringLiteral("标准") : QStringLiteral("高品质");
-            badgeWidth = 56;
-            text(label, width * 0.927 - badgeWidth / 2, 312, 14, "demibold");
-        }
+        card.quality = quality == "standard" ? "标准" : "高品质";
     }
-    const auto titleWidth = badgeWidth > 0 ? width * 0.927 - badgeWidth / 2 - x - 24 : usable;
-    const auto titleLines = m_glyphs->wrap(item["title"].toString(), titleWidth, 32);
-    for (int index = 0; index < std::min(2, int(titleLines.size())); ++index) {
-        auto line = titleLines.at(index);
-        if (index == 1 && titleLines.size() > 2) {
-            line += "…";
-        }
-        limited(line, x, 305 + index * 40, 32, titleWidth, "bold");
-    }
-    limited(item["artist"].toString(), x, 394, 19, usable, "demibold");
+    card.primaryActions = {{"▶ 播放歌曲", "music:play"}, {}, {}};
     if (music.canMutate("/like")) {
         bool liked = (music.likedIDs && MusicData::indexOf(*music.likedIDs, item["id"]) >= 0) ||
                      MusicData::indexOfId(music.lists[1], item["id"].toString()) >= 0;
@@ -128,50 +127,42 @@ void NativeHud::detail(double width, double opacity) {
                 label = "红心 / 核实后切换";
             }
         }
-        actionButton(label, x, 436, buttonWidth, "music:like");
-        actionButton("加入歌单", x + buttonWidth + gap, 436, buttonWidth, "music:add-to-playlist");
+        card.primaryActions[1] = {label, "music:like"};
+        card.primaryActions[2] = {"＋ 加入歌单", "music:add-to-playlist"};
+    }
+    card.secondaryActions = {{"＋ 加入队列", "music:enqueue"}, {"▷ 下一首播放", "music:play-next"}, {}};
+    if (m_songQueueFeedbackKey == music.uid + ":" + MusicPlayer::identity(item)) {
+        card.secondaryActions[0].label = m_songQueueFeedback.value("enqueue", "＋ 加入队列");
+        card.secondaryActions[1].label = m_songQueueFeedback.value("play-next", "▷ 下一首播放");
     }
     if (!item["artists"].toArray().isEmpty()) {
-        actionButton("歌手作品 ↗", x + (buttonWidth + gap) * 2, 436, buttonWidth, "music:artist:0");
+        card.secondaryActions[2] = {"↗ 歌手作品", "music:artist:0"};
     }
-    actionButton("▶ 面板内播放", x, 498, buttonWidth, "music:play", true);
-    actionButton("加入队列", x + buttonWidth + gap, 498, buttonWidth, "music:enqueue");
-    actionButton("下一首播放", x + (buttonWidth + gap) * 2, 498, buttonWidth, "music:play-next");
-    rule(x, 565, usable, 0.4);
+    for (auto &action : card.primaryActions) {
+        const auto weight = action.route == "music:play" ? "demibold" : "regular";
+        action.label = fit(action.label, 14, buttonWidth - 24, weight);
+    }
+    for (auto &action : card.secondaryActions) {
+        action.label = fit(action.label, 14, buttonWidth - 24);
+    }
+    const SongDetailCard::Canvas canvas{
+        [this](double x, double y, double width, double height, QJsonArray color) {
+            fill(x, y, width, height, color);
+        },
+        [this](QString value, double x, double y, double size, QString weight, QJsonArray color) {
+            text(value, x, y, size, weight, 0, color);
+        },
+        [this](QString value, double x, double y, double size, double width, QString weight) {
+            limited(value, x, y, size, width, weight);
+        },
+        [this](double x, double y, double width, double height, QString action, QString label) {
+            hit(x, y, width, height, action, label);
+        },
+        [this](QString key, double x, double y, double width, double height) {
+            image(key, x, y, width, height);
+        }};
+    SongDetailCard::paint(card, canvas);
     const bool albumTracks = tab == "history";
-    if (!albumTracks) {
-        const auto column = (usable - gap) / 2;
-        QString playbackDescription = "面板内播放";
-        if (PlatformFeatures::OfficialPlayback) {
-            playbackDescription = music.isLocal() ? "本地文件 / 面板内播放" : "面板内播放 / 官方入口";
-        }
-        const QVector<QPair<QString, QString>> meta{{"ARTIST / 歌手", item["artist"].toString()},
-                                                    {"ALBUM / 专辑", item["album"].toString()},
-                                                    {"DURATION / 时长", MusicData::time(item)},
-                                                    {"PLAYBACK / 播放方式", playbackDescription}};
-        for (int index = 0; index < meta.size(); ++index) {
-            const auto xx = x + (index % 2) * (column + gap);
-            const auto yy = 584 + (index / 2) * 64;
-            text(meta.at(index).first, xx, yy, 11);
-            const auto value = meta.at(index).second;
-            limited(value.isEmpty() ? "暂无" : value, xx, yy + 23, 16, column - 12);
-        }
-    }
-    const QStringList keys{"overview", "notes", "history"};
-    const QStringList labels{music.isLocal() ? "文件信息" : "歌曲百科", "专辑信息", "同专辑"};
-    const double tabsY = albumTracks ? 570 : 720;
-    for (int index = 0; index < keys.size(); ++index) {
-        const auto xx = x + index * usable / 3;
-        auto label = labels.at(index);
-        if (index == 2 && albumTracks && !music.tracks.isEmpty()) {
-            label += " · " + QString::number(music.tracks.size()) + " 首";
-        }
-        button(label, xx, tabsY, usable / 3 - 12, 38, "tab:" + keys.at(index), 15);
-        if (tab == keys.at(index)) {
-            rule(xx, tabsY + 40, usable / 3 - 24, 1);
-        }
-    }
-    rule(x, tabsY + 42, usable, 0.2);
     if (albumTracks) {
         trackOffset = std::clamp(trackOffset, 0, std::max(0, int(music.tracks.size()) - AlbumTrackRowCount));
         const auto songs = MusicData::slice(music.tracks, trackOffset, AlbumTrackRowCount);
@@ -208,15 +199,16 @@ void NativeHud::detail(double width, double opacity) {
         hit(x, 786, usable, std::min(3, int(lines.size()) - bodyOffset) * 31, "detail:copy",
             "点击复制完整内容");
     }
+    rule(x, 898, usable, 0.18);
     if (PlatformFeatures::OfficialPlayback && !music.isLocal()) {
-        actionButton(music.provider != "netease" ? music.providerName() + " ↗" : "官方客户端 ↗", x, 910,
-                     buttonWidth, "music:official");
+        button(music.provider != "netease" ? music.providerName() + " ↗" : "官方客户端 ↗", x, 910,
+               buttonWidth, 44, "music:official", 13);
     }
     if (music.provider == "qq") {
-        actionButton("试听片段", x + buttonWidth + gap, 910, buttonWidth, "music:preview");
+        button("试听片段", x + buttonWidth + gap, 910, buttonWidth, 44, "music:preview", 13);
     }
     if (music.directory && music.canEditPlaylist(music.directory->item)) {
-        actionButton("从歌单移除", x + (buttonWidth + gap) * 2, 910, buttonWidth, "music:remove-track");
+        button("从歌单移除", x + (buttonWidth + gap) * 2, 910, buttonWidth, 44, "music:remove-track", 13);
     }
     restore();
 }

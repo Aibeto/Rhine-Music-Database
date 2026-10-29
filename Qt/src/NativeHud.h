@@ -155,6 +155,10 @@ class NativeHud : public QObject {
     QCache<QString, QString> m_fitCache{512};
     std::map<QString, UiMotion::RollingLabel> m_rolling;
     QString m_sortNotice;
+    QString m_songQueueFeedbackKey;
+    QHash<QString, QString> m_songQueueFeedback;
+    // 每个按钮独立计时，重复点击重启计时器；HUD 销毁时自动取消回调。
+    QHash<QString, QTimer *> m_songQueueFeedbackTimers;
     QString m_sortContainerKey;
     QJsonArray m_sortTracks;
     QString m_sortField;

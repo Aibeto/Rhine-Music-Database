@@ -667,6 +667,116 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             hud.modal.clear();
             hud.draw(detailFrame, 1920, 50);
 
+            // 卡片改版只能调整内部；不同宽度与标签页仍沿用原外框和动作路由。
+            for (const double stageWidth : {1280.0, 1920.0, 2560.0}) {
+                const auto left = stageWidth * 0.56 - 24;
+                const QRectF expected(left, 260, stageWidth - left - 35, 696);
+                if (hud.detailBounds(stageWidth) != expected) {
+                    qCritical() << "Song card changed its external geometry" << stageWidth;
+                    ok = false;
+                }
+                for (const auto &detailTab : {"overview", "notes", "history"}) {
+                    hud.tab = detailTab;
+                    hud.draw(detailFrame, stageWidth, 50);
+                    const QStringList cardActions{"music:play",     "music:enqueue", "music:play-next",
+                                                  "music:artist:0", "tab:overview",  "tab:notes",
+                                                  "tab:history"};
+                    for (const auto &action : cardActions) {
+                        const auto target = getHit(hud.hits, action);
+                        const QRectF rectangle(target["x"].toDouble(), target["y"].toDouble(),
+                                               target["width"].toDouble(), target["height"].toDouble());
+                        if (target.isEmpty() || !expected.contains(rectangle)) {
+                            qCritical() << "Song card lost or moved an action outside its bounds" << action;
+                            ok = false;
+                        }
+                    }
+                    if (hud.tab == "history" && !hasAction(hud.hits, "music:track:0")) {
+                        qCritical() << "Song card lost same-album navigation";
+                        ok = false;
+                    }
+                    const auto playTarget = getHit(hud.hits, "music:play");
+                    const auto queueTarget = getHit(hud.hits, "music:enqueue");
+                    const auto tabTarget = getHit(hud.hits, "tab:overview");
+                    if (playTarget["height"] != queueTarget["height"] ||
+                        queueTarget["y"].toDouble() + queueTarget["height"].toDouble() >
+                            tabTarget["y"].toDouble()) {
+                        qCritical() << "Song button rows differ in height or overlap the album tabs";
+                        ok = false;
+                    }
+                }
+            }
+            hud.tab = "overview";
+            hud.draw(detailFrame, 1920, 50);
+
+            // 入队反馈必须对应真实结果；下一首同时完成入队或移动，且不打断当前播放。
+            const auto savedQueue = music->player.queue;
+            const auto savedPlaying = music->player.current;
+            const auto savedIndex = music->player.index;
+            const auto savedSelection = music->current;
+            music->player.queue = {song(1), song(2), song(3)};
+            music->player.current = song(2);
+            music->player.index = 1;
+            music->current = song(4);
+            const auto playbackState = music->player.state;
+            hud.action("music:enqueue");
+            hud.draw(detailFrame, 1920, 50);
+            if (music->player.queue.last().toObject()["id"] != "4" ||
+                !getHit(hud.hits, "music:enqueue")["label"].toString().contains("已加入队列")) {
+                qCritical() << "Queue append did not confirm the actual result";
+                ok = false;
+            }
+            hud.action("music:play-next");
+            hud.draw(detailFrame, 1920, 50);
+            if (music->player.queue.size() != 4 || music->player.queue.at(2).toObject()["id"] != "4" ||
+                !getHit(hud.hits, "music:play-next")["label"].toString().contains("已设为下一首")) {
+                qCritical() << "Play-next did not move an existing item and confirm it";
+                ok = false;
+            }
+            if (provider == "netease" && !dark) {
+                const auto waitFeedback = [](int milliseconds) {
+                    QElapsedTimer elapsed;
+                    elapsed.start();
+                    while (elapsed.elapsed() < milliseconds) {
+                        QCoreApplication::processEvents();
+                        QThread::msleep(5);
+                    }
+                    QCoreApplication::processEvents();
+                };
+                // 第二次点击应从头计时；另一个按钮仍按自己的期限恢复。
+                waitFeedback(1200);
+                hud.action("music:enqueue");
+                waitFeedback(1100);
+                hud.draw(detailFrame, 1920, 50);
+                if (!getHit(hud.hits, "music:enqueue")["label"].toString().contains("已加入队列") ||
+                    getHit(hud.hits, "music:play-next")["label"].toString() != "▷ 下一首播放") {
+                    qCritical() << "Song action feedback timers interfere with repeated clicks";
+                    ok = false;
+                }
+                waitFeedback(1100);
+                hud.draw(detailFrame, 1920, 50);
+                if (getHit(hud.hits, "music:enqueue")["label"].toString() != "＋ 加入队列") {
+                    qCritical() << "Queue action feedback did not restore its original icon and label";
+                    ok = false;
+                }
+                // 恢复下一个队列断言的前置顺序。
+                hud.action("music:play-next");
+            }
+            music->current = song(5);
+            hud.action("music:play-next");
+            music->current = song(1);
+            hud.action("music:play-next");
+            if (music->player.queue.size() != 5 || music->player.index != 0 ||
+                music->player.queue.at(1).toObject()["id"] != "1" ||
+                music->player.queue.at(2).toObject()["id"] != "5" || music->player.current["id"] != "2" ||
+                music->player.state != playbackState) {
+                qCritical() << "Play-next failed new insertion or preserved-current semantics";
+                ok = false;
+            }
+            music->player.queue = savedQueue;
+            music->player.current = savedPlaying;
+            music->player.index = savedIndex;
+            music->current = savedSelection;
+
             if (hud.commands.isEmpty()) {
                 qCritical() << "Detail panel commands empty" << provider << (dark ? "dark" : "light");
                 ok = false;

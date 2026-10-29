@@ -6,7 +6,7 @@ class MusicPlayer : public QObject {
     Q_OBJECT
   public:
     MusicPlayer(Host *host, MusicApi *api, QObject *parent = nullptr);
-    void enqueue(const QJsonObject &track, bool next = false);
+    bool enqueue(const QJsonObject &track, bool next = false);
     void play(QJsonObject track, std::optional<QJsonArray> source = std::nullopt,
               std::optional<int> queueIndex = std::nullopt, bool preview = false,
               std::optional<QJsonObject> resume = std::nullopt);

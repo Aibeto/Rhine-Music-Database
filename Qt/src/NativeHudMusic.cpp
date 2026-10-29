@@ -2,9 +2,12 @@
 #include "MusicData.h"
 #include <QPointer>
 #include <QUrl>
+#include <QTimer>
 #include <algorithm>
 
 namespace {
+constexpr int SongActionFeedbackDurationMs = 2000;
+
 int wrap(int value, int count) {
     return count > 0 ? (value % count + count) % count : 0;
 }
@@ -195,7 +198,30 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
     } else if (name == "preview" && music.provider == "qq") {
         music.player.play(music.current, std::nullopt, std::nullopt, true);
     } else if (name == "play-next" || name == "enqueue") {
-        music.player.enqueue(music.current, name == "play-next");
+        const auto key = music.uid + ":" + MusicPlayer::identity(music.current);
+        if (m_songQueueFeedbackKey != key) {
+            m_songQueueFeedbackKey = key;
+            m_songQueueFeedback.clear();
+        }
+        const bool queued = music.player.enqueue(music.current, name == "play-next");
+        QString notice = "未能加入，请重试";
+        if (queued) {
+            notice = name == "play-next" ? "✓ 已设为下一首" : "✓ 已加入队列";
+        }
+        m_songQueueFeedback[name] = notice;
+        auto timer = m_songQueueFeedbackTimers.value(name);
+        if (!timer) {
+            timer = new QTimer(this);
+            timer->setSingleShot(true);
+            timer->setTimerType(Qt::PreciseTimer);
+            connect(timer, &QTimer::timeout, this, [this, name] {
+                m_songQueueFeedback.remove(name);
+                // 主动唤醒静止界面，不依赖鼠标移动或持续动画来恢复按钮。
+                m_host->invalidate();
+            });
+            m_songQueueFeedbackTimers.insert(name, timer);
+        }
+        timer->start(SongActionFeedbackDurationMs);
     } else if (name == "play-loaded") {
         music.playDirectory();
     } else if (name == "remove-track") {
