@@ -100,11 +100,13 @@ void ScenePostProcess::prepare(QSize render, QSize display, const QJsonObject &f
         m_displaySize = display;
         if (active()) {
             m_globals = create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 544)));
-            // 同一帧的动态缓冲写入会合并；EASU 和 RCAS 必须各持一份常量，不能相互覆盖。
-            m_easuConstants =
+            m_constants =
                 create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Fsr1Con))));
+#ifdef Q_OS_WIN
+            // Windows 单独保存 RCAS 常量，避免同帧动态更新覆盖 EASU。
             m_rcasConstants =
                 create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Fsr1Con))));
+#endif
             m_sampler =
                 create(own(rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
                                            QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge)));
@@ -151,7 +153,7 @@ void ScenePostProcess::prepare(QSize render, QSize display, const QJsonObject &f
 }
 
 void ScenePostProcess::quad(QRhiCommandBuffer *commands, const QString &kind, QRhiRenderTarget *destination,
-                            const QList<QRhiTexture *> &textures, QRhiBuffer *constants) {
+                            const QList<QRhiTexture *> &textures) {
     QString bindingKey = kind;
     for (auto texture : textures) {
         bindingKey += '/' + QString::number(quintptr(texture));
@@ -163,8 +165,14 @@ void ScenePostProcess::quad(QRhiCommandBuffer *commands, const QString &kind, QR
         QList<QRhiShaderResourceBinding> values{
             QRhiShaderResourceBinding::uniformBuffer(0, stages, m_globals)};
         if (kind.startsWith("fsr1_")) {
+#ifdef Q_OS_WIN
+            auto *constants = kind == "fsr1_rcas" ? m_rcasConstants : m_constants;
             values.append(QRhiShaderResourceBinding::uniformBuffer(
                 1, QRhiShaderResourceBinding::FragmentStage, constants));
+#else
+            values.append(QRhiShaderResourceBinding::uniformBuffer(
+                1, QRhiShaderResourceBinding::FragmentStage, m_constants));
+#endif
         }
         for (int index = 0; index < textures.size(); ++index) {
             values.append(QRhiShaderResourceBinding::sampledTexture(
@@ -195,12 +203,16 @@ void ScenePostProcess::quad(QRhiCommandBuffer *commands, const QString &kind, QR
     commands->endPass();
 }
 void ScenePostProcess::fsrQuad(QRhiCommandBuffer *commands, const QString &kind,
-                               QRhiRenderTarget *destination, QRhiTexture *source, QRhiBuffer *buffer,
-                               const Fsr1Con &constants) {
+                               QRhiRenderTarget *destination, QRhiTexture *source, const Fsr1Con &constants) {
     auto batch = rhi->nextResourceUpdateBatch();
+#ifdef Q_OS_WIN
+    auto *buffer = kind == "fsr1_rcas" ? m_rcasConstants : m_constants;
     batch->updateDynamicBuffer(buffer, 0, sizeof(constants), &constants);
+#else
+    batch->updateDynamicBuffer(m_constants, 0, sizeof(constants), &constants);
+#endif
     commands->resourceUpdate(batch);
-    quad(commands, kind, destination, {source}, buffer);
+    quad(commands, kind, destination, {source});
 }
 
 /** 对新场景的最终颜色执行互斥 AA/FSR；计算派发失败时仍输出有效场景。 */
@@ -240,11 +252,11 @@ void ScenePostProcess::resolve(QRhiCommandBuffer *commands, QRhiRenderTarget *de
         if (resolved) {
             quad(commands, "copyColor", destination, {m_output.texture});
         } else {
-            fsrQuad(commands, "fsr1_easu", m_output.target, m_input.texture, m_easuConstants,
+            fsrQuad(commands, "fsr1_easu", m_output.target, m_input.texture,
                     Fsr1Constants::easu(m_renderSize, m_displaySize));
             const int effective =
                 RhineFsr::effectiveSharpnessPercent(sharpness(), m_renderSize, m_displaySize);
-            fsrQuad(commands, "fsr1_rcas", destination, m_output.texture, m_rcasConstants,
+            fsrQuad(commands, "fsr1_rcas", destination, m_output.texture,
                     Fsr1Constants::rcas(m_displaySize, float(100 - effective) / 100.f * 2.f));
         }
     }

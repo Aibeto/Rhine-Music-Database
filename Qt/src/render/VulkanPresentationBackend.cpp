@@ -35,13 +35,15 @@ class VulkanPresentationBackend final : public PresentationBackend {
         // 那样 surfaceForWindow() 永远返回 VK_NULL_HANDLE。
         m_window->setSurfaceType(QSurface::VulkanSurface);
         m_window->setVulkanInstance(m_instance.get());
+#ifdef Q_OS_WIN
         m_window->setTitle(QStringLiteral("RHINE MUSIC DATABASE"));
         m_window->setMinimumSize(QSize(960, 540));
-#ifdef Q_OS_WIN
         // 必须在创建 HWND 和 Vulkan surface 前确定无边框属性。
         m_window->setFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowTitleHint |
                            Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint |
                            Qt::WindowCloseButtonHint | Qt::WindowFullscreenButtonHint);
+#else
+        m_window->setTitle(QStringLiteral("Rhine Music Database"));
 #endif
         m_window->resize(logicalSize);
         m_window->create();
@@ -227,7 +229,14 @@ class VulkanPresentationBackend final : public PresentationBackend {
 
         m_size = m_window->size();
         m_presenter = std::make_unique<VulkanPresenter>();
-        if (!m_presenter->init(m_rhi.get(), surface, m_size * m_window->devicePixelRatio(), m_vsync)) {
+#ifdef Q_OS_WIN
+        // Windows 高 DPI 下交换链按物理像素建立。
+        const QSize swapchainSize = m_size * m_window->devicePixelRatio();
+#else
+        // 其他平台由 surface 的 currentExtent 决定交换链大小。
+        const QSize swapchainSize = m_size;
+#endif
+        if (!m_presenter->init(m_rhi.get(), surface, swapchainSize, m_vsync)) {
             m_error = QStringLiteral("交换链创建失败：%1").arg(m_presenter->lastError());
             return false;
         }

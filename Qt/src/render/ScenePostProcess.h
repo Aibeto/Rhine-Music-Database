@@ -32,9 +32,9 @@ class ScenePostProcess : public SceneResources {
     };
     Target target(QSize size, QRhiTexture::Format format, QRhiTexture::Flags flags = {});
     void quad(QRhiCommandBuffer *commands, const QString &kind, QRhiRenderTarget *destination,
-              const QList<QRhiTexture *> &textures, QRhiBuffer *constants = nullptr);
+              const QList<QRhiTexture *> &textures);
     void fsrQuad(QRhiCommandBuffer *commands, const QString &kind, QRhiRenderTarget *destination,
-                 QRhiTexture *source, QRhiBuffer *buffer, const Fsr1Con &constants);
+                 QRhiTexture *source, const Fsr1Con &constants);
     QString m_mode;
     QSize m_renderSize;
     QSize m_displaySize;
@@ -44,8 +44,10 @@ class ScenePostProcess : public SceneResources {
     int m_historyIndex = 0;
     bool m_historyValid = false;
     QRhiBuffer *m_globals = nullptr;
-    QRhiBuffer *m_easuConstants = nullptr;
+    QRhiBuffer *m_constants = nullptr;
+#ifdef Q_OS_WIN
     QRhiBuffer *m_rcasConstants = nullptr;
+#endif
     QRhiSampler *m_sampler = nullptr;
     QHash<QString, QRhiShaderResourceBindings *> m_bindings;
     QHash<QString, QRhiGraphicsPipeline *> m_pipelines;

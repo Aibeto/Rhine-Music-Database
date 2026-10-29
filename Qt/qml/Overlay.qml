@@ -24,7 +24,10 @@ Item {
 
     // 受控呈现使用原生 QWindow；默认路径由 Main.qml 注入 QML Window。
     readonly property bool controlledHost: typeof rhineHostWindow !== "undefined" && rhineHostWindow !== null
-    property var hostWindow: controlledHost ? rhineHostWindow : null
+    readonly property bool windows: Qt.platform.os === "windows"
+    readonly property bool controlledMetalHost: Qt.platform.os === "osx" && controlledHost
+    property Window hostWindow: null
+    readonly property var chromeHostWindow: windows && controlledHost ? rhineHostWindow : hostWindow
     property bool frameless: controlledHost && Qt.platform.os === "windows"
     readonly property bool ios: Qt.platform.os === "ios"
 
@@ -34,6 +37,10 @@ Item {
     }
     // 离屏窗口失去焦点后按当前面板恢复，不能把输入框焦点一律交回快捷键层。
     function restoreInputFocus() {
+        if (!windows) {
+            focusInputLayer();
+            return;
+        }
         if (searchInput.visible && searchInput.enabled) {
             searchInput.forceActiveFocus();
         } else if (formFields.visible && accountField.enabled) {
@@ -54,9 +61,9 @@ Item {
         }
     }
     Loader {
-        active: overlay.controlledHost
+        active: overlay.windows ? overlay.controlledHost : overlay.controlledMetalHost
         sourceComponent: LocalMusicDialogs {
-            hostWindow: overlay.hostWindow
+            hostWindow: overlay.windows ? overlay.chromeHostWindow : Window.window
             backend: rhine
         }
     }
@@ -106,7 +113,12 @@ Item {
     // FgShell::eventFilter() 里那种 QCoreApplication::sendEvent(离屏窗口, key) 的
     // 直接投递完全不经过快捷键地图，任何 context 都不会触发——所以 FG 的快捷键
     // 绝不能靠"转发事件"实现，只能靠这里的 context 声明。
-    readonly property int shortcutContext: controlledHost ? Qt.ApplicationShortcut : Qt.WindowShortcut
+    readonly property int shortcutContext: {
+        if (windows) {
+            return controlledHost ? Qt.ApplicationShortcut : Qt.WindowShortcut;
+        }
+        return hostWindow === null ? Qt.ApplicationShortcut : Qt.WindowShortcut;
+    }
     Shortcut {
         sequences: [StandardKey.Quit]
         context: overlay.shortcutContext
@@ -379,12 +391,13 @@ Item {
         id: chromeLoader
         anchors.fill: parent
         z: 999
-        active: overlay.hostWindow !== null
+        active: overlay.chromeHostWindow !== null
         sourceComponent: WindowChrome {
             window: overlay.hostWindow
+            nativeWindow: overlay.windows ? overlay.chromeHostWindow : null
             onMinimizeRequested: rhine.minimizeWindow()
             enabled: overlay.frameless
-            visible: enabled && overlay.hostWindow.visibility !== Window.FullScreen
+            visible: enabled && overlay.chromeHostWindow.visibility !== Window.FullScreen
             dark: rhine.state.dark === true
         }
     }

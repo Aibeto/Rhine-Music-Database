@@ -10,14 +10,20 @@ Item {
     FolderDialog {
         id: localFolderDialog
         objectName: "localMusicFolderDialog"
-        parentWindow: dialogs.hostWindow
+        Binding on parentWindow {
+            when: Qt.platform.os === "windows"
+            value: dialogs.hostWindow
+        }
         title: "导入本地音乐文件夹"
         onAccepted: backend.importLocal([selectedFolder])
     }
     FileDialog {
         id: localFileDialog
         objectName: "localMusicFileDialog"
-        parentWindow: dialogs.hostWindow
+        Binding on parentWindow {
+            when: Qt.platform.os === "windows"
+            value: dialogs.hostWindow
+        }
         title: "导入本地音乐文件"
         fileMode: FileDialog.OpenFiles
         nameFilters: ["音乐文件 (*.mp3 *.flac *.m4a *.mp4 *.aac *.ogg *.opus *.ape *.wav *.aiff *.aif *.wv *.wma *.mpc)"]

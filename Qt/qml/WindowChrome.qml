@@ -4,18 +4,26 @@ import QtQuick.Window
 // Windows 无边框模式
 Item {
     id: chrome
-    required property var window
+    required property Window window
+    // Windows 呈现使用原生 QWindow
+    property var nativeWindow: null
+    readonly property var chromeWindow: {
+        if (Qt.platform.os === "windows" && nativeWindow !== null) {
+            return nativeWindow;
+        }
+        return window;
+    }
     property bool dark: false
     readonly property color ink: dark ? "#ebebeb" : "#141613"
-    readonly property bool maximized: window.visibility === Window.Maximized
+    readonly property bool maximized: chromeWindow.visibility === Window.Maximized
     anchors.fill: parent
     signal minimizeRequested
 
     function toggleMaximized() {
         if (maximized) {
-            window.showNormal();
+            chromeWindow.showNormal();
         } else {
-            window.showMaximized();
+            chromeWindow.showMaximized();
         }
     }
 
@@ -37,7 +45,7 @@ Item {
                 acceptedButtons: Qt.LeftButton
                 onActiveChanged: {
                     if (active) {
-                        chrome.window.startSystemMove();
+                        chrome.chromeWindow.startSystemMove();
                     }
                 }
             }
@@ -81,7 +89,7 @@ Item {
                         } else if (modelData === "maximize") {
                             chrome.toggleMaximized();
                         } else {
-                            chrome.window.close();
+                            chrome.chromeWindow.close();
                         }
                     }
 
@@ -143,7 +151,7 @@ Item {
             readonly property bool topEdge: (modelData & Qt.TopEdge) !== 0
             readonly property bool bottomEdge: (modelData & Qt.BottomEdge) !== 0
             readonly property bool corner: (leftEdge || rightEdge) && (topEdge || bottomEdge)
-            enabled: !chrome.maximized && chrome.window.visibility !== Window.FullScreen
+            enabled: !chrome.maximized && chrome.chromeWindow.visibility !== Window.FullScreen
             x: {
                 if (leftEdge) {
                     return 0;
@@ -164,7 +172,7 @@ Item {
                 }
                 return leftEdge || rightEdge ? Qt.SizeHorCursor : Qt.SizeVerCursor;
             }
-            onPressed: chrome.window.startSystemResize(modelData)
+            onPressed: chrome.chromeWindow.startSystemResize(modelData)
         }
     }
 }

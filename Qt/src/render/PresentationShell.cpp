@@ -19,13 +19,16 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QHoverEvent>
 #include <QList>
 #include <QMatrix4x4>
+#include <QMouseEvent>
 #include <QQmlContext>
 #include <QQmlEngine>
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QTimer>
+#include <QWheelEvent>
 #include <QWindow>
 
 #include <rhi/qrhi.h>
@@ -227,8 +230,12 @@ bool PresentationShell::initializeLayers() {
     // null，QQuickWindow 收到 KeyPress 后无处投递，按键被直接丢弃。
     // 显式恢复当前面板的焦点；重建后可能仍在搜索框，不能统一交回快捷键层。
     if (QQuickItem *overlayRoot = m_host->overlayRootItem()) {
+#ifdef Q_OS_WIN
         const bool focused =
             QMetaObject::invokeMethod(overlayRoot, "restoreInputFocus", Qt::DirectConnection);
+#else
+        const bool focused = QMetaObject::invokeMethod(overlayRoot, "focusInputLayer", Qt::DirectConnection);
+#endif
         QQuickItem *focusItem = m_host->overlayWindow()->activeFocusItem();
         qInfo().noquote() << "FG: 覆盖层输入焦点" << (focused && focusItem ? "已建立" : "未建立")
                           << "activeFocusItem:"
@@ -939,8 +946,10 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
             scheduleNext();
         }
         break;
+#ifdef Q_OS_WIN
     case QEvent::DevicePixelRatioChange:
     case QEvent::ScreenChangeInternal:
+#endif
     case QEvent::Resize:
         m_needRecreate = true;
         m_forcePresent = true;
@@ -965,6 +974,12 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
     // QQuickRenderControl 没有自己的事件来源：可见窗口收到的输入必须原样转发给
     // 离屏的 UI 窗口，否则按钮、滚轮、快捷键全部失效。
     if (QQuickWindow *overlay = m_host ? m_host->overlayWindow() : nullptr) {
+#ifdef Q_OS_WIN
+        const qreal inputRatio = 1.0;
+#else
+        // 非 Windows 原样保留补丁前的输入坐标规则。
+        const qreal inputRatio = m_backendName == "metal" ? 1.0 : m_dpr;
+#endif
         switch (event->type()) {
         case QEvent::KeyPress:
             // 兜底且是真正的保障：按键到达时离屏窗口若没有焦点项，KeyPress 会被
@@ -980,14 +995,46 @@ bool PresentationShell::eventFilter(QObject *watched, QEvent *event) {
         case QEvent::MouseButtonPress:
         case QEvent::MouseButtonRelease:
         case QEvent::MouseButtonDblClick:
-        case QEvent::MouseMove:
-        case QEvent::Wheel:
+        case QEvent::MouseMove: {
+            auto *mouseEvent = static_cast<QMouseEvent *>(event);
+            if (qFuzzyCompare(inputRatio, 1.0)) {
+                QCoreApplication::sendEvent(overlay, event);
+            } else {
+                QMouseEvent scaled(mouseEvent->type(), mouseEvent->position() * inputRatio,
+                                   mouseEvent->scenePosition() * inputRatio, mouseEvent->globalPosition(),
+                                   mouseEvent->button(), mouseEvent->buttons(), mouseEvent->modifiers(),
+                                   mouseEvent->pointingDevice());
+                QCoreApplication::sendEvent(overlay, &scaled);
+            }
+            break;
+        }
+        case QEvent::Wheel: {
+            auto *wheelEvent = static_cast<QWheelEvent *>(event);
+            if (qFuzzyCompare(inputRatio, 1.0)) {
+                QCoreApplication::sendEvent(overlay, event);
+            } else {
+                QWheelEvent scaled(wheelEvent->position() * inputRatio, wheelEvent->globalPosition(),
+                                   wheelEvent->pixelDelta(), wheelEvent->angleDelta(), wheelEvent->buttons(),
+                                   wheelEvent->modifiers(), wheelEvent->phase(), wheelEvent->inverted(),
+                                   wheelEvent->source(), wheelEvent->pointingDevice());
+                QCoreApplication::sendEvent(overlay, &scaled);
+            }
+            break;
+        }
         case QEvent::HoverEnter:
         case QEvent::HoverLeave:
-        case QEvent::HoverMove:
-            // 可见窗口和离屏窗口都使用逻辑坐标；像素密度只作用于渲染目标。
-            QCoreApplication::sendEvent(overlay, event);
+        case QEvent::HoverMove: {
+            auto *hoverEvent = static_cast<QHoverEvent *>(event);
+            if (qFuzzyCompare(inputRatio, 1.0)) {
+                QCoreApplication::sendEvent(overlay, event);
+            } else {
+                QHoverEvent scaled(hoverEvent->type(), hoverEvent->position() * inputRatio,
+                                   hoverEvent->globalPosition(), hoverEvent->oldPos() * inputRatio,
+                                   hoverEvent->modifiers(), hoverEvent->pointingDevice());
+                QCoreApplication::sendEvent(overlay, &scaled);
+            }
             break;
+        }
         case QEvent::TouchBegin:
         case QEvent::TouchUpdate:
         case QEvent::TouchEnd:
@@ -1025,6 +1072,7 @@ void PresentationShell::ensureOverlayFocus(QQuickWindow *overlay) {
     if (!overlay || !m_host) {
         return;
     }
+#ifdef Q_OS_WIN
     auto *focusItem = overlay->activeFocusItem();
     if (focusItem && focusItem != overlay->contentItem() && focusItem != m_host->overlayRootItem()) {
         return;
@@ -1032,6 +1080,14 @@ void PresentationShell::ensureOverlayFocus(QQuickWindow *overlay) {
     if (QQuickItem *root = m_host->overlayRootItem()) {
         QMetaObject::invokeMethod(root, "restoreInputFocus", Qt::DirectConnection);
     }
+#else
+    if (overlay->activeFocusItem()) {
+        return;
+    }
+    if (QQuickItem *root = m_host->overlayRootItem()) {
+        QMetaObject::invokeMethod(root, "focusInputLayer", Qt::DirectConnection);
+    }
+#endif
 }
 
 bool PresentationShell::start() {
@@ -1248,6 +1304,7 @@ QVariantMap PresentationShell::renderState() const {
 #ifdef Q_OS_DARWIN
             {"renderer", m_backend ? m_backend->renderTelemetry.snapshot() : QVariantMap{}},
 #endif
+#ifdef Q_OS_WIN
             {"windowDpr", m_window ? m_window->devicePixelRatio() : 0.0},
             {"sceneDpr", sceneWindow() ? sceneWindow()->effectiveDevicePixelRatio() : 0.0},
             {"overlayDpr", inputWindow() ? inputWindow()->effectiveDevicePixelRatio() : 0.0},
@@ -1257,6 +1314,7 @@ QVariantMap PresentationShell::renderState() const {
             {"targetHeight", m_host ? m_host->pixelSize().height() : 0},
             {"swapchainWidth", m_presenter ? m_presenter->extent().width() : 0},
             {"swapchainHeight", m_presenter ? m_presenter->extent().height() : 0},
+#endif
             {"backend", m_backendName}};
 }
 

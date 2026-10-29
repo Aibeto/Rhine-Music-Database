@@ -64,7 +64,11 @@ bool SceneLayerHost::fail(const QString &message) {
 
 bool SceneLayerHost::start(QQmlEngine &engine, const QUrl &scene3dUrl, const QUrl &overlayUrl, QRhi *rhi,
                            QVulkanInstance *vulkanInstance, QWindow *visibleWindow) {
+#ifdef Q_OS_WIN
     m_visibleWindow = visibleWindow;
+#else
+    m_visibleWindow = rhi && rhi->backend() == QRhi::Metal ? visibleWindow : nullptr;
+#endif
     // 失败时立刻回收半成品：调用方会回退到默认路径，本对象可能被直接丢弃，
     // 不能把还挂着 QRhi 引用的窗口/纹理留给析构时机不确定的路径。
     if (!startInternal(engine, scene3dUrl, overlayUrl, rhi, vulkanInstance)) {
@@ -221,7 +225,11 @@ bool SceneLayerHost::createLayerTargets(Layer &layer, const char *name) {
 
     // setRenderTarget 只能在渲染线程调用，且不要每帧换；这里只在 start()/resize() 里做。
     auto target = QQuickRenderTarget::fromRhiRenderTarget(layer.renderTarget);
+#ifdef Q_OS_WIN
     target.setDevicePixelRatio(m_ratio);
+#else
+    target.setDevicePixelRatio(m_rhi->backend() == QRhi::Metal ? m_ratio : 1.0);
+#endif
     layer.window->setRenderTarget(target);
     return true;
 }
@@ -303,8 +311,13 @@ void SceneLayerHost::applyLayerGeometry(Layer &layer) {
     if (!layer.window) {
         return;
     }
-    // 窗口和输入保持逻辑坐标；物理像素密度只在目标的 DPR 中设置一次。
-    const QSize windowSize = m_size;
+    // Windows 启用逻辑尺寸修复
+#ifdef Q_OS_WIN
+    const bool logicalCoordinates = true;
+#else
+    const bool logicalCoordinates = m_rhi->backend() == QRhi::Metal;
+#endif
+    const QSize windowSize = logicalCoordinates ? m_size : pixelSize();
     layer.window->resize(windowSize);
     if (QQuickItem *content = layer.window->contentItem()) {
         content->setSize(QSizeF(windowSize));
@@ -312,7 +325,7 @@ void SceneLayerHost::applyLayerGeometry(Layer &layer) {
     if (layer.rootItem) {
         layer.rootItem->setSize(QSizeF(m_size));
         layer.rootItem->setTransformOrigin(QQuickItem::TopLeft);
-        layer.rootItem->setScale(1.0);
+        layer.rootItem->setScale(logicalCoordinates ? 1.0 : m_ratio);
     }
 }
 
