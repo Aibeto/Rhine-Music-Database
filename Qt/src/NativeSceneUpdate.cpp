@@ -225,9 +225,7 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
         m_cells = visibleCells(trackX, entryZ + m_rail.value);
     }
     const SceneMath::Frustum coverage(m_projection * m_view);
-    const auto shadowId = 3;
     QByteArray visibleMatrices;
-    QByteArray shadowMatrices;
     QByteArray themes;
     m_drawnCells.clear();
     m_drawnMatrices.clear();
@@ -250,7 +248,6 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
         }
         const auto slope = field(cell.row + 0.5, cell.lane) - field(cell.row - 0.5, cell.lane);
         const auto matrix = Matrix::compose(position, {slope * 0.024 * (1 - m_detail), 0, 0});
-        shadowMatrices.append(matrix.bytes());
         if (!intersectsCard(coverage, position)) {
             continue;
         }
@@ -303,14 +300,7 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
             themes = sortedThemes;
         }
     }
-    if (themes.size() > m_themeStorage.size()) {
-        m_instanceCapacity = std::max(int(themes.size() / 4), m_instanceCapacity * 2);
-        m_themeStorage.append(QByteArray(m_instanceCapacity * 4 - m_themeStorage.size(), '\0'));
-    }
-    m_themeStorage.replace(0, themes.size(), themes);
     drawBuffers[10] = {visibleMatrices, themes};
-    drawBuffers[shadowId] = {
-        shadowMatrices, m_themeStorage.left(std::min(shadowMatrices.size() / 64 * 4, m_themeStorage.size()))};
     double neighborTop = -1e100;
     for (int row = selectedRow - 5; row <= selectedRow + 5; ++row) {
         if (row != selectedRow) {

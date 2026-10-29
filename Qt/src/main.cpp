@@ -672,15 +672,20 @@ int main(int argc, char **argv) {
         return 1;
     }
     auto window = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
-#ifdef Q_OS_WIN
     QQuickGraphicsConfiguration graphics;
+#ifdef Q_OS_WIN
     graphics.setAutomaticPipelineCache(false);
     const auto pipelineCache = AppStorage::cacheDirectory() + "/shaders/pipeline.cache";
     if (QFileInfo::exists(pipelineCache)) {
         graphics.setPipelineCacheLoadFile(pipelineCache);
     }
     graphics.setPipelineCacheSaveFile(pipelineCache);
+#endif
+    // 让 Qt Quick 的 RHI 开启时间戳查询；渲染器在每帧结束时读取
+    // lastCompletedGpuTime() 并发布到性能面板。后端不支持时该值保持为空。
+    graphics.setTimestamps(true);
     window->setGraphicsConfiguration(graphics);
+#ifdef Q_OS_WIN
     taskbar.bindWindow(window);
     window->show();
 #endif

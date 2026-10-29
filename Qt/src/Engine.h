@@ -111,13 +111,16 @@ class Engine : public QObject {
     void wake(bool input = true);
     void start();
     void recordRender(quint64 resources, quint64 bindings = 0, quint64 textureBytes = 0,
-                      quint64 coverUploads = 0, quint64 drawCalls = 0) {
+                      quint64 coverUploads = 0, quint64 drawCalls = 0, double gpuTimeMs = 0) {
         m_renderFrames.fetch_add(1, std::memory_order_relaxed);
         m_gpuResources.store(resources, std::memory_order_relaxed);
         m_bindingCreations.fetch_add(bindings, std::memory_order_relaxed);
         m_musicTextureBytes.store(textureBytes, std::memory_order_relaxed);
         m_coverUploads.fetch_add(coverUploads, std::memory_order_relaxed);
         m_lastDrawCalls.store(drawCalls, std::memory_order_relaxed);
+        if (gpuTimeMs > 0) {
+            m_gpuTimeMicros.store(quint64(gpuTimeMs * 1000.0 + 0.5), std::memory_order_relaxed);
+        }
     }
     bool ready() const;
     int selfTest();
@@ -146,6 +149,7 @@ class Engine : public QObject {
     std::atomic<quint64> m_musicTextureBytes{0};
     std::atomic<quint64> m_coverUploads{0};
     std::atomic<quint64> m_lastDrawCalls{0};
+    std::atomic<quint64> m_gpuTimeMicros{0};
     MusicTextures m_musicTextures;
     Glyphs m_glyphs;
     QTimer timer, mediaTimer;

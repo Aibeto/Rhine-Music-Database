@@ -21,7 +21,7 @@ layout(std140, binding = 1) uniform SurfaceBlock {
     Surface m;
 };
 layout(binding = 2) uniform sampler2D surfaceAtlas;
-layout(binding = 3) uniform sampler2D lightAtlas;
+layout(binding = 3) uniform sampler3D lightAtlas;
 layout(binding = 4) uniform sampler2D label;
 layout(binding = 5) uniform sampler2D cover;
 layout(binding = 6) uniform sampler2D normalAtlas;
@@ -30,11 +30,8 @@ layout(location = 0) out vec4 fragColor;
 layout(location = 12) in vec2 v_velocity;
 /** 只插值烘焙光场的相邻高度切片；没有实时光源求值、光线追踪或折射背景采样。 */
 vec3 bakedIllumination() {
-    float lower = floor(v_lightUv.z);
-    float upper = min(lower + 1.0, 7.0);
-    vec3 first = texture(lightAtlas, vec2(v_lightUv.x, (v_lightUv.y + lower) / 8.0)).rgb;
-    vec3 second = texture(lightAtlas, vec2(v_lightUv.x, (v_lightUv.y + upper) / 8.0)).rgb;
-    return mix(first, second, fract(v_lightUv.z)) * v_lightMask * opticalLight.x * opticalLight.y;
+    // 三维光场由硬件三线性采样；RGB 按 sRGB8(线性/4) 存放，这里手工解码后乘回 4.0。
+    return linearColor(texture(lightAtlas, v_lightUv).rgb) * 4.0 * v_lightMask * opticalLight.x * opticalLight.y;
 }
 /** 正上方一束主光：漫反射 + 玻璃高光。
  *  场景没有实时阴影，这束光只负责给唱片与壳体一个明确的高光方向，
@@ -112,9 +109,12 @@ void main() {
     }
     bool shell = m.flags.x == 3.0 || m.flags.x == 4.0 || m.flags.x == 5.0;
     vec4 baked = texture(surfaceAtlas, v_surfaceUv);
+    // 表面图集以 sRGB8 存放线性辐亮度/4；这里手工解码后乘回 4.0。
+    baked.rgb = linearColor(baked.rgb) * 4.0;
     vec4 normalResponse = texture(normalAtlas, v_normalUv);
     if (v_theme > 0.0) {
         vec4 night = texture(surfaceAtlas, v_surfaceUv + vec2(0.0, 0.5));
+        night.rgb = linearColor(night.rgb) * 4.0;
         baked = mix(baked, night, v_theme);
         normalResponse = mix(normalResponse, texture(normalAtlas, v_normalUv + vec2(0.0, 0.5)), v_theme);
     }

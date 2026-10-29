@@ -106,6 +106,10 @@ static QByteArray read(QString root, QString name) {
     }
     return f.readAll();
 }
+static QByteArray readOptional(QString root, QString name) {
+    QFile f(root + "/" + name);
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
 static QShader shader(QString name) {
     name[0] = name[0].toUpper();
     QFile f(":/optical/optical" + name + ".qsb");
@@ -164,6 +168,7 @@ class Renderer {
                 *letteringTextureSpine = nullptr;
     QRhiSampler *linear = nullptr;
     QRhiSampler *mipSampler = nullptr;
+    QRhiSampler *volume = nullptr;
     Target color, target;
     QRhiResourceUpdateBatch *updates = nullptr;
     QHash<QString, QRhiGraphicsPipeline *> pipelines;
@@ -244,9 +249,26 @@ class Renderer {
                          bool resize = false) {
         return create(own(rhi->newTexture(format, s, 1, flags), resize));
     }
+    QRhiTexture *texture3D(QSize s, int depth, QRhiTexture::Format format,
+                           QRhiTexture::Flags flags = {}) {
+        return create(own(rhi->newTexture(format, s.width(), s.height(), depth, 1, flags)));
+    }
     void upload(QRhiTexture *t, QByteArray bytes) {
         QRhiTextureSubresourceUploadDescription data(bytes);
         updates->uploadTexture(t, QRhiTextureUploadDescription({QRhiTextureUploadEntry(0, 0, data)}));
+    }
+    /** 三维纹理按深度切片逐层上传；每层数据保持连续，避免后端推断错误的行跨度。 */
+    void upload3D(QRhiTexture *t, const QByteArray &bytes, int depth) {
+        const qsizetype slice = bytes.size() / depth;
+        QVector<QRhiTextureUploadEntry> entries;
+        entries.reserve(depth);
+        for (int index = 0; index < depth; ++index) {
+            entries.append(QRhiTextureUploadEntry(
+                index, 0, QRhiTextureSubresourceUploadDescription(bytes.mid(index * slice, slice))));
+        }
+        QRhiTextureUploadDescription description;
+        description.setEntries(entries.cbegin(), entries.cend());
+        updates->uploadTexture(t, description);
     }
     /**
      * 逐层生成并上传 mip 链，与主渲染路径保持一致。
@@ -262,6 +284,39 @@ class Renderer {
             }
             level = level.scaled(qMax(1, level.width() / 2), qMax(1, level.height() / 2),
                                  Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+        }
+        QRhiTextureUploadDescription description;
+        description.setEntries(entries.cbegin(), entries.cend());
+        updates->uploadTexture(target, description);
+    }
+    /**
+     * 上传烘焙器生成的完整 mip 链。surface 的 mip 层在离线阶段按线性光平均，
+     * 这里只按层切片，避免运行时再做一次 QImage 缩放破坏 sRGB/HDR 编码。
+     */
+    void uploadMippedBytes(QRhiTexture *target, const QByteArray &bytes, int size, bool compressed) {
+        QVector<QRhiTextureUploadEntry> entries;
+        qsizetype offset = 0;
+        int width = size;
+        int height = size;
+        for (int level = 0;; ++level) {
+            const qsizetype byteCount = compressed
+                ? qsizetype(((width + 3) / 4) * ((height + 3) / 4) * 16)
+                : qsizetype(width) * height * 4;
+            if (offset + byteCount > bytes.size()) {
+                qFatal("Truncated baked mip chain: level=%d need=%lld have=%lld", level,
+                       static_cast<long long>(offset + byteCount), static_cast<long long>(bytes.size()));
+            }
+            entries.append(QRhiTextureUploadEntry(
+                0, level, QRhiTextureSubresourceUploadDescription(bytes.mid(offset, byteCount))));
+            offset += byteCount;
+            if (width == 1 && height == 1) {
+                break;
+            }
+            width = qMax(1, width / 2);
+            height = qMax(1, height / 2);
+        }
+        if (offset != bytes.size()) {
+            qWarning("Baked mip chain has %lld trailing bytes", static_cast<long long>(bytes.size() - offset));
         }
         QRhiTextureUploadDescription description;
         description.setEntries(entries.cbegin(), entries.cend());
@@ -291,10 +346,36 @@ class Renderer {
         linear = sampler(QRhiSampler::Linear, QRhiSampler::None, QRhiSampler::ClampToEdge);
         // 曲目标签与封面由 CPU 逐层上传 mip 链，采样需要三线性。
         mipSampler = sampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::ClampToEdge);
-        surfaceAtlas = texture({2304, 768}, QRhiTexture::RGBA16F);
-        upload(surfaceAtlas, read(root, "archive-baked-surface.bin"));
-        lightAtlas = texture({768, 1024}, QRhiTexture::RGBA16F);
-        upload(lightAtlas, read(root, "archive-baked-light.bin"));
+        // 三维光场的 W 轴必须 clamp，否则最顶层/最底层会跨切片重复。
+        volume = create(own(rhi->newSampler(QRhiSampler::Linear, QRhiSampler::Linear, QRhiSampler::None,
+                                            QRhiSampler::ClampToEdge, QRhiSampler::ClampToEdge,
+                                            QRhiSampler::ClampToEdge)));
+        if (!rhi->isFeatureSupported(QRhi::ThreeDimensionalTextures)) {
+            qFatal("RHI backend does not support 3D textures required by the baked light field");
+        }
+        // 表面图集重排为 1024²：正面/背面 448²，侧面 56x448，顶/底 448x56。
+        // RGB 以 sRGB8 存储线性辐亮度/4，着色器手工解码后乘回 4；法线响应仍为 RGBA16F。
+        // mip 链在烘焙器里按线性光生成；BC7 可用时走压缩路径，否则回退 RGBA8。
+        const auto surfaceFlags = QRhiTexture::MipMapped | QRhiTexture::UsedAsCompressedAtlas;
+        const QByteArray surfaceBc7 = readOptional(root, "archive-baked-surface-bc7.bin");
+        const bool bc7Surface = !surfaceBc7.isEmpty() &&
+                                rhi->isTextureFormatSupported(QRhiTexture::BC7, surfaceFlags);
+        if (qEnvironmentVariableIsSet("RHINE_DEBUG_ATLAS")) {
+            std::fprintf(stderr, "Surface atlas: %s, 1024^2, full mip chain\n",
+                         bc7Surface ? "BC7" : "RGBA8");
+            std::fflush(stderr);
+        }
+        if (bc7Surface) {
+            surfaceAtlas = texture({1024, 1024}, QRhiTexture::BC7, surfaceFlags);
+            uploadMippedBytes(surfaceAtlas, surfaceBc7, 1024, true);
+        } else {
+            surfaceAtlas = texture({1024, 1024}, QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+            uploadMippedBytes(surfaceAtlas, read(root, "archive-baked-surface.bin"), 1024, false);
+        }
+        // 光场改为 576x96x24 的三维纹理，硬件三线性插值替代手工两层采样。
+        lightAtlas = texture3D({576, 96}, 24, QRhiTexture::RGBA8,
+                               QRhiTexture::ThreeDimensional);
+        upload3D(lightAtlas, read(root, "archive-baked-light.bin"), 24);
         normalAtlas = texture({128, 256}, QRhiTexture::RGBA16F);
         upload(normalAtlas, read(root, "archive-baked-normal.bin"));
         white = texture({1, 1}, QRhiTexture::RGBA8);
@@ -624,7 +705,9 @@ class Renderer {
                 // 固定透光外观来自烘焙图集；只有选中外壳用普通透明混合显示动态封面。
                 const bool selectedShell = name == "Frosted_Polymer" && d["musicSelected"].toBool();
                 d["transmission"] = 0;
-                d["side"] = 2;
+                // 背景三只壳体都是闭合实体，背面永远不可见：单面剔除省掉约一半三角形。
+                // 选中卡片保留双面，透明 Frosted 壳与装配体部件仍需看到内侧。
+                d["side"] = d["instanced"].toBool() ? 0 : 2;
                 d["transparent"] = selectedShell;
                 d["depthWrite"] = !selectedShell;
                 double opacity = 1;
@@ -889,9 +972,9 @@ class Renderer {
             if (geo) {
                 values.push_back(QRhiShaderResourceBinding::uniformBuffer(1, stages, globalBuffer));
                 values.push_back(QRhiShaderResourceBinding::sampledTexture(
-                    2, QRhiShaderResourceBinding::FragmentStage, surfaceAtlas, linear));
+                    2, QRhiShaderResourceBinding::FragmentStage, surfaceAtlas, mipSampler));
                 values.push_back(QRhiShaderResourceBinding::sampledTexture(
-                    3, QRhiShaderResourceBinding::FragmentStage, lightAtlas, linear));
+                    3, QRhiShaderResourceBinding::FragmentStage, lightAtlas, volume));
                 values.push_back(QRhiShaderResourceBinding::sampledTexture(
                     4, QRhiShaderResourceBinding::FragmentStage, white, linear));
                 values.push_back(QRhiShaderResourceBinding::sampledTexture(
@@ -1099,9 +1182,9 @@ class Renderer {
                     {QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer),
                      QRhiShaderResourceBinding::uniformBuffer(1, stages, mb),
                      QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
-                                                               surfaceAtlas, linear),
+                                                               surfaceAtlas, mipSampler),
                      QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
-                                                               lightAtlas, linear),
+                                                               lightAtlas, volume),
                      QRhiShaderResourceBinding::sampledTexture(4, QRhiShaderResourceBinding::FragmentStage,
                                                                label, mipSampler),
                      QRhiShaderResourceBinding::sampledTexture(5, QRhiShaderResourceBinding::FragmentStage,
@@ -1757,8 +1840,20 @@ class ItemRenderer : public QQuickRhiItemRenderer {
             bindings += renderer->postProcess->bindingCreations - previousPostBindings;
             draws += renderer->postProcess->drawCalls - previousPostDraws;
 #endif
+            const double gpuTimeMs = rhi()->isFeatureSupported(QRhi::Timestamps)
+                ? cb->lastCompletedGpuTime() * 1000.0
+                : 0.0;
             backend->recordRender(resources, bindings, renderer->musicTextureBytes(),
-                                  renderer->coverUploads - previousUploads, draws);
+                                  renderer->coverUploads - previousUploads, draws, gpuTimeMs);
+            if (gpuTimeMs > 0 && qEnvironmentVariableIsSet("RHINE_DEBUG_GPU")) {
+                static bool reported = false;
+                if (!reported) {
+                    reported = true;
+                    std::fprintf(stderr, "GPU frame time: %.3f ms (performance %.3f ms)\n", gpuTimeMs,
+                                 backend->performance().value("gpuTimeMs").toDouble());
+                    std::fflush(stderr);
+                }
+            }
         }
     }
 };

@@ -245,8 +245,6 @@ bool NativeScene::review(QString mode) {
     m_actor.position = cellPosition(m_actor.cell);
     m_returning.clear();
     m_pulses.clear();
-    m_instanceCapacity = 288;
-    m_themeStorage = QByteArray(288 * 4, '\0');
     m_rail = {};
     m_shoulder = {12, 0};
     m_laneFocus = {2, 0};

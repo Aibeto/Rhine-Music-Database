@@ -308,7 +308,7 @@ void FrameProfiler::sample() {
     m_metrics.insert("stepMaxCpuMs", m_stepMaxMs);
     m_metrics.insert("latestSyncCpuMs", syncNs.load(std::memory_order_relaxed) / 1000000.);
     m_metrics.insert("latestSubmitCpuMs", submitNs.load(std::memory_order_relaxed) / 1000000.);
-    m_metrics.insert("gpuTimeMs", QVariant());
+    m_metrics.insert("gpuTimeMs", resources.value("gpuTimeMs"));
     {
         QMutexLocker lock(&m_gapMutex);
         m_metrics.insert("gpuAdapter", m_adapterName);

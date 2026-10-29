@@ -202,19 +202,25 @@ void Engine::start() {
     wake(false);
 }
 QVariantMap Engine::performance() const {
-    return {{"idle", m_sleeping},
-            {"sceneSleeping", m_sceneSleeping},
-            {"visible", m_visible},
-            {"steps", qulonglong(m_steps)},
-            {"sceneUpdates", qulonglong(m_sceneUpdates)},
-            {"hudUpdates", qulonglong(m_hudUpdates)},
-            {"renderFrames", qulonglong(m_renderFrames.load(std::memory_order_relaxed))},
-            {"gpuResources", qulonglong(m_gpuResources.load(std::memory_order_relaxed))},
-            {"bindingCreations", qulonglong(m_bindingCreations.load(std::memory_order_relaxed))},
-            {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed))},
-            {"coverUploads", qulonglong(m_coverUploads.load(std::memory_order_relaxed))},
-            {"gpuDrawCalls", qulonglong(m_lastDrawCalls.load(std::memory_order_relaxed))},
-            {"timerActive", timer.isActive()}};
+    QVariantMap result = {{"idle", m_sleeping},
+                          {"sceneSleeping", m_sceneSleeping},
+                          {"visible", m_visible},
+                          {"steps", qulonglong(m_steps)},
+                          {"sceneUpdates", qulonglong(m_sceneUpdates)},
+                          {"hudUpdates", qulonglong(m_hudUpdates)},
+                          {"renderFrames", qulonglong(m_renderFrames.load(std::memory_order_relaxed))},
+                          {"gpuResources", qulonglong(m_gpuResources.load(std::memory_order_relaxed))},
+                          {"bindingCreations", qulonglong(m_bindingCreations.load(std::memory_order_relaxed))},
+                          {"gpuMusicTextureBytes", qulonglong(m_musicTextureBytes.load(std::memory_order_relaxed))},
+                          {"coverUploads", qulonglong(m_coverUploads.load(std::memory_order_relaxed))},
+                          {"gpuDrawCalls", qulonglong(m_lastDrawCalls.load(std::memory_order_relaxed))},
+                          {"timerActive", timer.isActive()}};
+    const quint64 gpuMicros = m_gpuTimeMicros.load(std::memory_order_relaxed);
+    // 0 表示后端没有可用的时间戳；保留空值，避免把“未测量”显示成 0 ms。
+    if (gpuMicros) {
+        result.insert("gpuTimeMs", gpuMicros / 1000.0);
+    }
+    return result;
 }
 /** 仅在画面变化时通知唯一场景，静止时保留按需休眠。 */
 void Engine::notifySceneRenderers(bool visualChanged) {
