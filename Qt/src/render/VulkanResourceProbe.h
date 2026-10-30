@@ -72,6 +72,8 @@ struct VulkanResourceConfig {
     bool poolEffective = false;
     bool discardDepthRequested = false;
     bool discardDepthEffective = false;
+    bool layoutOnlyRequested = false;
+    bool layoutOnlyEffective = false;
     bool compactInstanceRequested = false;
     bool compactInstanceEffective = false;
     /// 回退原因；空串表示该路径没有发生回退。
@@ -100,7 +102,7 @@ inline QString formatVulkanConfigLine(const VulkanResourceConfig &config)
     return QStringLiteral(
                "资源账本配置: 宿主 %1 | AA %2 | samples %3 | motion 配置 %4 / 目标 %5 | "
                "arena %6（回退 %7） | 直写 %8（回退 %9） | 实例池 %10（回退 %11） | 深度不保留 %12 | "
-               "紧凑实例 %13")
+               "紧凑实例 %13 | 布局复用 %14")
         .arg(config.host, config.aaMode.isEmpty() ? QStringLiteral("-") : config.aaMode)
         .arg(config.samples)
         .arg(config.motionConfigured ? QStringLiteral("需要") : QStringLiteral("不需要"))
@@ -110,7 +112,8 @@ inline QString formatVulkanConfigLine(const VulkanResourceConfig &config)
              reason(config.directWriteFallback),
              state(config.poolRequested, config.poolEffective), reason(config.poolFallback),
              state(config.discardDepthRequested, config.discardDepthEffective),
-             state(config.compactInstanceRequested, config.compactInstanceEffective));
+             state(config.compactInstanceRequested, config.compactInstanceEffective),
+             state(config.layoutOnlyRequested, config.layoutOnlyEffective));
 }
 
 inline QString formatVulkanResourceLine(const VulkanResourceWindow &window,

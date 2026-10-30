@@ -225,4 +225,21 @@ inline double instancePayloadSaving(bool compact, quint32 fullStride)
     return double(fullStride - quint32(80)) / double(fullStride);
 }
 
+/**
+ * E05b：pipeline 的"布局身份"。
+ *
+ * 原生 binding 布局只取决于「材质槽是否走动态偏移 arena」和「实例是否紧凑」，
+ * 与具体 buffer 地址／代号无关——arena 扩容换了 buffer 不代表布局变了。
+ */
+inline quint64 pipelineLayoutSignature(bool arenaDynamic, bool compact)
+{
+    return (arenaDynamic ? 1ull : 0ull) | (compact ? 2ull : 0ull);
+}
+
+/// 只有布局身份变化才需要重建 pipeline；buffer 换代不需要。
+inline bool pipelineRebuildRequired(quint64 cached, quint64 current)
+{
+    return cached != current;
+}
+
 } // namespace RhineRender

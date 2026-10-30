@@ -345,6 +345,11 @@ class Renderer {
     QRhiTexture *motionVectors = nullptr;
     /// E05a：`RHINE_VK_COMPACT_INSTANCES=1` 且本帧确实没有运动矢量消费者时才用 80 字节实例。
     const bool compactInstanceRequested = qEnvironmentVariableIntValue("RHINE_VK_COMPACT_INSTANCES") == 1;
+    /// E05b：布局与 buffer 身份分离。启用后用占位 SRB 建 pipeline，arena 换 buffer 不再清管线。
+    const bool layoutOnlyPipelines = qEnvironmentVariableIntValue("RHINE_VK_LAYOUT_ONLY_PIPELINES") == 1;
+    /// surface 管线当前持有的布局身份；与 `pipelineLayoutSignature()` 不一致才重建。
+    quint64 surfaceLayoutSignature = 0;
+    bool surfaceLayoutValid = false;
     bool compactInstances = false;
 
     /// 与 depthStoreRequired 同一套消费者口径：有 motion／TAA／warp／MetalFX 就不能裁。
@@ -873,7 +878,9 @@ class Renderer {
         }
         materialBindings.clear();
         // 已经按动态偏移建过布局；不整批重建，后续静态 SRB 会和布局不兼容。
-        clearPipelines();
+        if (!layoutOnlyPipelines) {
+            clearPipelines();
+        }
         qInfo().noquote() << "Vulkan arena: 关闭（" << reason << "），回退逐材质 uniform buffer";
     }
     /// 把 arena 撑到至少 needSlots 个槽位；返回 false 表示这一档不可用（调用方回退）。
@@ -924,7 +931,9 @@ class Renderer {
         // 新 buffer 内容是未定义的：所有槽位必须重写一遍。
         materialArena.committed.clear();
         // 布局 SRB 里写死了 arena 指针，buffer 一换就得重建；pipeline 绑着布局，一并清掉。
-        clearPipelines();
+        if (!layoutOnlyPipelines) {
+            clearPipelines();
+        }
         return true;
     }
     /**
@@ -1895,6 +1904,8 @@ class Renderer {
         config.poolEffective = instancePoolEnabled && instancePool.buffer;
         config.discardDepthRequested = discardUnusedDepthRequested;
         config.discardDepthEffective = discardUnusedDepth && !sizedDepthStore;
+        config.layoutOnlyRequested = layoutOnlyPipelines;
+        config.layoutOnlyEffective = layoutOnlyPipelines && surfaceLayoutValid;
         config.compactInstanceRequested = compactInstanceRequested;
         config.compactInstanceEffective = compactInstances;
         config.arenaFallback = arenaFallback;
@@ -2068,9 +2079,15 @@ class Renderer {
             std::vector<QRhiShaderResourceBinding> values = {
                 QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer)};
             if (geo) {
-                if (uniformArena && materialArena.buffer) {
+                // E05b：布局 SRB 只描述布局，不该引用当前 arena 的 buffer——否则 arena 扩容换
+                // buffer 就得把管线一起扔掉。启用分离时改用一块常驻的占位 buffer。
+                QRhiBuffer *materialBindingBuffer = materialArena.buffer;
+                if (layoutOnlyPipelines) {
+                    materialBindingBuffer = ensureLayoutBuffer();
+                }
+                if (uniformArena && materialBindingBuffer) {
                     values.push_back(QRhiShaderResourceBinding::uniformBufferWithDynamicOffset(
-                        1, stages, materialArena.buffer, int(sizeof(Surface))));
+                        1, stages, materialBindingBuffer, int(sizeof(Surface))));
                 } else {
                     values.push_back(QRhiShaderResourceBinding::uniformBuffer(1, stages, globalBuffer));
                 }
@@ -2097,6 +2114,15 @@ class Renderer {
         p->setRenderPassDescriptor(rp);
         create(p);
         return pipelines[key] = p;
+    }
+    /// E05b：布局 SRB 的占位 uniform buffer。只描述布局，不参与任何真实材质读取。
+    QRhiBuffer *layoutBuffer = nullptr;
+    QRhiBuffer *ensureLayoutBuffer() {
+        if (!layoutBuffer) {
+            layoutBuffer = create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer,
+                                                     int(qMax(sizeof(Globals), sizeof(Surface))))));
+        }
+        return layoutBuffer;
     }
     QRhiBuffer *dynamicBuffer(BufferState &state, const QByteArray &bytes, QRhiBuffer::UsageFlags usage) {
         if (!state.buffer || state.buffer->size() < bytes.size()) {
@@ -2972,6 +2998,17 @@ class Renderer {
         const int dbgReturning = int(frame["returningMusicKeys"].toArray().size());
         const double dbgReturningAge = frame["returningAgeMax"].toDouble();
 #endif
+        // E05b：布局身份（是否动态偏移 arena / 是否紧凑实例）变了才需要重做 surface 管线；
+        // arena 换 buffer 不再触发重建。
+        if (layoutOnlyPipelines) {
+            const auto signature = RhineRender::pipelineLayoutSignature(
+                uniformArena && materialArena.buffer != nullptr, compactInstances);
+            if (!surfaceLayoutValid || RhineRender::pipelineRebuildRequired(surfaceLayoutSignature, signature)) {
+                clearPipelines();
+                surfaceLayoutSignature = signature;
+                surfaceLayoutValid = true;
+            }
+        }
         // E03：直写映射的生命周期收进 prepare()——容量规划→开始映射→写满→收尾，
         // 不再由调用方在 prepare 外面包一层（那层包在 ensureMaterialArena 之前）。
         auto data = prepare(draws, mode == "detail" || mode == "boot");

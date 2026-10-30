@@ -335,6 +335,32 @@ bool compactConfigLine()
     return ok;
 }
 
+bool pipelineLayoutIdentity()
+{
+    bool ok = true;
+    // 布局身份只由「动态偏移 arena」和「紧凑实例」两位组成。
+    ok &= check(RhineRender::pipelineLayoutSignature(false, false) == 0,
+                QStringLiteral("普通布局身份为 0"), QStringLiteral("0"),
+                number(double(RhineRender::pipelineLayoutSignature(false, false))));
+    ok &= check(RhineRender::pipelineLayoutSignature(true, false) == 1,
+                QStringLiteral("动态偏移 arena 是一号位"), QStringLiteral("1"),
+                number(double(RhineRender::pipelineLayoutSignature(true, false))));
+    ok &= check(RhineRender::pipelineLayoutSignature(false, true) == 2,
+                QStringLiteral("紧凑实例是二号位"), QStringLiteral("2"),
+                number(double(RhineRender::pipelineLayoutSignature(false, true))));
+    ok &= check(RhineRender::pipelineLayoutSignature(true, true) == 3,
+                QStringLiteral("两者叠加为 3"), QStringLiteral("3"),
+                number(double(RhineRender::pipelineLayoutSignature(true, true))));
+    // buffer 换代不改变布局身份，因此不要求重建。
+    ok &= check(!RhineRender::pipelineRebuildRequired(1, 1),
+                QStringLiteral("同一布局身份不重建"), QStringLiteral("false"),
+                QStringLiteral("true"));
+    ok &= check(RhineRender::pipelineRebuildRequired(1, 3),
+                QStringLiteral("布局身份变化必须重建"), QStringLiteral("true"),
+                QStringLiteral("false"));
+    return ok;
+}
+
 bool configLine()
 {
     bool ok = true;
@@ -386,6 +412,7 @@ int main()
     ok &= directWriteAndPoolPlanning();
     ok &= compactInstances();
     ok &= compactConfigLine();
+    ok &= pipelineLayoutIdentity();
     ok &= configLine();
     std::printf("Vulkan 资源策略: %d 项检查，%d 项失败\n", g_checks, g_failures);
     return ok && g_failures == 0 ? 0 : 1;

@@ -66,8 +66,8 @@
 
 ### 5b. 将 pipeline 布局身份与 buffer 身份分离
 
-- [ ] 当前 arena 换 buffer 就清所有管线；资源地址改变本身不必改变原生 binding 布局。用独立布局描述 SRB、只在实际布局／shader／RT兼容性变化时换 pipeline；buffer 换代仅重建实际资源 SRB。布局 SRB 仍须 create()，可用空资源描述类型；真正 draw 必须绑定布局兼容且资源有效的实际 SRB。[S3]
-- [ ] 顶点 buffer、offset、index type 相同的连续 draw 可独立试 setVertexInput 去重；状态 key 必须完整并在新 pass／外部命令后失效。只有计数确有重复才做，不能改变透明顺序。无 capture 不新增多队列、bindless 或原生命令重录架构。
+- [x] 当前 arena 换 buffer 就清所有管线；资源地址改变本身不必改变原生 binding 布局。用独立布局描述 SRB、只在实际布局／shader／RT兼容性变化时换 pipeline；buffer 换代仅重建实际资源 SRB。布局 SRB 仍须 create()，可用空资源描述类型；真正 draw 必须绑定布局兼容且资源有效的实际 SRB。[S3]
+- [x] 顶点 buffer、offset、index type 相同的连续 draw 可独立试 setVertexInput 去重；状态 key 必须完整并在新 pass／外部命令后失效。只有计数确有重复才做，不能改变透明顺序。无 capture 不新增多队列、bindless 或原生命令重录架构。
 
 ## E06：最小回归与手工验收
 
