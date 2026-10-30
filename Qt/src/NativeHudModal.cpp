@@ -445,6 +445,7 @@ bool backendRunsFsr3(const Host *host) {
     return backend.isEmpty() || backend == "vulkan";
 #endif
 }
+#if 0  // FSR 插帧开关已下线：这一行的判定与显示一起停用；保留代码便于将来恢复。
 /**
  * 帧生成这一行的结论：判定本身在 RhineFg::frameGenerationUi（可单测），
  * 这里只负责把当前进程的能力快照与用户偏好喂进去。
@@ -466,6 +467,7 @@ RhineFg::FrameGenerationUi frameGenerationUi(const Host *host, bool preferenceOn
                                       capability.interpolationAvailable, capability.reason, backendCapable,
                                       preferenceOn);
 }
+#endif  // FSR 插帧开关已下线
 
 } // namespace
 
@@ -575,7 +577,8 @@ void NativeHud::settings(double x, double y, double width) {
     // 抗锯齿互斥单选，默认关闭；倍率只对 SSAA 生效，与渲染分辨率相乘。
     const auto aaMode = m_host->preference("aa-mode");
     const auto aaScale = m_host->preference("aa-scale").toInt();
-    const auto fgUi = frameGenerationUi(m_host, m_host->preference("fg") == "on");
+    // FSR 插帧开关已下线：不再计算"帧生成"行的显示状态（判定函数见上方 #if 0 段）。
+    // const auto fgUi = frameGenerationUi(m_host, m_host->preference("fg") == "on");
     // 这一栏同时包含抗锯齿与超分（FSR），所以标题不能只写"抗锯齿"。
 #ifdef Q_OS_DARWIN
     rows.append({"METALFX / 时域抗锯齿与超分辨率",
@@ -646,6 +649,7 @@ void NativeHud::settings(double x, double y, double width) {
         rows.append({"FSR SHARPNESS / 锐化", "", "fsr-sharpness"});
     }
 #endif
+#if 0  // FSR 插帧开关已下线：设置页不再显示"帧生成"行。整段（含平台分支）保留，恢复时删掉本行与对应的 #endif。
 #ifdef Q_OS_LINUX
     // 帧生成是独立开关，不随抗锯齿模式循环。**需要重启才生效**：呈现层是否接管窗口
     // 在启动时按 RHINE_FG 决定（fg=off 走 Qt 默认路径，内容帧实测高 35%），
@@ -665,6 +669,7 @@ void NativeHud::settings(double x, double y, double width) {
     rows.append({"FRAME GENERATION / 帧生成", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
 #endif
 #endif
+#endif  // FSR 插帧开关已下线
     // 内容高度随平台可用选项变化
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;

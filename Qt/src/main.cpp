@@ -283,8 +283,10 @@ static void applyAntialiasingSetting() {
  * 所以单独持久化、单独下发，切换时不需要重启。
  */
 static void applyFrameGenerationSetting() {
+    // FSR 插帧（帧生成）已从设置界面下线：启动时不再读取配置里的 panel/fg，恒按"关"下发。
+    // 显式 RHINE_FG=on 仍保留为排障对照（呈现层据此决定要不要接管窗口并插帧）。
     if (qEnvironmentVariableIsEmpty("RHINE_FG")) {
-        qputenv("RHINE_FG", graphicsSettings().value("panel/fg", "off").toString().toUtf8());
+        qputenv("RHINE_FG", "off");
     }
 #ifdef Q_OS_DARWIN
     // Apple 的窗口合成器始终按刷新率回收 drawable，垂直同步开关没有实际效果。
