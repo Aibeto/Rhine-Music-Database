@@ -66,6 +66,13 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
         wake();
     });
     clock.start();
+    // B01：一次性定时器到点后只做一件事——核对焦点是否还稳定、到时，然后主动通知
+    // 呈现层出一帧。不能靠"继续出帧等到期"：引擎静止时根本没有下一帧。
+    m_admissionScheduler.setHandler([this](const QString &key, quint64 generation) {
+        if (m_admission.expire(key, generation, clock.elapsed())) {
+            requestSceneContent();
+        }
+    });
     timer.setTimerType(Qt::PreciseTimer);
     connect(&timer, &QTimer::timeout, this, &Engine::tick);
     mediaTimer.setInterval(1000);
@@ -389,6 +396,23 @@ void Engine::resetTemporalState() {
     wake(false);
     notifySceneRenderers(true);
 }
+/**
+ * B01：把当前列表焦点交给准入状态机。每帧调用，但只有焦点 key 真的换了才会重新计时；
+ * 同 key 重复帧、封面晚到、revision 变化都不重计时（见 MusicTextureAdmission::focus）。
+ */
+void Engine::submitTextureAdmission(const QString &musicKey) {
+    const auto status = m_admission.focus(musicKey, clock.elapsed());
+    if (status.pending) {
+        if (status.generation != m_admissionArmed) {
+            // 代号变了才 arm：同一焦点若每帧 arm 一次，到期时间会被无限推后。
+            m_admissionArmed = status.generation;
+            m_admissionScheduler.arm(m_admission.delayMs(), m_admission.pendingKey(), status.generation);
+        }
+        return;
+    }
+    m_admissionArmed = status.generation;
+    m_admissionScheduler.stop();
+}
 void Engine::setVisible(bool value) {
     if (m_visible == value) {
         return;
@@ -403,7 +427,11 @@ void Engine::setVisible(bool value) {
         m_wheelRemainingDistance = 0;
         timer.stop();
         m_sleeping = true;
+        // 隐藏期间不创建 GPU 资源：作废"等到一半"的等待，恢复后重新计时。
+        m_admission.setVisible(false, clock.elapsed());
+        m_admissionScheduler.stop();
     } else {
+        m_admission.setVisible(true, clock.elapsed());
         host.restoreMemoryBudget();
 #ifdef Q_OS_DARWIN
         if (renderConfiguration.snapshot().temporal()) {
@@ -884,6 +912,7 @@ void Engine::step(double time) {
     m_coverImage = host.image(m_cover);
     // 图形设备在后台可销毁；仅保存当前与可见归位卡片的图片，供恢复时重建纹理。
     const auto musicKey = current["key"].toString("empty");
+    submitTextureAdmission(musicKey);
     m_musicTextures[musicKey] = {current, m_coverImage};
     QSet<QString> retainedKeys{musicKey};
     for (const auto &key : m_frame.value("returningMusicKeys").toArray()) {

@@ -2,6 +2,7 @@
 #include "Glyphs.h"
 #include "Host.h"
 #include "NativeApplication.h"
+#include "render/MusicTextureAdmission.h"
 #include "render/RenderPolicy.h"
 #ifdef Q_OS_DARWIN
 #include "render/RenderConfiguration.h"
@@ -83,10 +84,23 @@ class Engine : public QObject {
     struct MusicTexture {
         QJsonObject item;
         QImage cover;
+        /// B01：这个 key 是否已经通过冷资源准入（焦点稳定 100ms）。渲染线程据此决定
+        /// 要不要创建标签／封面纹理；默认 true，让参考渲染与其他调用方不必关心准入。
+        bool admitted = true;
     };
     using MusicTextures = QHash<QString, MusicTexture>;
     MusicTextures musicTextures() const {
-        return m_musicTextures;
+        auto textures = m_musicTextures;
+        // 准入状态属于 GUI 线程；synchronize() 读这里时 GUI 线程被 QQuickRhiItem 阻塞，
+        // 与 m_musicTextures 本体的线程假设完全一致，不需要额外加锁。
+        for (auto it = textures.begin(); it != textures.end(); ++it) {
+            it->admitted = m_admission.isAdmitted(it.key());
+        }
+        return textures;
+    }
+    /// 探针/诊断用：0 表示准入延迟已关闭。
+    int textureAdmissionDelayMs() const {
+        return m_admission.delayMs();
     }
     void trimMemory();
 #ifdef Q_OS_DARWIN
@@ -220,6 +234,13 @@ class Engine : public QObject {
     // 生命周期内不变，每帧重新 getenv 只会给渲染线程添无谓的字符串分配。
     static quint64 resourceBudgetBytes();
     MusicTextures m_musicTextures;
+    // B01：冷纹理准入。判定在纯逻辑类里（可离线测），定时器只负责到点喊一声。
+    // 计时基准是构造时启动的单调时钟，与帧号无关——引擎休眠不出帧时定时器照样到期。
+    RhineRender::MusicTextureAdmission m_admission = RhineRender::MusicTextureAdmission::fromEnvironment();
+    RhineRender::AdmissionScheduler m_admissionScheduler;
+    // 已 arm 的焦点代号：同一 key 的重复帧不能反复 start，否则到期时间被无限推后。
+    quint64 m_admissionArmed = 0;
+    void submitTextureAdmission(const QString &musicKey);
     Glyphs m_glyphs;
     QTimer timer, mediaTimer;
     bool m_started = false;
