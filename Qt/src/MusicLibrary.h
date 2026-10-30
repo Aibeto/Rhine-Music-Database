@@ -64,8 +64,12 @@ class MusicLibrary : public QObject {
     void play(bool byUser = true);
     void playDirectory();
     void playOfficial(QJsonObject value = {});
-    QJsonArray directoryQueue() const;
-    QJsonArray currentSongList() const;
+    struct QueueSource {
+        QJsonArray ids;
+        QJsonArray items;
+    };
+    QueueSource directorySource() const;
+    QueueSource currentSource() const;
     QString sourceURL(QJsonObject value = {}) const;
     void setGroupView(QString name, QVector<int> indices = {}, int lane = 0);
     QJsonArray sourceItems(int lane) const;

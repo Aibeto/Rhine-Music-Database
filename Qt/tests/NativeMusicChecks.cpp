@@ -267,7 +267,7 @@ bool runNativeMusicChecks(const QString &root) {
     for (int i = 1; i <= 5; ++i) {
         queue.append(song(QString::number(i)));
     }
-    library.player.queue = queue;
+    library.player.queue.replace(queue);
     check(library.player.queue.size() == 5, "queue initialization");
 
     library.player.play(queue.first().toObject());
@@ -359,15 +359,15 @@ bool runNativeMusicChecks(const QString &root) {
     library.playContext = library.lists[1];
     library.choose(library.lists[1].at(1).toObject());
     const auto queuedSong = song("9");
-    library.player.queue = QJsonArray{queuedSong};
-    library.player.index = 0;
+    library.player.queue.replace(QJsonArray{queuedSong});
+    library.player.queue.select(0);
     library.play();
-    check(library.player.queue.size() == 3, "active play replaces queue with current song list");
-    check(MusicData::indexOfId(library.player.queue, "2") >= 0, "active play keeps selected song");
-    library.player.queue = QJsonArray{queuedSong};
-    library.player.index = 0;
+    check(library.player.queue.size() == 2, "active play replaces queue with the current song list");
+    check(library.player.queue.indexOfId("2") >= 0, "active play keeps selected song");
+    library.player.queue.replace(QJsonArray{queuedSong});
+    library.player.queue.select(0);
     library.play(false);
-    check(library.player.queue.size() == 2 && library.player.queue.first().toObject()["id"] == "9",
+    check(library.player.queue.size() == 2 && library.player.queue.at(0)["id"] == "9",
           "automatic play keeps existing queue");
 
     // === 测试 12: 音乐数据规范化 ===

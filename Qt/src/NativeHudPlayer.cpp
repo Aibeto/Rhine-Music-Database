@@ -56,12 +56,12 @@ void NativeHud::playerPanel(double x, double y, double width) {
     queueOffset = std::min(queueOffset, std::max(0, int(player.queue.size()) - 7));
     for (int row = 0; row < 7 && queueOffset + row < player.queue.size(); ++row) {
         const auto index = queueOffset + row;
-        const auto song = player.queue.at(index).toObject();
+        const auto song = player.queue.at(index);
         const auto yy = y + 371 + row * 48;
-        text(index == player.index ? "▶" : MusicData::pad(index + 1), left, yy, 15);
+        text(index == player.queue.index() ? "▶" : MusicData::pad(index + 1), left, yy, 15);
         button(fit(song["title"].toString(), 18, usable - 110), left + 44, yy - 7, usable - 110, 40,
                "player:queue:" + QString::number(index), 18);
-        if (index != player.index) {
+        if (index != player.queue.index()) {
             button("×", left + usable - 40, yy - 7, 40, 40, "player:remove:" + QString::number(index), 20);
         }
         rule(left, yy + 34, usable, 0.15);

@@ -74,9 +74,9 @@ MusicLibrary *createTestMusicLibrary(Host *host, const QString &provider, const 
         music->totals[lane] = songs.size();
         music->hasMore[lane] = false;
     }
-    music->player.queue = songs;
+    music->player.queue.replace(songs);
     music->player.current = music->current;
-    music->player.index = 2;
+    music->player.queue.select(2);
     music->player.state = {
         {"playing", true}, {"position", 45678}, {"duration", 180000}, {"volume", 0.7}, {"seekable", true}};
     music->player.status = "原生播放器";
@@ -188,8 +188,9 @@ bool checkSorting(const QString &root, Glyphs &glyphs, const QJsonObject &conten
     }
     hud.draw(frame, 1920, 51);
     const auto sorted = QJsonArray{original.at(1), original.at(2), original.at(0), original.at(3)};
-    if (music.libraryItems() != sorted || MusicData::slice(music.directoryQueue(), 0, 4) != sorted ||
-        music.directoryQueue().last().toObject()["id"] != "missing" || music.directory->index != 2 ||
+    const auto queueSource = music.directorySource();
+    if (music.libraryItems() != sorted || MusicData::slice(queueSource.items, 0, 4) != sorted ||
+        queueSource.ids.last().toString() != "missing" || music.directory->index != 2 ||
         music.directory->cursor != 5) {
         qCritical() << "Library, selection, queue or pagination did not follow detail sorting";
         return false;
@@ -362,7 +363,7 @@ bool checkPlayerInput(const QString &root, Glyphs &glyphs, const QJsonObject &co
         }
     }
     for (int index = 0; index < 20; ++index) {
-        app.music.player.queue.append(song(index));
+        app.music.player.queue.enqueue(song(index));
     }
     app.hud.openModal("player");
     app.hud.draw(frame, 1920, 50);
@@ -747,25 +748,25 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             hud.draw(detailFrame, 1920, 50);
 
             // 入队反馈必须对应真实结果；下一首同时完成入队或移动，且不打断当前播放。
-            const auto savedQueue = music->player.queue;
+            const auto savedQueue = music->player.queue.items();
             const auto savedPlaying = music->player.current;
-            const auto savedIndex = music->player.index;
+            const auto savedIndex = music->player.queue.index();
             const auto savedSelection = music->current;
-            music->player.queue = {song(1), song(2), song(3)};
+            music->player.queue.replace(QJsonArray{song(1), song(2), song(3)});
             music->player.current = song(2);
-            music->player.index = 1;
+            music->player.queue.select(1);
             music->current = song(4);
             const auto playbackState = music->player.state;
             hud.action("music:enqueue");
             hud.draw(detailFrame, 1920, 50);
-            if (music->player.queue.last().toObject()["id"] != "4" ||
+            if (music->player.queue.at(music->player.queue.size() - 1)["id"] != "4" ||
                 !getHit(hud.hits, "music:enqueue")["label"].toString().contains("已加入队列")) {
                 qCritical() << "Queue append did not confirm the actual result";
                 ok = false;
             }
             hud.action("music:play-next");
             hud.draw(detailFrame, 1920, 50);
-            if (music->player.queue.size() != 4 || music->player.queue.at(2).toObject()["id"] != "4" ||
+            if (music->player.queue.size() != 4 || music->player.queue.at(2)["id"] != "4" ||
                 !getHit(hud.hits, "music:play-next")["label"].toString().contains("已设为下一首")) {
                 qCritical() << "Play-next did not move an existing item and confirm it";
                 ok = false;
@@ -803,16 +804,15 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             hud.action("music:play-next");
             music->current = song(1);
             hud.action("music:play-next");
-            if (music->player.queue.size() != 5 || music->player.index != 0 ||
-                music->player.queue.at(1).toObject()["id"] != "1" ||
-                music->player.queue.at(2).toObject()["id"] != "5" || music->player.current["id"] != "2" ||
-                music->player.state != playbackState) {
+            if (music->player.queue.size() != 5 || music->player.queue.index() != 0 ||
+                music->player.queue.at(1)["id"] != "1" || music->player.queue.at(2)["id"] != "5" ||
+                music->player.current["id"] != "2" || music->player.state != playbackState) {
                 qCritical() << "Play-next failed new insertion or preserved-current semantics";
                 ok = false;
             }
-            music->player.queue = savedQueue;
+            music->player.queue.replace(savedQueue);
+            music->player.queue.select(savedIndex);
             music->player.current = savedPlaying;
-            music->player.index = savedIndex;
             music->current = savedSelection;
 
             if (hud.commands.isEmpty()) {

@@ -134,6 +134,8 @@ set(RHINE_APP_SOURCES
     Qt/src/MusicSession.cpp
     Qt/src/MusicPlayer.cpp
     Qt/src/MusicPlayer.h
+    Qt/src/PlaybackQueue.cpp
+    Qt/src/PlaybackQueue.h
     Qt/src/MusicData.cpp
     Qt/src/MusicData.h
     Qt/src/LocalMusicLibrary.cpp
@@ -233,7 +235,7 @@ if(NOT IOS)
         RHINE_PLAYBACK_SOURCES
         INCLUDE
         REGEX
-        "/(AppUpdater|AppStorage|AudioPlayer|HttpAudioStream|PlaybackDiagnostics|PlaybackConnection|Host|MusicApi|MusicPlayer|LyricsController|Platform)\\.(cpp|h)$|/qrcodegen\\.cpp$"
+        "/(AppUpdater|AppStorage|AudioPlayer|HttpAudioStream|PlaybackDiagnostics|PlaybackConnection|Host|MusicApi|MusicPlayer|PlaybackQueue|LyricsController|Platform)\\.(cpp|h)$|/qrcodegen\\.cpp$"
     )
     list(REMOVE_ITEM RHINE_CORE_SOURCES ${RHINE_PLAYBACK_SOURCES})
     add_library(RhinePlaybackCore STATIC ${RHINE_PLAYBACK_SOURCES})
@@ -689,6 +691,13 @@ endif()
 add_test(NAME qt_local_music_regression COMMAND RhineLocalMusicRegression
                                                 "${CMAKE_CURRENT_SOURCE_DIR}/output/resources")
 set_tests_properties(qt_local_music_regression PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+qt_add_executable(RhinePlaybackQueueRegression Qt/tests/PlaybackQueueChecks.cpp)
+target_link_libraries(RhinePlaybackQueueRegression PRIVATE RhineCore)
+if(MSVC)
+    target_compile_options(RhinePlaybackQueueRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_playback_queue_regression COMMAND RhinePlaybackQueueRegression)
 
 # FG 闸门探针：验证「setQueueSubmitParams 对离屏帧生效」与「共享 device 上能建交换链」。 需要真实 GPU + 显示服务（或 xvfb + lavapipe），CI runner 没有
 # GPU，所以**不进默认 CTest 集合**：构建后用 `output/qt-build/RhineFgGateProbe` 手动运行，用它给出 "FG 架构成不成立"的硬结论。

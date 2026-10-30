@@ -122,6 +122,14 @@ bool runPlaybackServiceChecks(const QString &sourceResources, const QString &exe
                                  {"url", QUrl::fromLocalFile(directory.path() + "/silence.wav").toString()}});
     }
     connection->call("player.play", {{"track", queue[0]}, {"source", queue}});
+    connection->call("player.loadQueue", {{"ids", QJsonArray{}}, {"known", queue}});
+    check(waitFor([&] {
+              connection->call("hello");
+              const auto snapshot = connection->snapshot();
+              return snapshot["queue"].toArray().size() == 3 && snapshot["index"].toInt(-1) == 0 &&
+                     snapshot["current"].toObject()["id"] == "0";
+          }),
+          "queue load command preserves the playback service queue");
     connection->call("player.mode", {{"value", "off"}});
     const bool output = !QMediaDevices::defaultAudioOutput().isNull();
     if (output) {

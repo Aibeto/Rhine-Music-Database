@@ -183,9 +183,9 @@ bool runNativeSessionChecks(const QString &root, const QString &audioURL) {
                 }),
                 "paused audio loads and seeks");
     ok &= check(!restoredHost.mediaState()["requested"].toBool() &&
-                    !restoredHost.mediaState()["playing"].toBool() && restored.music.player.index == 0 &&
-                    restored.music.player.queue.size() == 2 && restored.music.player.mode == "shuffle" &&
-                    restored.music.current == music.current,
+                    !restoredHost.mediaState()["playing"].toBool() &&
+                    restored.music.player.queue.index() == 0 && restored.music.player.queue.size() == 2 &&
+                    restored.music.player.mode == "shuffle" && restored.music.current == music.current,
                 "paused intent, queue and browsing independent of playing song");
     playback["requested"] = true;
     restored.music.player.restoreSessionState(playback);

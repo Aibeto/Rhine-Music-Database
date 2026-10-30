@@ -53,7 +53,7 @@ void NativeHud::detail(double width, double opacity) {
         return;
     }
     const auto x = width * 0.56;
-    if (lyricsMode && MusicPlayer::identity(item) != MusicPlayer::identity(music.player.current)) {
+    if (lyricsMode && PlaybackQueue::identity(item) != PlaybackQueue::identity(music.player.current)) {
         lyricsMode = false;
     }
     const auto usable = width - x - 59;
@@ -99,7 +99,7 @@ void NativeHud::detail(double width, double opacity) {
         card.playback = music.isLocal() ? "本地文件 / 面板内播放" : "面板内播放 / 官方入口";
     }
     const auto &player = music.player;
-    const bool isCurrent = MusicPlayer::identity(item) == MusicPlayer::identity(player.current) &&
+    const bool isCurrent = PlaybackQueue::identity(item) == PlaybackQueue::identity(player.current) &&
                            !player.loading && !player.failed;
     auto quality = isCurrent ? player.actualQuality : QString();
     if (music.isLocal()) {
@@ -131,7 +131,7 @@ void NativeHud::detail(double width, double opacity) {
         card.primaryActions[2] = {"＋ 加入歌单", "music:add-to-playlist"};
     }
     card.secondaryActions = {{"＋ 加入队列", "music:enqueue"}, {"▷ 下一首播放", "music:play-next"}, {}};
-    if (m_songQueueFeedbackKey == music.uid + ":" + MusicPlayer::identity(item)) {
+    if (m_songQueueFeedbackKey == music.uid + ":" + PlaybackQueue::identity(item)) {
         card.secondaryActions[0].label = m_songQueueFeedback.value("enqueue", "＋ 加入队列");
         card.secondaryActions[1].label = m_songQueueFeedback.value("play-next", "▷ 下一首播放");
     }

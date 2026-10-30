@@ -337,7 +337,7 @@ void NativeHud::playerAction(const QStringList &parts) {
         player.setMode(cycle({"off", "all", "one", "shuffle"}, player.mode));
     } else if (name == "queue") {
         if (index >= 0 && index < player.queue.size()) {
-            player.play(player.queue.at(index).toObject(), std::nullopt, index);
+            player.play(player.queue.at(index), std::nullopt, index);
         }
     } else if (name == "remove") {
         player.remove(index);

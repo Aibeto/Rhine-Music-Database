@@ -207,7 +207,7 @@ void WindowsTaskbar::configurePreview() {
 
 void WindowsTaskbar::updatePreview() {
     const auto &player = m_engine->app->music.player;
-    const auto trackKey = MusicPlayer::identity(player.current);
+    const auto trackKey = PlaybackQueue::identity(player.current);
     const auto coverKey = player.coverImage;
     if (trackKey == m_trackKey && coverKey == m_coverKey) {
         return;

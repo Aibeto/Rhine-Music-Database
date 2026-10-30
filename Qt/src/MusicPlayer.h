@@ -1,5 +1,6 @@
 #pragma once
 #include "LyricsController.h"
+#include "PlaybackQueue.h"
 #include <optional>
 
 class MusicPlayer : public QObject {
@@ -10,6 +11,8 @@ class MusicPlayer : public QObject {
     void play(QJsonObject track, std::optional<QJsonArray> source = std::nullopt,
               std::optional<int> queueIndex = std::nullopt, bool preview = false,
               std::optional<QJsonObject> resume = std::nullopt);
+    /// 按完整 ID 顺序补全队列；直接调用时同步补全，独立播放服务运行时交给服务。
+    void loadQueue(const QJsonArray &ids, const QJsonArray &known);
     QJsonObject sessionState() const;
     void restoreSessionState(const QJsonObject &saved);
     void tick(double time, bool force = false);
@@ -32,13 +35,11 @@ class MusicPlayer : public QObject {
     static QString sourceQuality(const QString &provider, const QJsonObject &audio, bool trial = false);
     QString actualQuality;
     QJsonObject localCovers;
-    static QString identity(const QJsonObject &track);
     LyricsController lyrics;
-    QJsonArray queue;
+    PlaybackQueue queue;
     QJsonArray history;
     QJsonObject current;
     QJsonObject state;
-    int index = -1;
     bool loading = false;
     bool failed = false;
     bool trial = false;

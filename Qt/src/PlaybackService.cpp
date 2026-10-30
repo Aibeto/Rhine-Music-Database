@@ -238,8 +238,7 @@ void PlaybackService::dispatch(QLocalSocket *socket, const QJsonObject &request)
 #endif
         if (m_gui && m_gui != socket) {
 #ifdef Q_OS_LINUX
-            if (!m_host.offline && !backend.isEmpty() && !m_guiBackend.isEmpty() &&
-                backend != m_guiBackend) {
+            if (!m_host.offline && !backend.isEmpty() && !m_guiBackend.isEmpty() && backend != m_guiBackend) {
                 // 服务不持有外部启动的界面进程句柄，所以改为通知它自行退出，断开后再按新配置
                 // 重新拉起（见 disconnected 分支）。
                 qInfo().noquote() << "图形后端" << m_guiBackend << "->" << backend << "：重建界面进程";
@@ -354,6 +353,8 @@ bool PlaybackService::playerCommand(const QString &method, const QJsonObject &ar
             arguments.contains("resume") ? std::optional(arguments["resume"].toObject()) : std::nullopt);
     } else if (method == "enqueue") {
         m_player.enqueue(arguments["track"].toObject(), arguments["next"].toBool());
+    } else if (method == "loadQueue") {
+        m_player.loadQueue(arguments["ids"].toArray(), arguments["known"].toArray());
     } else if (method == "toggle") {
         m_player.toggle();
     } else if (method == "pause") {

@@ -879,7 +879,7 @@ void MusicLibrary::loadSongWiki() {
 
 /**
  * 播放当前单曲。
- * 用当前单曲所在的歌曲列表替换播放队列；
+ * 用当前单曲所在的歌曲列表替换播放队列；未加载的 ID 由队列模块补全，不会生成占位曲目。
  */
 void MusicLibrary::play(bool byUser) {
     if (current.value("kind") != "song") {
@@ -888,65 +888,59 @@ void MusicLibrary::play(bool byUser) {
         return;
     }
     const bool replaceQueue = byUser && host->preference("single-play-mode") != "append";
-    if (replaceQueue) {
-        player.play(current, currentSongList());
+    if (!replaceQueue) {
+        player.play(current);
         return;
     }
-    player.play(current);
+    const auto source = currentSource();
+    player.play(current, source.items);
+    player.loadQueue(source.ids, source.items);
 }
 
-/** 当前单曲所在的歌曲列表 */
-QJsonArray MusicLibrary::currentSongList() const {
+/** 当前单曲所在的歌曲列表；目录外优先使用选中上下文。 */
+MusicLibrary::QueueSource MusicLibrary::currentSource() const {
+    auto source = directorySource();
     const auto id = current.value("id").toString();
-    const auto queue = directoryQueue();
-    if (MusicData::indexOfId(queue, id) >= 0) {
-        return queue;
+    const bool loaded = MusicData::indexOfId(source.items, id) >= 0;
+    const bool listed = !source.ids.isEmpty() && source.ids.contains(QJsonValue(id));
+    if (loaded || listed) {
+        return source;
     }
     if (!playContext.isEmpty() && MusicData::indexOfId(playContext, id) >= 0) {
-        return playContext;
+        return {QJsonArray{}, playContext};
     }
-    return libraryItems();
+    return {QJsonArray{}, libraryItems()};
 }
 
-QJsonArray MusicLibrary::directoryQueue() const {
-    QJsonArray ids;
+/** 目录或喜欢列表的完整 ID 顺序与已加载曲目。 */
+MusicLibrary::QueueSource MusicLibrary::directorySource() const {
+    QueueSource source;
     if (directory) {
-        ids = directory->ids;
-        if (directory->sortField != "none") {
-            QJsonArray orderedIDs;
-            QSet<QString> loadedIDs;
-            for (const auto &song : directory->orderedSongs()) {
-                const auto id = song.toObject()["id"].toString();
-                orderedIDs.append(id);
-                loadedIDs.insert(id);
-            }
-            for (const auto &id : ids) {
-                if (!loadedIDs.contains(id.toString())) {
-                    orderedIDs.append(id);
-                }
-            }
-            ids = orderedIDs;
+        source.items = directory->orderedSongs();
+        if (directory->sortField == "none") {
+            source.ids = directory->ids;
+            return source;
         }
-    } else if (selectedLane == 1 && likedIDs) {
-        ids = *likedIDs;
-    }
-    if (ids.isEmpty()) {
-        return libraryItems();
-    }
-    QHash<QString, QJsonObject> loaded;
-    for (const auto &value : libraryItems()) {
-        loaded[value.toObject()["id"].toString()] = value.toObject();
-    }
-    QJsonArray queue;
-    for (const auto &id : ids) {
-        auto value = loaded.value(id.toString());
-        if (value.isEmpty()) {
-            value = MusicData::item("song", id.toString(), "待读取曲目", {}, provider);
-            value["deferred"] = true;
+        QSet<QString> loaded;
+        for (const auto &song : source.items) {
+            const auto id = song.toObject()["id"].toString();
+            source.ids.append(id);
+            loaded.insert(id);
         }
-        queue.append(value);
+        for (const auto &id : directory->ids) {
+            if (!loaded.contains(id.toString())) {
+                source.ids.append(id);
+            }
+        }
+        return source;
     }
-    return queue;
+    if (selectedLane == 1) {
+        source.items = lists[1];
+        if (likedIDs) {
+            source.ids = *likedIDs;
+        }
+    }
+    return source;
 }
 
 /** 一键播放 */
@@ -960,10 +954,12 @@ void MusicLibrary::playDirectory() {
         loadMoreSource(1);
         return;
     }
-    const auto queue = directoryQueue();
-    if (!queue.isEmpty()) {
-        player.play(queue.first().toObject(), queue);
+    const auto source = directorySource();
+    if (source.items.isEmpty()) {
+        return;
     }
+    player.play(source.items.first().toObject(), source.items);
+    player.loadQueue(source.ids, source.items);
 }
 
 void MusicLibrary::playOfficial(QJsonObject value) {

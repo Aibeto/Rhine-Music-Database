@@ -198,7 +198,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
     } else if (name == "preview" && music.provider == "qq") {
         music.player.play(music.current, std::nullopt, std::nullopt, true);
     } else if (name == "play-next" || name == "enqueue") {
-        const auto key = music.uid + ":" + MusicPlayer::identity(music.current);
+        const auto key = music.uid + ":" + PlaybackQueue::identity(music.current);
         if (m_songQueueFeedbackKey != key) {
             m_songQueueFeedbackKey = key;
             m_songQueueFeedback.clear();

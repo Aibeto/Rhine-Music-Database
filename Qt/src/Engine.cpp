@@ -749,7 +749,7 @@ void Engine::step(double time) {
     const auto cover = object["cover"].toString();
     const auto coverRevision = host.image(cover).cacheKey();
     const auto &player = app->music.player;
-    const auto identity = MusicPlayer::identity(player.current);
+    const auto identity = PlaybackQueue::identity(player.current);
     if (identity != m_discIdentity) {
         m_discIdentity = identity;
         m_discAngle = 0;
@@ -757,7 +757,7 @@ void Engine::step(double time) {
     const bool wasRotating = m_discRotating;
     m_discRotating = m_visible && app->hud.discRotation && !app->hud.reduced && app->hud.modal.isEmpty() &&
                      m_frame.value("mode") == "detail" && !m_frame.value("viewer").toBool() &&
-                     current["kind"] == "song" && MusicPlayer::identity(current) == identity &&
+                     current["kind"] == "song" && PlaybackQueue::identity(current) == identity &&
                      !player.loading && !player.failed && player.state["playing"].toBool();
     if (wasRotating && m_discRotating) {
         // 20 秒一圈；接续可见视觉时钟，暂停或隐藏期间不补转。
@@ -766,7 +766,7 @@ void Engine::step(double time) {
                                 2 * 3.14159265358979323846);
     }
     m_discTime = time;
-    const bool showDiscAngle = current["kind"] == "song" && MusicPlayer::identity(current) == identity;
+    const bool showDiscAngle = current["kind"] == "song" && PlaybackQueue::identity(current) == identity;
     m_frame["discAngle"] = showDiscAngle ? m_discAngle : 0;
     const bool discChanged = m_discRotating || previousDiscAngle != m_frame.value("discAngle").toDouble();
     bool visualChanged = discChanged || !stable || current != m_current || cover != m_cover ||

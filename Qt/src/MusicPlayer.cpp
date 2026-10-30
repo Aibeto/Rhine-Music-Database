@@ -3,14 +3,9 @@
 #include <QUrl>
 #include <QJsonDocument>
 #include <QPointer>
-#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <algorithm>
 #include <cmath>
-
-QString MusicPlayer::identity(const QJsonObject &track) {
-    return track["provider"].toString("netease") + ":" + track["id"].toString();
-}
 
 /** 本地音质近似分级 */
 QString MusicPlayer::localQuality(const QJsonObject &track) {
@@ -150,8 +145,9 @@ void MusicPlayer::setQuality(const QString &value) {
 }
 
 MusicPlayer::MusicPlayer(Host *host, MusicApi *api, QObject *parent)
-    : QObject(parent), lyrics(host), m_host(host), m_api(api) {
+    : QObject(parent), lyrics(host), queue(api), m_host(host), m_api(api) {
     state = {{"playing", false}, {"position", 0}, {"duration", 0}, {"volume", 0.7}, {"seekable", false}};
+    connect(&queue, &PlaybackQueue::changed, this, &MusicPlayer::changed);
     if (auto connection = m_host->playbackConnection()) {
         connect(connection, &PlaybackConnection::snapshotChanged, this, &MusicPlayer::applyPlaybackSnapshot,
                 Qt::QueuedConnection);
@@ -207,9 +203,7 @@ MusicPlayer::MusicPlayer(Host *host, MusicApi *api, QObject *parent)
                 m_host->setPreference(
                     "local-cover-cache",
                     QString::fromUtf8(QJsonDocument(localCovers).toJson(QJsonDocument::Compact)));
-                if (index >= 0 && index < queue.size()) {
-                    queue.replace(index, current);
-                }
+                queue.updateCurrent(current);
                 emit changed();
             }
         });
@@ -226,27 +220,17 @@ bool MusicPlayer::enqueue(const QJsonObject &track, bool next) {
         if (!m_host->playbackConnection()->error().isEmpty()) {
             return false;
         }
+        const auto key = PlaybackQueue::identity(track);
         if (next) {
-            const auto position = std::max(0, index + 1);
-            return position < queue.size() && identity(queue.at(position).toObject()) == identity(track);
+            const auto position = std::max(0, queue.index() + 1);
+            return position < queue.size() && PlaybackQueue::identity(queue.at(position)) == key;
         }
-        return !queue.isEmpty() && identity(queue.last().toObject()) == identity(track);
+        return !queue.isEmpty() && PlaybackQueue::identity(queue.at(queue.size() - 1)) == key;
     }
-    if (track["kind"] != "song" || (m_api->provider == "local") != (track["provider"] == "local")) {
+    if (track["kind"] != "song") {
         return false;
     }
-    for (qsizetype i = 0; i < queue.size(); ++i) {
-        if (i != index && identity(queue.at(i).toObject()) == identity(track)) {
-            queue.removeAt(i);
-            if (i < index) {
-                --index;
-            }
-            break;
-        }
-    }
-    queue.insert(next ? std::max(0, index + 1) : queue.size(), track);
-    emit changed();
-    return true;
+    return queue.enqueue(track, next);
 }
 
 /** 停止旧音源并推进代数，先完成元数据再交付播放；迟到的地址不能恢复旧曲目。 */
@@ -270,29 +254,12 @@ void MusicPlayer::play(QJsonObject track, std::optional<QJsonArray> source, std:
         return;
     }
     if (source) {
-        QSet<QString> seen;
-        queue = {};
-        for (const auto &value : *source) {
-            const auto song = value.toObject();
-            const auto key = identity(song);
-            if (song["kind"] == "song" && !seen.contains(key)) {
-                seen.insert(key);
-                queue.append(song);
-            }
-        }
+        queue.replace(*source);
     }
-    int selected = -1;
-    for (qsizetype i = 0; i < queue.size(); ++i) {
-        if (identity(queue.at(i).toObject()) == identity(track)) {
-            selected = int(i);
-            break;
-        }
+    queue.selectTrack(track);
+    if (queueIndex) {
+        queue.select(*queueIndex);
     }
-    if (selected < 0) {
-        selected = int(queue.size());
-        queue.append(track);
-    }
-    index = queueIndex.value_or(selected);
     const auto generation = ++m_generation;
     m_resumePosition = resume ? std::optional<double>(resume->value("position").toDouble()) : std::nullopt;
     m_resumePaused = resume && !resume->value("requested").toBool();
@@ -309,26 +276,14 @@ void MusicPlayer::play(QJsonObject track, std::optional<QJsonArray> source, std:
     trial = false;
     status = QStringLiteral("正在准备：") + track["title"].toString();
     emit changed();
-    if (!track["deferred"].toBool()) {
-        prepare(track, generation);
+    prepare(track, generation);
+}
+
+void MusicPlayer::loadQueue(const QJsonArray &ids, const QJsonArray &known) {
+    if (remoteCommand("loadQueue", {{"ids", ids}, {"known", known}})) {
         return;
     }
-    m_api->call(
-        "songs", {QJsonValue(QJsonArray{track["id"]})},
-        [this, generation](MusicReply result) {
-            const auto songs = result.value.toArray();
-            if (!result.ok() || songs.isEmpty()) {
-                fail(result.ok() ? QStringLiteral("此曲目暂不可读取") : result.error);
-                return;
-            }
-            current = songs.first().toObject();
-            if (index >= 0 && index < queue.size()) {
-                queue.replace(index, current);
-            }
-            emit changed();
-            prepare(current, generation);
-        },
-        valid(generation));
+    queue.load(ids, known);
 }
 
 void MusicPlayer::prepare(QJsonObject track, quint64 generation, bool reload) {
@@ -442,7 +397,8 @@ void MusicPlayer::prepare(QJsonObject track, quint64 generation, bool reload) {
             entry["description"] = "";
             QJsonArray recent{entry};
             for (const auto &value : history) {
-                if (identity(value.toObject()) != identity(track) && recent.size() < 200) {
+                if (PlaybackQueue::identity(value.toObject()) != PlaybackQueue::identity(track) &&
+                    recent.size() < 200) {
                     recent.append(value);
                 }
             }
@@ -551,7 +507,7 @@ void MusicPlayer::toggle() {
     }
     if (failed && !current.isEmpty()) {
         const auto resume = m_resumePosition ? std::optional<QJsonObject>(sessionState()) : std::nullopt;
-        play(current, std::nullopt, index, previewRequested, resume);
+        play(current, std::nullopt, queue.index(), previewRequested, resume);
         return;
     }
     if (m_resumePosition) {
@@ -605,45 +561,27 @@ void MusicPlayer::next(int direction, bool ended) {
     if (queue.isEmpty()) {
         return;
     }
-    // 单曲循环的前后项都指向当前歌曲，手动切换与播放结束共用队列播放路径。
-    if (mode == "one") {
-        play(current, std::nullopt, index);
-        return;
-    }
-    auto selected = index + direction;
-    if (mode == "shuffle" && queue.size() > 1) {
-        selected = (index + 1 + QRandomGenerator::global()->bounded(int(queue.size() - 1))) % queue.size();
-    }
-    if (selected >= queue.size() && mode == "off") {
+    const auto selected = queue.navigate(direction, mode);
+    if (selected < 0) {
         status = QStringLiteral("队列已播放完");
         emit changed();
         return;
     }
-    selected = ((selected % queue.size()) + queue.size()) % queue.size();
-    play(queue.at(selected).toObject(), std::nullopt, selected);
+    play(queue.at(selected), std::nullopt, selected);
 }
 
 void MusicPlayer::remove(int selected) {
     if (remoteCommand("remove", {{"index", selected}})) {
         return;
     }
-    if (selected < 0 || selected >= queue.size() || selected == index) {
-        return;
-    }
-    queue.removeAt(selected);
-    if (selected < index) {
-        --index;
-    }
-    emit changed();
+    queue.remove(selected);
 }
 
 void MusicPlayer::clearUpcoming() {
     if (remoteCommand("clear", {})) {
         return;
     }
-    queue = current.isEmpty() ? QJsonArray{} : QJsonArray{current};
-    index = current.isEmpty() ? -1 : 0;
-    emit changed();
+    queue.clearUpcoming(current);
 }
 
 /** 停止播放并作废音源与歌词请求；保留音量和历史等可恢复偏好。 */
@@ -661,8 +599,7 @@ void MusicPlayer::stop() {
     actualQuality.clear();
     coverImage.clear();
     current = {};
-    queue = {};
-    index = -1;
+    queue.clear();
     m_host->mediaControl("stop");
     m_host->mediaMetadata({}, {}, {});
     state["playing"] = false;
@@ -717,9 +654,9 @@ void MusicPlayer::clearHistory() {
 
 QJsonObject MusicPlayer::playbackSnapshot() const {
     return {{"current", current},
-            {"queue", queue},
+            {"queue", queue.toJson()},
             {"history", history},
-            {"index", index},
+            {"index", queue.index()},
             {"mode", mode},
             {"state", state},
             {"loading", loading},
@@ -741,9 +678,8 @@ void MusicPlayer::applyPlaybackSnapshot() {
     }
     const auto snapshot = connection->snapshot();
     current = snapshot["current"].toObject();
-    queue = snapshot["queue"].toArray();
+    queue.syncSnapshot(snapshot["queue"].toArray(), snapshot["index"].toInt(-1));
     history = snapshot["history"].toArray();
-    index = snapshot["index"].toInt(-1);
     mode = snapshot["mode"].toString("all");
     state = snapshot["state"].toObject();
     loading = snapshot["loading"].toBool();
@@ -786,13 +722,8 @@ QJsonObject MusicPlayer::sessionState() const {
     const bool requested = m_resumePosition
                                ? !m_resumePaused
                                : loading || live.value("requested", state["playing"].toVariant()).toBool();
-    return {{"current", current},
-            {"queue", queue},
-            {"index", index},
-            {"mode", mode},
-            {"position", position},
-            {"requested", requested},
-            {"preview", previewRequested}};
+    return {{"current", current},   {"queue", queue.toJson()}, {"index", queue.index()},     {"mode", mode},
+            {"position", position}, {"requested", requested},  {"preview", previewRequested}};
 }
 
 void MusicPlayer::restoreSessionState(const QJsonObject &saved) {
@@ -803,16 +734,16 @@ void MusicPlayer::restoreSessionState(const QJsonObject &saved) {
     const auto savedMode = saved["mode"].toString();
     mode = QStringList{"all", "one", "off", "shuffle"}.contains(savedMode) ? savedMode : "all";
     const auto track = saved["current"].toObject();
-    auto source = saved["queue"].toArray();
+    const auto savedQueue = saved["queue"].toArray();
     if (track.isEmpty()) {
-        queue = source;
-        index = -1;
+        queue.restore(savedQueue, saved["index"].toInt(-1), !m_host->playbackConnection());
         emit changed();
         return;
     }
     if (track["kind"] != "song" || track["provider"].toString(m_api->provider) != m_api->provider) {
         return;
     }
-    // 用歌曲身份重建索引，损坏的旧索引不能使下一首跳到无关位置。
-    play(track, source, std::nullopt, saved["preview"].toBool(), saved);
+    // 先恢复队列再按身份选曲，损坏的旧索引不能使下一首跳到无关位置。
+    queue.restore(savedQueue, saved["index"].toInt(-1), !m_host->playbackConnection());
+    play(track, std::nullopt, std::nullopt, saved["preview"].toBool(), saved);
 }

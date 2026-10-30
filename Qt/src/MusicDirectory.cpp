@@ -456,12 +456,12 @@ void MusicLibrary::followPlayback(QJsonObject value) {
                         {"id", ""},
                         {"title", "播放队列"},
                         {"trackCount", player.queue.size()}};
-        folder->songs = player.queue;
-        for (const auto &song : player.queue) {
+        folder->songs = player.queue.items();
+        for (const auto &song : player.queue.items()) {
             folder->ids.append(song.toObject()["id"]);
         }
         folder->cursor = int(player.queue.size());
-        index = MusicData::indexOfId(player.queue, value["id"].toString());
+        index = player.queue.indexOfId(value["id"].toString());
         folder->index = index;
         const auto row = std::max(0, int(physicalSlots[selectedLane].indexOf(physical)));
         folder->anchor = selectedLane * 8 + row;
