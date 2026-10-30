@@ -1272,8 +1272,9 @@ class Renderer {
         return result;
     }
     void geometry(QRhiCommandBuffer *cb, const QList<Draw> &draws) {
-#ifdef Q_OS_LINUX
-        // 先把每个 draw 的 pipeline 算出来（纯函数、无副作用），再按状态分组。
+        // 所有后端共用同一条「先去重再提交」的路径：先把每个 draw 的 pipeline 算出来
+        // （纯函数、无副作用），再按状态分组，避免每 draw 重复绑定同一套状态。
+        // 原来这条路径只在 Linux 上生效，其余后端仍逐 draw 无条件绑定三样状态。
         struct Item {
             const Draw *draw;
             QRhiGraphicsPipeline *pass;
@@ -1281,7 +1282,6 @@ class Renderer {
         };
         QList<Item> items;
         items.reserve(draws.size());
-#endif
         for (const auto &draw : draws) {
             const auto &data = draw.data;
             if (data["shadowOnly"].toBool()) {
@@ -1290,7 +1290,6 @@ class Renderer {
             const bool hashed = surface(data).flags.x() == 2;
             const bool blend = hashed || data["transparent"].toBool();
             const bool depthWrite = hashed || !blend || data["depthWrite"].toBool();
-#ifdef Q_OS_LINUX
             auto *pass = pipeline("surface", draw.bindings, color.rp, false,
                                   data["side"].toInt() == 2, depthWrite, blend);
             items.append({&draw, pass, data["transparent"].toBool()});
@@ -1334,12 +1333,6 @@ class Renderer {
                 boundBindings = draw.bindings;
             }
             // 实例数据来自 arena 时用 offset 寻址；否则回落到 draw 自带的 buffer。
-#else
-            cb->setGraphicsPipeline(pipeline("surface", draw.bindings, color.rp, false,
-                                             data["side"].toInt() == 2, depthWrite, blend));
-            cb->setShaderResources(draw.bindings);
-            cb->setViewport({0, 0, float(size.width()), float(size.height())});
-#endif
             const QRhiCommandBuffer::VertexInput inputs[] = {{draw.vertices, 0}, {draw.instances, 0}};
             cb->setVertexInput(0, 2, inputs, draw.indices, 0, QRhiCommandBuffer::IndexUInt32);
             if (draw.indices) {
@@ -1349,8 +1342,8 @@ class Renderer {
             }
             ++drawCalls;
         }
-#ifdef Q_OS_LINUX
-        // 排障：状态重绑次数（RHINE_DRAW_PROBE=1，每 120 帧一次）。
+        // 排障：状态重绑次数（RHINE_DRAW_PROBE=1，每 120 帧一次）。去重路径现在全平台生效，
+        // 探针也就跟着全平台可用；它只在环境变量打开时才做计数，默认零成本。
         static const bool drawProbe = qEnvironmentVariableIntValue("RHINE_DRAW_PROBE") == 1;
         static int probeCounter = 0;
         if (drawProbe && (++probeCounter % 120) == 0) {
@@ -1359,6 +1352,10 @@ class Renderer {
                               << "| 实例buffer" << instances.size() << "| 批次buffer" << batchInstances.size();
         }
     }
+    // 重投影探针（warpFrame）依赖 MRT 产出的运动矢量，而 motionVectors / warp 等成员只在
+    // Linux 声明，所以这一整段仍归 Linux 分支；geometry() 的闭合 } 已经提到上面，
+    // #ifdef 只圈住 warpFrame，别再让它跨进 geometry() 体内（非 Linux 会连带编译不过）。
+#ifdef Q_OS_LINUX
     /** 重投影中间帧探针：用主渲染 MRT 产出的运动矢量把当前场景颜色前推到 t 相位，
      *  零额外几何、相位可任意取，用来评估自研 4 倍插帧的成本与画面质量。 */
     /** 重投影中间帧：用主渲染 MRT 产出的运动矢量把当前场景颜色回看到 t 相位，
@@ -1409,8 +1406,8 @@ class Renderer {
         cb->draw(3);
         ++drawCalls;
         cb->endPass();
-#endif
     }
+#endif
     void composite(QRhiCommandBuffer *cb, QRhiRenderTarget *destination) {
 #ifndef Q_OS_DARWIN
         auto finalDestination = destination;
