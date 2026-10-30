@@ -89,4 +89,16 @@ inline bool poolWriteNeeded(bool contentEqual, quint64 offset, quint64 previousO
     return !contentEqual || offset != previousOffset;
 }
 
+
+/**
+ * D04：深度是否必须保留。
+ *
+ * 只有确定没人读时才允许 DoNotStore；任一消费者存在就照旧 store。这里刻意保守：
+ * 判断不了就当有人读——一次错误的 DONT_CARE 表现为"某一帧之后深度/时域全花"，很难回查。
+ */
+inline bool depthStoreRequired(bool motionConfigured, bool temporal, bool warpProbe, bool metalFxActive)
+{
+    return motionConfigured || temporal || warpProbe || metalFxActive;
+}
+
 } // namespace RhineRender

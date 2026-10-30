@@ -398,6 +398,10 @@ class Renderer {
         QHash<QByteArray, InstancePoolMirror> mirror;
     };
     InstancePool instancePool;
+    /// D04：主目标的深度在没人读时不 store（RHINE_VK_DISCARD_UNUSED_DEPTH=1 才启用）。
+    bool discardUnusedDepth = qEnvironmentVariableIntValue("RHINE_VK_DISCARD_UNUSED_DEPTH") == 1;
+    /// 本次 resize 定下的策略；它变了必须重建目标（render pass 的 storeOp 写在描述符里）。
+    bool sizedDepthStore = true;
     bool instancePoolEnabled = qEnvironmentVariableIntValue("RHINE_VK_INSTANCE_ARENA") == 1;
     /// D03 第二步：材质 arena 的整块直写实验（RHINE_VK_DIRECT_WRITE=1）。
     bool directWrite = qEnvironmentVariableIntValue("RHINE_VK_DIRECT_WRITE") == 1;
@@ -754,9 +758,10 @@ class Renderer {
     }
 #ifdef Q_OS_LINUX
     Target makeTarget(QRhiTexture *texture, QRhiTexture *depth = nullptr, QRhiTexture *resolve = nullptr,
-                      QRhiTexture *vectors = nullptr) {
+                      QRhiTexture *vectors = nullptr, bool discardDepth = false) {
 #else
-    Target makeTarget(QRhiTexture *texture, QRhiTexture *depth = nullptr, QRhiTexture *resolve = nullptr) {
+    Target makeTarget(QRhiTexture *texture, QRhiTexture *depth = nullptr, QRhiTexture *resolve = nullptr,
+                      bool discardDepth = false) {
 #endif
         QRhiTextureRenderTargetDescription desc;
         if (texture) {
@@ -777,6 +782,11 @@ class Renderer {
         }
         desc.setDepthTexture(depth);
         auto rt = own(rhi->newTextureRenderTarget(desc), true);
+        // D04：storeOp 与 loadOp 写在兼容 render pass 描述符里，所以必须在它创建之前打到目标上。
+        // 只影响"pass 结束后深度内容是否落盘"，深度测试与清除照旧。
+        if (discardDepth && depth) {
+            rt->setFlags(rt->flags() | QRhiTextureRenderTarget::DoNotStoreDepthStencilContents);
+        }
         auto rp = own(rt->newCompatibleRenderPassDescriptor(), true);
         rt->setRenderPassDescriptor(rp);
         create(rt);
@@ -1037,11 +1047,16 @@ class Renderer {
         //   · 多采样目标本来就没有第二个 draw buffer 可写，维持原来的让路策略；
         //   · 单采样时看配置（AA 模式 + FG 开关）而不是 FSR 运行期可用性，否则能力
         //     探测翻一次就重建整帧目标；重投影探针也要读矢量图，不能一并裁掉。
+        const bool wantDepthStore = !discardUnusedDepth ||
+                                    RhineRender::depthStoreRequired(postProcess->motionConfigured(),
+                                                                    postProcess->temporal(),
+                                                                    qEnvironmentVariableIsSet("RHINE_WARP_PROBE"),
+                                                                    false);  // MetalFX 只在 Darwin 分支存在
         const bool wantMotion = nextSamples <= 1 &&
                                 (postProcess->motionConfigured() ||
                                  qEnvironmentVariableIsSet("RHINE_WARP_PROBE"));
         if (viewSize == value && size == nextSize && sampleCount == nextSamples &&
-            sizedAaMode == nextMode && motionTarget == wantMotion) {
+            sizedAaMode == nextMode && motionTarget == wantMotion && sizedDepthStore == wantDepthStore) {
             return;
         }
         if (motionTarget != wantMotion) {
@@ -1049,9 +1064,13 @@ class Renderer {
             qInfo().noquote() << "运动矢量目标:" << (wantMotion ? "分配" : "不分配")
                               << "| AA" << nextMode << "| samples" << nextSamples;
         }
+        if (sizedDepthStore != wantDepthStore) {
+            qInfo().noquote() << "深度 store:" << (wantDepthStore ? "保留" : "不保留（无消费者）");
+        }
         sampleCount = nextSamples;
         sizedAaMode = nextMode;
         motionTarget = wantMotion;
+        sizedDepthStore = wantDepthStore;
 #endif
 #ifdef Q_OS_LINUX
         // 走到这里说明颜色目标真的要重建（尺寸/采样数/AA 模式变了）：上一帧的 VP 与实例矩阵
@@ -1082,9 +1101,9 @@ class Renderer {
         motionVectors = motionTarget
                             ? create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1, rtFlags), true))
                             : nullptr;
-        color = makeTarget(attachment, depth, resolved, motionVectors);
+        color = makeTarget(attachment, depth, resolved, motionVectors, !sizedDepthStore);
 #else
-        color = makeTarget(attachment, depth, resolved);
+        color = makeTarget(attachment, depth, resolved, !sizedDepthStore);
 #endif
         target = {};
         if (needsReadbackTarget) {
@@ -2872,8 +2891,12 @@ class Renderer {
         const auto background = vector(frame["background"]);
         if (vkProbe) {
             ++vkWindow.passes;
-            // D04 之前主目标始终保留深度内容；这里如实记，D04 落地后按目标策略分流。
-            ++vkWindow.depthStorePasses;
+            // D04：按本次目标实际的 store 策略记账，不再假设"总是保留"。
+            if (sizedDepthStore) {
+                ++vkWindow.depthStorePasses;
+            } else {
+                ++vkWindow.depthDiscardPasses;
+            }
         }
         cb->beginPass(color.rt, QColor::fromRgbF(background.x(), background.y(), background.z()), {1, 0});
 #ifdef Q_OS_LINUX

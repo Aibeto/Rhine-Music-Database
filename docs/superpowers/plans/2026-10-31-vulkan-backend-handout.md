@@ -48,11 +48,13 @@
 
 ## D04：无后续深度消费者时不 store 深度（低复杂度候选）
 
+实施：`RHINE_VK_DISCARD_UNUSED_DEPTH=1` 才启用；`RhineRender::depthStoreRequired()` 给出保守消费者表（FSR/FG 配置、时域 AA、warp 探针任一存在就照旧 store），策略只随 resize 变，并写进早退比较。剩余那条要看用户 capture 里的 storeOp 与 GPU 时间，应用侧只如实记 `depthStorePasses` / `depthDiscardPasses`。
+
 位置：[makeTarget／resize](../../../Qt/src/RhiScene.cpp#L672)、[publishMotionInputs](../../../Qt/src/RhiScene.cpp#L2118)、[ScenePostProcess](../../../Qt/src/render/ScenePostProcess.cpp#L248)。[S4](#ref-s4)
 
-- [ ] 先做保守消费者表：AA off／空间 FXAA／MSAA 且无其他读取可选“不存”；TAA／FSR／FG／warp／未知诊断需求先保留。FSR 能力运行期变化时不逐帧翻策略，按配置保守判定；不能从“FG 下线”推断所有深度都无人读。
-- [ ] 无消费者时保留 D32F 深度测试／清除，只给主纹理 RT 添加 QRhiTextureRenderTarget::DoNotStoreDepthStencilContents；需要 store 时恢复。标记必须在 compatible render-pass descriptor 创建前设置；策略变动进入 resize／布局失效条件。
-- [ ] 初轮不改成可能不同精度的 D24S8，不强制 renderbuffer，也不改 HDR 颜色格式。被后续采样的 color／motion／history 仍须 store，不能把 PRESERVE、DONT_CARE 与丢弃旧内容混为一谈。
+- [x] 先做保守消费者表：AA off／空间 FXAA／MSAA 且无其他读取可选“不存”；TAA／FSR／FG／warp／未知诊断需求先保留。FSR 能力运行期变化时不逐帧翻策略，按配置保守判定；不能从“FG 下线”推断所有深度都无人读。
+- [x] 无消费者时保留 D32F 深度测试／清除，只给主纹理 RT 添加 QRhiTextureRenderTarget::DoNotStoreDepthStencilContents；需要 store 时恢复。标记必须在 compatible render-pass descriptor 创建前设置；策略变动进入 resize／布局失效条件。
+- [x] 初轮不改成可能不同精度的 D24S8，不强制 renderbuffer，也不改 HDR 颜色格式。被后续采样的 color／motion／history 仍须 store，不能把 PRESERVE、DONT_CARE 与丢弃旧内容混为一谈。
 - [ ] 对比实际 render-pass depth storeOp、GPU 时间与帧间隔；Intel 桌面 iGPU 不按移动 tile GPU 推定收益。模式切换、MSAA、resize、参考图／时域重置正确性全部保留。
 
 ## D05：Qt Vulkan 后端专项，只有 capture 命中才做
