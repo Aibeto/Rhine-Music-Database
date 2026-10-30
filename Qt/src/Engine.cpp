@@ -5,6 +5,7 @@
 #include "Engine.h"
 #include "DiscGeometry.h"
 #include "RhiScene.h"
+#include "render/MemoryProbe.h"
 #include <QCoreApplication>
 #include <QDir>
 #include <QEvent>
@@ -1049,6 +1050,16 @@ void Engine::step(double time) {
         } else {
             ++it;
         }
+    }
+    // 诊断：把「按曲目保留的 MusicTexture 数与其封面字节」交给渲染线程的内存探针打印。
+    {
+        auto &counters = RhineRender::engineMemoryCounters();
+        qint64 coverBytes = 0;
+        for (const auto &entry : m_musicTextures) {
+            coverBytes += entry.cover.sizeInBytes();
+        }
+        counters.musicTextures.store(int(m_musicTextures.size()), std::memory_order_relaxed);
+        counters.coverBytes.store(coverBytes, std::memory_order_relaxed);
     }
     // C03：准入状态只在这里写一次。synchronize() 拿到的就是这份快照，不再对每个条目
     // 重新赋值 admitted——那会让整块 QHash 每帧 detach 一遍。

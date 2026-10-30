@@ -12,6 +12,7 @@
 #include "render/ScenePostProcess.h"
 #include "render/VulkanResourceProbe.h"
 #include "render/VulkanResourcePolicy.h"
+#include "render/MemoryProbe.h"
 #ifdef Q_OS_LINUX
 #include "fg/FgFrameTap.h"
 #endif
@@ -283,6 +284,9 @@ class Renderer {
     RhineRender::VulkanResourceWindow vkWindow;
     bool vkProbe = qEnvironmentVariableIntValue("RHINE_VK_RESOURCE_PROBE") == 1;
     int vkFrames = 0;
+    /// 内存探针：只在 RHINE_MEMORY_PROBE=1 时读 /proc 并打印，默认零成本。
+    bool memoryProbe = qEnvironmentVariableIntValue("RHINE_MEMORY_PROBE") == 1;
+    int memoryFrames = 0;
     quint64 vkCreatesMark = 0;
     // A05：运动矢量附件当前是否真的分配了。它是目标形状的一部分，必须和尺寸/采样数/
     // AA 模式一起参与 resize() 的早退比较，否则切换 AA 模式后会沿用旧目标。
@@ -1932,6 +1936,36 @@ class Renderer {
     }
     /** D01：稳态存量。遍历现存的 buffer 容器而不是靠"创建减回收"推算——回收路径有好几条，
      *  漏算一条就会把容量永久记高。 */
+    /**
+     * 诊断用内存快照：只统计「按 key 增长」的容器，配合 RHINE_MEMORY_PROBE 观察哪一项
+     * 随翻动持续上涨。纹理字节只算标签与封面，与 musicTextureBytes() 同一口径。
+     */
+    RhineRender::MemorySample memorySample() const {
+        RhineRender::MemorySample sample;
+        sample.rssBytes = RhineRender::residentBytes();
+        sample.heapBytes = RhineRender::heapInUseBytes();
+        sample.labels = int(labels.size());
+        sample.covers = int(covers.size());
+        sample.coverTextures = int(coverTextures.size());
+        sample.textureBytes = musicTextureBytes();
+        sample.materials = int(materials.size());
+        sample.staticInstances = int(instances.size());
+        sample.batchInstances = int(batchInstances.size());
+        sample.shaderResourceBindings = int(pipelineLayouts.size()) + int(postBindings.size());
+        sample.liveResources = int(resources.size());
+        sample.liveSized = int(sized.size());
+        sample.liveTransient = int(transient.size());
+        const auto &engineCounters = RhineRender::engineMemoryCounters();
+        sample.engineMusicTextures = engineCounters.musicTextures.load(std::memory_order_relaxed);
+        sample.engineCoverBytes = engineCounters.coverBytes.load(std::memory_order_relaxed);
+        for (const auto &state : materials) {
+            if (state.bindings) {
+                ++sample.shaderResourceBindings;
+            }
+        }
+        return sample;
+    }
+
     RhineRender::VulkanResourceLive vulkanLive() const {
         RhineRender::VulkanResourceLive live;
         auto add = [&](const BufferState &state) {
@@ -3180,6 +3214,10 @@ class Renderer {
         }
 #endif
         cb->endPass();
+        if (memoryProbe && ++memoryFrames >= 20) {
+            memoryFrames = 0;
+            qInfo().noquote() << RhineRender::formatMemoryLine(memorySample());
+        }
         if (vkProbe) {
             vkWindow.srbCreates = bindingCreations - vkCreatesMark;
             vkCreatesMark = bindingCreations;
