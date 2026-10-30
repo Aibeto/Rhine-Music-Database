@@ -601,6 +601,7 @@ void PresentationShell::publishStats(bool interpolatedThisStep) {
     }
 #endif
     m_stats.displaySize = m_presenter ? m_presenter->extent() : QSize();
+    m_stats.imageReuseMs = m_presenter ? m_presenter->imageReuseMs() : 0.0;
     ++m_stats.serial;
     RhineFg::publish(m_stats);
 }
@@ -940,7 +941,9 @@ void PresentationShell::reportStats() {
         << "光流" << QString::number(m_stats.prepareMs, 'f', 2) << "插值"
         << QString::number(m_stats.dispatchMs, 'f', 2) << "合成"
         << QString::number(m_stats.compositeMs, 'f', 2) << "上屏"
-        << QString::number(m_stats.presentMs, 'f', 2) << "起始" << QString::number(m_stats.beginMs, 'f', 2)
+        << QString::number(m_stats.presentMs, 'f', 2) << "复用"
+        << QString::number(m_stats.imageReuseMs, 'f', 1) << "起始"
+        << QString::number(m_stats.beginMs, 'f', 2)
         << "收尾" << QString::number(m_stats.endMs, 'f', 2) << "空档"
         << QString::number(m_stats.idleGapMs, 'f', 2) << "跳过" << m_skippedSteps
         << (m_frameClock.isValid() ? m_frameClock.restart() / double(m_presentedFrames - m_statsBase) : 0.0);
@@ -1298,7 +1301,8 @@ bool PresentationShell::start() {
                                  << m_renderedFrames << "skipped" << m_skippedSteps << "acqTimeout"
                                  << m_acquireTimeoutCount << "outOfDate" << m_outOfDateCount << "visible"
                                  << (m_window && m_window->isVisible()) << "pendingReal" << m_pendingRealFrame
-                                 << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1) << "dirty"
+                                 << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1) << "复用"
+                                 << QString::number(m_stats.imageReuseMs, 'f', 1) << "dirty"
 #ifdef Q_OS_LINUX
                                  << (m_host ? m_host->contentDirty() : false) << "force" << m_forcePresent
                                  << "| 3D层" << QString::number(m_host->sceneLayerMs(), 'f', 1) << "ms"

@@ -43,6 +43,11 @@ class PresentationBackend {
     }
     virtual QString formatName() const = 0;
     virtual QString presentModeName() const = 0;
+    /// 同一张交换链图像两次上屏的平均间隔（毫秒）。0 表示后端不提供。
+    /// 贴着刷新周期说明是合成器在限速，而不是渲染来不及。
+    virtual double imageReuseMs() const {
+        return 0.0;
+    }
     virtual QString backendName() const = 0;
     virtual QString lastError() const = 0;
 };
