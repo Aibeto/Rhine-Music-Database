@@ -112,6 +112,19 @@ class Engine : public QObject {
     Q_INVOKABLE void resetTemporalState();
     void wake(bool input = true);
     void start();
+    /// A03：内容版本。呈现层用它代替"按信号重复置脏"——版本前进一次只重渲一层，
+    /// 重复推同一个值只在两个整数上比较一次。主线程写、渲染线程读，用 relaxed 原子
+    /// 即可：这里要的是"值变了/没变"，不是用它同步任何内存。
+    quint64 sceneRevision() const {
+        return m_sceneRevision.load(std::memory_order_relaxed);
+    }
+    quint64 hudRevision() const {
+        return m_hudRevision.load(std::memory_order_relaxed);
+    }
+    /// A03：渲染线程发现"新 GPU 资源已就位"（异步封面/模型上传完成）时，经队列连接
+    /// 回到主线程调用这里。这类变化在场景帧字段里看不出来，notifySceneRenderers 的
+    /// 自然触发点（帧签名比较）捕捉不到，只能由发现者自己上报一次。
+    Q_INVOKABLE void requestSceneContent();
     void recordRender(quint64 resources, quint64 bindings = 0, quint64 textureBytes = 0,
                       quint64 coverUploads = 0, quint64 drawCalls = 0, double gpuTimeMs = 0,
                       RhineRender::GpuTimingStatus gpuTiming =
@@ -156,6 +169,9 @@ class Engine : public QObject {
   private:
     void notifySceneRenderers(bool visualChanged);
     quint64 m_geometryRevision = 0;
+    /// A03：内容版本，只在内容真的变了时自增（见 notifySceneRenderers/requestSceneContent）。
+    std::atomic<quint64> m_sceneRevision{0};
+    std::atomic<quint64> m_hudRevision{0};
     std::atomic<quint64> m_renderFrames{0}, m_gpuResources{0};
     std::atomic<quint64> m_bindingCreations{0};
     std::atomic<quint64> m_musicTextureBytes{0};

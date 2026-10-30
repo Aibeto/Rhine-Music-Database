@@ -2403,6 +2403,14 @@ class ItemRenderer : public QQuickRhiItemRenderer {
                                   RhineRender::classifyGpuTiming(gpuTimingSupported,
                                                                  RhineRender::timestampsRequested(),
                                                                  gpuTimeMs > 0));
+            // A03：本帧新建过 SRB，说明有新资源真的落地了（异步封面/模型上传完成，或
+            // 渲染目标重建后重新绑定）。这类变化在引擎的帧字段里看不出来，主线程的
+            // 帧签名比较永远判不到，只能由发现它的渲染线程回报一次；否则 3D 层要等
+            // 兜底间隔（20 帧）才重画，表现就是"封面比歌名慢半拍"。
+            // 用 QueuedConnection：Engine 住在主线程，而这里是渲染线程。
+            if (bindings > 0 && backend) {
+                QMetaObject::invokeMethod(backend, "requestSceneContent", Qt::QueuedConnection);
+            }
             if (gpuTimeMs > 0 && qEnvironmentVariableIsSet("RHINE_DEBUG_GPU")) {
                 static bool reported = false;
                 if (!reported) {

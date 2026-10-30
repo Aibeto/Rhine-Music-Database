@@ -340,8 +340,17 @@ void Engine::recomputeLedgerPeaks() {
 /** 仅在画面变化时通知唯一场景，静止时保留按需休眠。 */
 void Engine::notifySceneRenderers(bool visualChanged) {
     if (visualChanged) {
+        // A03：版本只在真的推进内容时自增。呈现层拿它当"这一帧有没有新内容"的唯一判据，
+        // 重复推同一个值不会造成重复重渲；而信号是没法这么用的——同一个内容变化会被
+        // 场景帧、HUD、异步资源到达各触发一次。
+        m_sceneRevision.fetch_add(1, std::memory_order_relaxed);
         emit sceneUpdated();
     }
+}
+
+/** A03：渲染线程上报"新资源已就位"。语义与一次真实的视觉变化相同，只是触发者不是帧字段。 */
+void Engine::requestSceneContent() {
+    notifySceneRenderers(true);
 }
 void Engine::wake(bool input) {
     const bool wasSleeping = m_sleeping;
@@ -403,6 +412,7 @@ void Engine::setVisible(bool value) {
 #endif
         wake(false);
         notifySceneRenderers(true);
+        m_hudRevision.fetch_add(1, std::memory_order_relaxed);
         emit hudUpdated();
     }
     emit stateChanged();
@@ -896,6 +906,7 @@ void Engine::step(double time) {
     if (commands != m_commands) {
         m_commands = commands;
         ++m_hudUpdates;
+        m_hudRevision.fetch_add(1, std::memory_order_relaxed);
         emit hudUpdated();
     }
     if (visualChanged) {

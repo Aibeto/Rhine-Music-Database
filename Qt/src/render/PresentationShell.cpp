@@ -963,6 +963,10 @@ void PresentationShell::step() {
     }
 
     m_probe.restart();
+    // A03：把引擎侧内容版本推进到本帧。必须在 renderFrame() 之前——脏标记是在那一刻
+    // 被消费的，晚一行就要等到下一帧才生效。默认（RHINE_LAYER_REVISION 未开）这里只
+    // 记录版本，置脏仍由 sceneUpdated/hudUpdated 信号驱动，行为与优化前一致。
+    m_host->setResourceRevision(m_backend->sceneRevision(), m_backend->hudRevision());
     const auto previousSceneFrames = m_host->sceneRenderCount();
     const auto previousOverlayFrames = m_host->overlayRenderCount();
     const bool sceneRendered = m_host->renderFrame();
