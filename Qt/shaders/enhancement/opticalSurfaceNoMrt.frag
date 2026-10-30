@@ -171,21 +171,30 @@ void main() {
         discUv = mat2(m.extra.z, -m.extra.w, m.extra.w, m.extra.z) * centered + vec2(.5);
         // 磨砂：隔着霜层看盘面，封面必须真的糊掉，而不只是蒙一层乳白。
         float blur = (g.viewport.w > 0.5) ? (1.0 - clamp(v_clarity, 0.0, 1.0)) : 0.0;
-        vec3 art = texture(cover, discUv).rgb * 4.0;
-        float total = 4.0;
-        for (int ring = 1; ring <= 2; ++ring) {
-            vec2 delta = vec2(blur * 0.009 * float(ring));
-            art += texture(cover, discUv + vec2(delta.x, 0.0)).rgb;
-            art += texture(cover, discUv - vec2(delta.x, 0.0)).rgb;
-            art += texture(cover, discUv + vec2(0.0, delta.y)).rgb;
-            art += texture(cover, discUv - vec2(0.0, delta.y)).rgb;
-            art += texture(cover, discUv + delta).rgb;
-            art += texture(cover, discUv - delta).rgb;
-            art += texture(cover, discUv + vec2(delta.x, -delta.y)).rgb;
-            art += texture(cover, discUv + vec2(-delta.x, delta.y)).rgb;
-            total += 8.0;
+        // 清晰档（blur == 0：不在查看封面页，或 clarity 已到 1.0，也就是默认状态）下，
+        // 下面 17 次采样用的全是同一个 discUv —— 中心 1 次权重 4.0，两个环各 8 次权重 1.0，
+        // 权重和 20.0，(4S + 16S) / 20 恒等于 S，画面与"只采一次"逐像素相同，只差浮点舍入。
+        // 所以这里短路成 1 次纹理采样：省掉 16 次采样指令及其纹理带宽。
+        // blur > 0 的磨砂档仍走原来的双环模糊，观感不变。
+        if (blur <= 1e-6) {
+            color = linearColor(texture(cover, discUv).rgb) * 0.8;
+        } else {
+            vec3 art = texture(cover, discUv).rgb * 4.0;
+            float total = 4.0;
+            for (int ring = 1; ring <= 2; ++ring) {
+                vec2 delta = vec2(blur * 0.009 * float(ring));
+                art += texture(cover, discUv + vec2(delta.x, 0.0)).rgb;
+                art += texture(cover, discUv - vec2(delta.x, 0.0)).rgb;
+                art += texture(cover, discUv + vec2(0.0, delta.y)).rgb;
+                art += texture(cover, discUv - vec2(0.0, delta.y)).rgb;
+                art += texture(cover, discUv + delta).rgb;
+                art += texture(cover, discUv - delta).rgb;
+                art += texture(cover, discUv + vec2(delta.x, -delta.y)).rgb;
+                art += texture(cover, discUv + vec2(-delta.x, delta.y)).rgb;
+                total += 8.0;
+            }
+            color = linearColor(art / total) * 0.8;
         }
-        color = linearColor(art / total) * 0.8;
         // 盘面是上光玻璃：给足高光，出射方向明确。
         color = keyLight(color, 1.0);
     } else if (m.flags.x == 8.0) {
