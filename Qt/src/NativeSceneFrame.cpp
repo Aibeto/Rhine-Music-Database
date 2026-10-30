@@ -154,6 +154,7 @@ void NativeScene::emitFrame(double time) {
     frame["culledCards"] = culled;
     frame["shadowCards"] = shadowOnly;
     frame["actorTemplate"] = m_appearance.actorTemplate;
+    frame["appearanceRevision"] = double(m_appearance.revision);
     frame["actors"] = actors;
     failure = m_cards.expand(frame, actorBytes, drawBuffers);
     for (auto entry = drawBuffers.begin(); entry != drawBuffers.end();) {

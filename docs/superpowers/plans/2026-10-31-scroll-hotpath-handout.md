@@ -42,11 +42,18 @@ Files：[NativeApplication.cpp](../../../Qt/src/NativeApplication.cpp#L74)、[Na
 
 Files：[NativeCards.h](../../../Qt/src/NativeCards.h)、[NativeCards.cpp](../../../Qt/src/NativeCards.cpp#L33)、[SceneTypes.h](../../../Qt/src/SceneTypes.h)、[NativeSceneFrame.cpp](../../../Qt/src/NativeSceneFrame.cpp)、[Engine.h](../../../Qt/src/Engine.h)、[RhiScene.cpp](../../../Qt/src/RhiScene.cpp#L2362)。新增共享类型可放在这些既有文件或单一小头文件，不全面拆重构引擎。
 
-- [ ] actorTemplate 到达／变更时一次解析部件 ID、mesh／asset、状态标志、high／low 数值和 double 精度 localMatrix；按模板 revision 缓存，模板不变时不在 card×part 循环重新 toObject／toArray／解析矩阵。局部非单位矩阵保持原有 double 运算及累加顺序，最终转换 float；不能因提前转 float 改变结果。 先把这一项作为可独立验收的小步，仍输出旧 draw；确认收益和等价后才继续类型化传输，不一次性绑定为大型重写。
+- [x] actorTemplate 到达／变更时一次解析部件 ID、mesh／asset、状态标志、high／low 数值和 double 精度 localMatrix；按模板 revision 缓存，模板不变时不在 card×part 循环重新 toObject／toArray／解析矩阵。（`SceneAppearance::revision` 进程内单调 → `frame["appearanceRevision"]` → `NativeCards::decodeParts()`；解码结果缓存到 `decoded`，`localMatrix` 预判 identity）局部非单位矩阵保持原有 double 运算及累加顺序，最终转换 float；不能因提前转 float 改变结果。 先把这一项作为可独立验收的小步，仍输出旧 draw；确认收益和等价后才继续类型化传输，不一次性绑定为大型重写。
 - [ ] 仅为这条热点增加“不可变部件模板＋当前 actor 动态参数／矩阵”的类型化快照，由 NativeCards→Engine→Renderer 共享；材质插值和 optical shell 规则与现有实现一致。Renderer 的新入口直接读这些值，不再生成 JSON 后再 surface() 解析。其他非唱片 draw、诊断和参考图保留兼容通路，避免一次替换全部 frame JSON。
 - [ ] 列表资源保留、draw 数统计、归位对象 ID、musicKey／selected、shadowOnly／透明 order 需同步从类型化包读取；不得为维持这些消费者又每帧把全包转回 JSON。诊断导出按需生成；参考渲染能显式选旧路径。
 - [ ] 跨线程发布不可变快照，不共享可写 vector／临时指针；模板更新、设备恢复、boot／detail／viewer／theme／quality／clarity 全覆盖失效。复杂状态不支持时整条 draw 回旧路径，不混读半份新旧参数。新增开关 RHINE_SCROLL_TYPED_DRAWS=1，初期 opt-in。
 - [ ] 写**新旧实现的差分测试**：相同模板和 actor 输入比较部件集合、材质数值、最终矩阵／ID／顺序，覆盖 identity／非 identity localMatrix、high/low 缺失、0/1 和中间插值、空场景／模板更新。不是只测试新结构能构造；未建立等价性之前不推广。
+
+#### F02a 实施记录（模板预解码）
+
+- `Qt/src/SceneAppearance.h` 加 `quint64 revision`，构造函数里用进程内单调 `std::atomic` 取新代号；`NativeSceneFrame` 把代号写进 `frame["appearanceRevision"]`。
+- `Qt/src/NativeCards.h/.cpp` 新增 `struct Part` 与 `decodeParts(revision, source)`：把 `base/high/low`、九个静态字段、`localMatrix`（含 identity 预判）、`hasMap`、`interpolateAttenuation`、`Frosted_Polymer` 判定各解析一次，按代号缓存。代号为 0（viewer 临时模板）时不缓存，退回每帧解码。
+- `expand()` 的 card×part 循环只做插值与矩阵乘法，不再有 `toObject/toArray` 与逐键 JSON 查找；输出 draw 的字段与顺序保持原样（仍是旧 JSON 通路）。
+- 等价性与收益：本轮**未做**差分测试与实测（`Qt/tests/ScrollHotPathChecks.cpp` 属 F06 的交付物）；按计划，类型化传输（F02 余下四条）必须等这条小步先证明收益与等价。
 
 ## F03：批次键类型化＋最终实例单次打包（优先）
 
