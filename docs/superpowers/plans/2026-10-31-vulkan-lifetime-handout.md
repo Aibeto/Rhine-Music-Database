@@ -34,12 +34,14 @@
 
 ## E03：修正 D03 全量直写与实例池边界（先保正确）
 
+> 实施：`writeMaterial()` 改成 `materialWriteRequired(映射中, 内容相同)`——直写时内容相同也写；映射生命周期从 `render()` 挪进 `prepare()`（容量规划 → 开始映射 → 写满 → 收尾），映射失败发生在任何写入之前，整帧统一走 `updateDynamicBuffer`，不会半帧两种路径。`poolInstances(opaque, transparent)` 现在一次收集两段、用 `poolSliceEnd()` 累计算出总容量、一次 `ensureInstancePool()`、一次 `next` 镜像提交；分配前对每个切片做 `poolSliceFits()` 检查，放不下就整帧回落逐 draw buffer。
+
 位置：[writeMaterial](../../../Qt/src/RhiScene.cpp#L920)、[poolInstances](../../../Qt/src/RhiScene.cpp#L2320)、[两次池化调用](../../../Qt/src/RhiScene.cpp#L2882)。
 
-- [ ] writeMaterial 目前在 materialArenaMap 分支**之前**按 committed 内容相同直接 return，与直写每个原生帧槽必须写全相冲突。直写先写本帧所有有效槽；仅 batch 路径允许内容相同跳过。以真正的写调用／槽位初始化断言测试连续相同帧、后续变化、恢复／扩容，不只测一个脱离实现的 bool 函数。[S2]
-- [ ] beginMaterialArenaWrite 当前早于 prepare 的 ensureMaterialArena。先统一规划容量，再开始映射；扩容时不得沿用旧映射。本帧后半段不能因临时映射失败直接在同一对象改走 batch。按原计划用新 buffer／重绑回退，或整帧择定路径；记录哪个路径实际写入。
-- [ ] 目前 poolInstances 先用本次 total 而非 cursor＋total 保证容量，opaque／transparent 分别调用。第二次可能使写入越界；若它触发扩容，前一列表可能还指向已退休的旧 pool。改成**两个最终列表先统一规划、一次扩容，再一起分配／上传**，逐切片检查 offset＋bytes≤capacity（含对齐与溢出）。
-- [ ] mirror 当前每次调用被 next 替换，两个列表交替会丢掉另一半的上一帧镜像；改成整帧一次提交镜像，两个列表共同保留。测试两列表同内容且同落点时均不重传、第二列表跨容量边界、只有透明列表、空列表和失败回退，验证 draw 实际 buffer＋offset。
+- [x] writeMaterial 目前在 materialArenaMap 分支**之前**按 committed 内容相同直接 return，与直写每个原生帧槽必须写全相冲突。直写先写本帧所有有效槽；仅 batch 路径允许内容相同跳过。以真正的写调用／槽位初始化断言测试连续相同帧、后续变化、恢复／扩容，不只测一个脱离实现的 bool 函数。[S2]
+- [x] beginMaterialArenaWrite 当前早于 prepare 的 ensureMaterialArena。先统一规划容量，再开始映射；扩容时不得沿用旧映射。本帧后半段不能因临时映射失败直接在同一对象改走 batch。按原计划用新 buffer／重绑回退，或整帧择定路径；记录哪个路径实际写入。
+- [x] 目前 poolInstances 先用本次 total 而非 cursor＋total 保证容量，opaque／transparent 分别调用。第二次可能使写入越界；若它触发扩容，前一列表可能还指向已退休的旧 pool。改成**两个最终列表先统一规划、一次扩容，再一起分配／上传**，逐切片检查 offset＋bytes≤capacity（含对齐与溢出）。
+- [x] mirror 当前每次调用被 next 替换，两个列表交替会丢掉另一半的上一帧镜像；改成整帧一次提交镜像，两个列表共同保留。测试两列表同内容且同落点时均不重传、第二列表跨容量边界、只有透明列表、空列表和失败回退，验证 draw 实际 buffer＋offset。
 
 ## E04：核对归位积压与“活跃资源”放大（默认路径也适用）
 

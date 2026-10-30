@@ -975,11 +975,12 @@ class Renderer {
         *ok = true;
         return slot;
     }
-    /// 内容变了才写 GPU：绝大多数帧材质的插值确实在变，但同一帧内重复材质不必重复写。
+    /// 内容变了才写 GPU；但整块直写映射的是本帧的原生副本，内容相同也必须写满。
     void writeMaterial(quint32 slot, const Surface &material) {
         const QByteArray bytes(reinterpret_cast<const char *>(&material), sizeof(material));
         const auto it = materialArena.committed.constFind(slot);
-        if (it != materialArena.committed.constEnd() && it.value() == bytes) {
+        const bool sameContent = it != materialArena.committed.constEnd() && it.value() == bytes;
+        if (!RhineRender::materialWriteRequired(materialArenaMap != nullptr, sameContent)) {
             return;
         }
         if (materialArenaMap) {
@@ -2270,6 +2271,9 @@ class Renderer {
             }
             planMaterialArena(active);
         }
+        // E03：容量规划必须早于整块映射。arena 在映射中途换 buffer 会让写入落到已退休的对象。
+        // 映射失败就整帧改走 updateDynamicBuffer（此时还没有任何写入，不存在半帧两种路径）。
+        beginMaterialArenaWrite();
         // 这两项只与当前曲目有关，和具体 draw 无关：循环外算一次。
         const auto selectedKey = musicItem["key"].toString("empty");
         const auto currentCover = covers.value(selectedKey, placeholderCover);
@@ -2378,6 +2382,7 @@ class Renderer {
                 result.last().poolKey = QByteArray("d") + QByteArray::number(d["id"].toInt());
             }
         }
+        endMaterialArenaWrite();
         return result;
     }
     QHash<QByteArray, BufferState> batchInstances;
@@ -2444,13 +2449,15 @@ class Renderer {
         return result;
     }
     /**
-     * 把本帧最终列表里的实例字节搬进池。
+     * E03：把本帧**两个**最终列表的实例字节一次性搬进池。
      *
-     * 只在内容或落点变化时上传：内容相同但偏移变了也必须重写，否则"顺序变了、单块没变"
-     * 的帧会让 draw 读到上一位的数据。池建不出来时退回逐 draw buffer，不留空绑定。
+     * 旧实现按列表分别调用：第二次调用用"本次 total"而不是"cursor + total"规划容量，
+     * 可能写越界；两次还各自替换 mirror，另一个列表的上一帧镜像直接丢掉，于是交替重传。
+     * 现在先统一规划（含 4 字节对齐）、一次扩容，再一起分配与上传；只有整池失败才回落
+     * 逐 draw buffer（回落是整帧一致的决定，不会半池半单独）。
      */
-    void poolInstances(QList<Draw> &draws) {
-        if (!instancePoolEnabled || draws.isEmpty()) {
+    void poolInstances(QList<Draw> &opaque, QList<Draw> &transparent) {
+        if (!instancePoolEnabled) {
             return;
         }
         struct Slice {
@@ -2459,44 +2466,70 @@ class Renderer {
             QByteArray key;
         };
         QList<Slice> slices;
-        quint64 total = 0;
-        for (auto &draw : draws) {
-            if (draw.poolKey.isEmpty()) {
-                continue;
-            }
-            BufferState *state = nullptr;
-            if (draw.poolKey.startsWith('b')) {
-                const auto it = batchInstances.find(draw.poolKey);
-                if (it != batchInstances.end()) {
-                    state = &it.value();
+        quint64 planned = 0;
+        const auto collect = [&](QList<Draw> &draws) {
+            for (auto &draw : draws) {
+                if (draw.poolKey.isEmpty()) {
+                    continue;
                 }
-            } else {
-                const auto it = instances.find(draw.data["id"].toInt());
-                if (it != instances.end()) {
-                    state = &it.value();
+                BufferState *state = nullptr;
+                if (draw.poolKey.startsWith('b')) {
+                    const auto it = batchInstances.find(draw.poolKey);
+                    if (it != batchInstances.end()) {
+                        state = &it.value();
+                    }
+                } else {
+                    const auto it = instances.find(draw.data["id"].toInt());
+                    if (it != instances.end()) {
+                        state = &it.value();
+                    }
                 }
+                if (!state || state->bytes.isEmpty()) {
+                    continue;
+                }
+                slices.append({&draw, state, draw.poolKey});
+                planned = RhineRender::poolSliceEnd(planned, quint64(state->bytes.size()));
             }
-            if (!state || state->bytes.isEmpty()) {
-                continue;
-            }
-            slices.append({&draw, state, draw.poolKey});
-            total += quint64(state->bytes.size());
-        }
+        };
+        collect(opaque);
+        collect(transparent);
         if (slices.isEmpty()) {
+            instancePool.cursor = 0;
             return;
         }
-        if (!ensureInstancePool(total)) {
+        if (!ensureInstancePool(planned)) {
             for (auto &slice : slices) {
                 slice.draw->instances = dynamicBuffer(*slice.state, slice.state->bytes, QRhiBuffer::VertexBuffer);
                 slice.draw->instanceOffset = 0;
             }
+            instancePool.cursor = 0;
             return;
         }
-        quint64 cursor = instancePool.cursor;
-        QHash<QByteArray, InstancePoolMirror> next;
-        for (auto &slice : slices) {
+        // 规划与实际分配用同一套对齐公式；万一仍然放不下（容量在中间被拒），整帧回退。
+        QList<quint64> offsets;
+        offsets.reserve(slices.size());
+        quint64 cursor = 0;
+        bool fits = true;
+        for (const auto &slice : slices) {
             const quint64 offset = (cursor + 3) / 4 * 4;
+            fits &= RhineRender::poolSliceFits(offset, quint64(slice.state->bytes.size()),
+                                               instancePool.capacity);
+            offsets.append(offset);
             cursor = offset + quint64(slice.state->bytes.size());
+        }
+        if (!fits) {
+            for (auto &slice : slices) {
+                slice.draw->instances = dynamicBuffer(*slice.state, slice.state->bytes, QRhiBuffer::VertexBuffer);
+                slice.draw->instanceOffset = 0;
+            }
+            instancePool.cursor = 0;
+            return;
+        }
+        QHash<QByteArray, InstancePoolMirror> next;
+        next.reserve(slices.size());
+        for (int i = 0; i < slices.size(); ++i) {
+            auto &slice = slices[i];
+            const quint64 offset = offsets[i];
             const auto previous = instancePool.mirror.constFind(slice.key);
             const bool same = previous != instancePool.mirror.constEnd() && previous->bytes == slice.state->bytes;
             const quint64 previousOffset = previous != instancePool.mirror.constEnd() ? previous->offset : ~quint64(0);
@@ -2903,11 +2936,9 @@ class Renderer {
         const int dbgParts = int(draws.size());
         const int dbgReturning = int(frame["returningMusicKeys"].toArray().size());
 #endif
-        // D03：直写映射必须在任何材质写入之前开始，并在录制任何 pass 之前结束。
-        beginMaterialArenaWrite();
-        // 保留可见与归位唱片资源，复用材质绑定和实例缓冲。
+        // E03：直写映射的生命周期收进 prepare()——容量规划→开始映射→写满→收尾，
+        // 不再由调用方在 prepare 外面包一层（那层包在 ensureMaterialArena 之前）。
         auto data = prepare(draws, mode == "detail" || mode == "boot");
-        endMaterialArenaWrite();
 #ifdef Q_OS_LINUX
         const double dbgListMs = double(dbgPre.nsecsElapsed()) / 1e6;
         int dbgInstances = 0;
@@ -3011,10 +3042,8 @@ class Renderer {
                 ++it;
             }
         }
-        // D03：两个列表的实例字节统一搬进池；游标每帧归零，偏移不与上一帧复用。
-        instancePool.cursor = 0;
-        poolInstances(opaque);
-        poolInstances(transparent);
+        // E03：两个列表一起规划、一次扩容、一次提交镜像；游标每帧归零，偏移不与上一帧复用。
+        poolInstances(opaque, transparent);
 #ifdef Q_OS_LINUX
         const QRhiBuffer *arenaBuffer = nullptr;
 #endif

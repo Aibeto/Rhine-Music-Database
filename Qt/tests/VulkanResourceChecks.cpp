@@ -239,6 +239,54 @@ bool materialSlotPlanning()
     return ok;
 }
 
+bool directWriteAndPoolPlanning()
+{
+    bool ok = true;
+    // 直写：内容与上一帧相同也必须写（否则本帧原生副本里留的是别的帧的槽位值）。
+    ok &= check(RhineRender::materialWriteRequired(true, true),
+                QStringLiteral("直写时内容相同也必须写"), QStringLiteral("true"),
+                QStringLiteral("false"));
+    ok &= check(!RhineRender::materialWriteRequired(false, true),
+                QStringLiteral("batch 路径内容相同可以跳过"), QStringLiteral("false"),
+                QStringLiteral("true"));
+    ok &= check(RhineRender::materialWriteRequired(false, false),
+                QStringLiteral("batch 路径内容变了必须写"), QStringLiteral("true"),
+                QStringLiteral("false"));
+
+    // 两段列表统一规划：4 字节对齐，累计游标。
+    quint64 cursor = 0;
+    cursor = RhineRender::poolSliceEnd(cursor, 100);
+    ok &= check(cursor == 100, QStringLiteral("首段按对齐落到 100"), QStringLiteral("100"),
+                number(cursor));
+    cursor = RhineRender::poolSliceEnd(cursor, 101);
+    ok &= check(cursor == 201, QStringLiteral("第二段起点已对齐，末尾不额外 padding"),
+                QStringLiteral("201"), number(cursor));
+    cursor = RhineRender::poolSliceEnd(cursor, 0);
+    ok &= check(cursor == 204, QStringLiteral("空切片只把游标推到下一个对齐点"), QStringLiteral("204"),
+                number(cursor));
+
+    // 只有透明列表时也要按同一套公式规划：起点对齐，长度原样累计。
+    const quint64 transparentOnly = RhineRender::poolSliceEnd(0, 7);
+    ok &= check(transparentOnly == 7, QStringLiteral("只有透明列表时 7 字节不补 padding"),
+                QStringLiteral("7"), number(transparentOnly));
+    ok &= check(RhineRender::poolSliceEnd(7, 4) == 12,
+                QStringLiteral("起点要按 4 字节对齐（7→8）再加长度"), QStringLiteral("12"),
+                number(RhineRender::poolSliceEnd(7, 4)));
+
+    // 切片必须落在容量内；越界要拒绝而不是截断。
+    ok &= check(RhineRender::poolSliceFits(200, 4, 204), QStringLiteral("贴住末尾可以"),
+                QStringLiteral("true"), QStringLiteral("false"));
+    ok &= check(!RhineRender::poolSliceFits(201, 4, 204),
+                QStringLiteral("越过末尾必须拒绝"), QStringLiteral("false"), QStringLiteral("true"));
+    ok &= check(!RhineRender::poolSliceFits(0, 205, 204),
+                QStringLiteral("单切片超过容量必须拒绝"), QStringLiteral("false"),
+                QStringLiteral("true"));
+    ok &= check(!RhineRender::poolSliceFits(0xfffffffffffffff0ull, 0x40, 0xffffffffffffffffull),
+                QStringLiteral("offset+bytes 溢出必须拒绝"), QStringLiteral("false"),
+                QStringLiteral("true"));
+    return ok;
+}
+
 bool configLine()
 {
     bool ok = true;
@@ -287,6 +335,7 @@ int main()
     ok &= depthConsumers();
     ok &= directWriteCoverage();
     ok &= materialSlotPlanning();
+    ok &= directWriteAndPoolPlanning();
     ok &= configLine();
     std::printf("Vulkan 资源策略: %d 项检查，%d 项失败\n", g_checks, g_failures);
     return ok && g_failures == 0 ? 0 : 1;
