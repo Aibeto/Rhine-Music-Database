@@ -59,11 +59,14 @@
 
 ## D05：Qt Vulkan 后端专项，只有 capture 命中才做
 
+实施结论：**暂缓，证据不足**。本轮没有拿到用户侧的 Vulkan capture（帧分析器／验证层记录都没有），而应用侧账本显示纹理上传只发生在冷加载与准入换绑时（静止段 5.33 MiB 全程一次量级），持续滚动阶段的上传与 barrier 都不构成可观测长帧来源；按计划不为了完成清单给 Qt 打补丁。D01 的 `VulkanResourceWindow` 已能区分“上传/绑定/绘制”三类计数，后续拿到 capture 再按门槛重开。
+
+
 独立 Qt 源码 worktree／补丁，不直接改系统安装；记录与当前 Qt 6.12 二进制对应的 revision 和构建参数。网页分支源码可变，不等于本机二进制。[S2](#ref-s2)
 
 - [ ] **staging 池实验门槛：** 仅当纹理上传期间的 vmaCreateBuffer／destroy、map／flush 成为明确长帧来源时，试按已完成提交安全复用的 staging slab／ring。Qt 当前上传路径有“no reuse of staging, this is intentional”注释，先查清原因、回收／flush／offset 对齐和所有 subresource 拷贝；不能仅按应用 frameIndex 重用，也不能把逻辑取消当 GPU 已完成。
 - [ ] **barrier 实验门槛：** 仅当队列捕获证明过宽 stage／access 或多余 layout 往返阻断依赖以外的重叠，才在完整资源追踪内收窄／合并。保留 RAW/WAR/WAW、host flush、attachment→sample、transfer→sample 依赖，验证多个纹理／帧槽／pass；不在应用层盲插 native barrier 绕开 QRhi。
-- [ ] 未命中门槛，交回“暂缓，证据不足”即完成本项，不为了完成清单给 Qt 打补丁。纹理准入后上传已经很小，staging 可能只改善冷加载长帧，并非持续滚动。
+- [x] 未命中门槛，交回“暂缓，证据不足”即完成本项，不为了完成清单给 Qt 打补丁。纹理准入后上传已经很小，staging 可能只改善冷加载长帧，并非持续滚动。
 
 ## D06：测试、独立开关与交付
 
