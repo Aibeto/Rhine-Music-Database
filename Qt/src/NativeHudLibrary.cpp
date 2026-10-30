@@ -5,32 +5,35 @@
 #include <algorithm>
 
 void NativeHud::libraryPanel(double x, double y, double width) {
+    if (modal == "search") {
+        searchPanel(x, y, width);
+        return;
+    }
+    savedPanel(x, y, width);
+}
+
+/** 个人资料库沿用原有分页列表；音乐检索由独立的 searchPanel 绘制。 */
+void NativeHud::savedPanel(double x, double y, double width) {
     auto &music = *m_music;
-    if (modal == "saved" && music.editable()) {
+    if (music.editable()) {
         button("＋ 创建歌单", x + width - 220, y + 147, 167, 33, "music:create-playlist", 12);
     }
-    if (modal == "saved" && music.provider == "qq") {
+    if (music.provider == "qq") {
         button("刷新个人库", x + width - 340, y + 147, 110, 33, "music:refresh-personal", 12);
     }
     rule(x + 53, y + 248, width - 106);
-    QStringList filters{"歌曲", "专辑", music.isLocal() ? "文件夹" : "歌单", "歌手"};
-    if (modal == "saved") {
-        filters = music.columns.mid(1, music.provider == "kugou" ? 3 : 4);
-    }
-    const auto selected = modal == "saved"
-                              ? musicCollection - 1
-                              : QStringList{"song", "album", "playlist", "artist"}.indexOf(music.searchKind);
+    const QStringList filters = music.columns.mid(1, music.provider == "kugou" ? 3 : 4);
+    const auto selected = musicCollection - 1;
     for (int index = 0; index < filters.size(); ++index) {
         const auto spacing = std::min(145.0, (width - 106) / 8);
         const auto xx = x + 53 + index * spacing;
-        const auto action = modal == "saved" ? "music:collection:" + QString::number(index + 1)
-                                             : "music:kind:" + QString::number(index);
+        const auto action = "music:collection:" + QString::number(index + 1);
         button(filters.at(index), xx, y + 266, spacing - 5, 34, action, 12);
         if (index == selected) {
             rule(xx, y + 303, std::min(110.0, (width - 106) / 8 - 10), 1);
         }
     }
-    const auto lane = modal == "saved" ? musicCollection : 0;
+    const auto lane = musicCollection;
     const bool songs =
         std::any_of(music.lists[lane].begin(), music.lists[lane].end(),
                     [](const QJsonValue &value) { return value.toObject()["kind"] == "song"; });

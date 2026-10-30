@@ -196,6 +196,69 @@ Item {
                 }
             }
         }
+        // 检索结果可滚动
+        MouseArea {
+            id: searchScrollArea
+            visible: rhine.state.modal === "search"
+            enabled: visible
+            x: rhine.state.searchListX || 0
+            y: (rhine.state.searchListY || 0) + (rhine.state.modalOffset || 0)
+            width: rhine.state.searchListWidth || 0
+            height: rhine.state.searchListHeight || 0
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            property real dragOriginY: 0
+            property real lastDragY: 0
+            property bool dragged: false
+            onEntered: rhine.pointer("pointerleave", 0, 0)
+            onPressed: {
+                if (rhine.state.closing) {
+                    return;
+                }
+                dragOriginY = mouse.y;
+                lastDragY = mouse.y;
+                dragged = false;
+            }
+            onPositionChanged: function (mouse) {
+                if (!pressed || rhine.state.closing) {
+                    return;
+                }
+                if (Math.abs(mouse.y - dragOriginY) > 6) {
+                    dragged = true;
+                }
+                if (dragged) {
+                    // 拖拽距离先换算成窗口像素，再沿用手势层的滚轮换算。
+                    var p = mapToItem(inputLayer, mouse.x, mouse.y);
+                    var previous = mapToItem(inputLayer, mouse.x, lastDragY);
+                    var delta = p.y - previous.y;
+                    if (delta !== 0) {
+                        rhine.wheelInput(p.x / overlay.stageScale, p.y / overlay.stageScale, delta, 0);
+                        lastDragY = mouse.y;
+                    }
+                }
+            }
+            onReleased: {
+                if (rhine.state.closing || dragged) {
+                    return;
+                }
+                var px = (rhine.state.searchListX || 0) + mouse.x;
+                var py = (rhine.state.searchListY || 0) + mouse.y;
+                for (var index = 0; index < rhine.hits.length; ++index) {
+                    var hit = rhine.hits[index];
+                    var inside = px >= hit.x && px <= hit.x + hit.width && py >= hit.y && py <= hit.y + hit.height;
+                    var scrollable = hit.action.indexOf("music:result:") === 0 || hit.action.indexOf("music:expand:") === 0;
+                    if (inside && scrollable) {
+                        rhine.action(hit.action);
+                        break;
+                    }
+                }
+            }
+            onWheel: function (wheel) {
+                var p = mapToItem(inputLayer, wheel.x, wheel.y);
+                rhine.wheelInput(p.x / overlay.stageScale, p.y / overlay.stageScale, wheel.pixelDelta.y, wheel.angleDelta.y);
+                wheel.accepted = true;
+            }
+        }
     }
     IOSInput {
         stage: overlay
@@ -362,13 +425,14 @@ Item {
         width: searchInput.width
         height: searchInput.height
         color: rhine.state.dark ? "#ffffff" : "#141613"
-        opacity: (rhine.state.modalOpacity || 0) * 0.045
+        // 检索条背景由原生面板绘制；个人库仍使用原来的轻遮罩。
+        opacity: rhine.state.modal === "search" ? 0 : (rhine.state.modalOpacity || 0) * 0.045
     }
     TextInput {
         id: searchInput
         objectName: "musicSearchInput"
         verticalAlignment: TextInput.AlignVCenter
-        leftPadding: 14 * overlay.stageScale
+        leftPadding: (rhine.state.modal === "search" ? 18 : 14) * overlay.stageScale
         rightPadding: 14 * overlay.stageScale
         renderType: Text.NativeRendering
         visible: rhine.state.modal === "search" || rhine.state.modal === "saved"
@@ -379,7 +443,7 @@ Item {
         height: 54 * overlay.stageScale
         font.family: rhineFontFamily
         font.pixelSize: 22 * overlay.stageScale
-        color: rhine.state.dark ? "#ebebeb" : "#141613"
+        color: rhine.state.modal === "search" ? (rhine.state.dark ? "#e9e7da" : "#222a25") : (rhine.state.dark ? "#ebebeb" : "#141613")
         opacity: rhine.state.modalOpacity || 0
         clip: true
         cursorVisible: activeFocus && !rhine.performance.idle
@@ -405,7 +469,7 @@ Item {
             font: searchInput.font
             leftPadding: searchInput.leftPadding
             verticalAlignment: Text.AlignVCenter
-            color: "#777777"
+            color: rhine.state.modal === "search" ? (rhine.state.dark ? "#a2aa9d" : "#626b60") : "#777777"
         }
     }
     // 两条呈现路径共用真实宿主的窗口按钮、拖动与边缘缩放。

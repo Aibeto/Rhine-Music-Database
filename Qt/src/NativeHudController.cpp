@@ -51,6 +51,7 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
         m_music->status = "发现新版本 " + m_host->updater.latestVersion() + "，可在设置中前往发布页面更新";
     });
     connect(music, &MusicLibrary::invalidated, this, &NativeHud::finishPage);
+    connect(music, &MusicLibrary::invalidated, this, &NativeHud::ensureSearchFilled);
     connect(music, &MusicLibrary::invalidated, this,
             [this] { QTimer::singleShot(0, this, &NativeHud::continueSort); });
 }
@@ -77,6 +78,7 @@ void NativeHud::openModal(QString kind) {
     motion.set(true, lastTime, reduced);
     query.clear();
     listOffset = 0;
+    resetSearchView();
     settingsScroll = 0;
     discoverScroll = 0;
     activeGroup.clear();
@@ -110,6 +112,7 @@ void NativeHud::closeModal() {
 void NativeHud::setQuery(QString value) {
     query = value;
     listOffset = 0;
+    resetSearchView();
     activeGroup.clear();
     const auto token = ++m_searchGeneration;
     if (modal == "search") {
@@ -448,6 +451,7 @@ void NativeHud::action(QString value) {
             activeGroup.clear();
             query.clear();
             listOffset = 0;
+            resetSearchView();
             trackOffset = 0;
             music.switchProvider(provider);
         }

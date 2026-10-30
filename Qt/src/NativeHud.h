@@ -81,6 +81,12 @@ class NativeHud : public QObject {
     QString themeMode;
     int listOffset = 0;
     int musicCollection = 1;
+    // 检索结果可滚动
+    static constexpr double SearchListTop = 328;
+    static constexpr double SearchListBottom = 758;
+    static constexpr double SearchRowHeight = 72;
+    double searchScroll = 0;
+    int searchRowCount = 0;
     // 六行同专辑
     static constexpr int AlbumTrackRowCount = 6;
     static constexpr double AlbumTrackTop = 630;
@@ -153,6 +159,8 @@ class NativeHud : public QObject {
     MusicLibrary *m_music;
     HudSceneActions m_scene;
     quint64 m_searchGeneration = 0;
+    // 首屏不足一屏时自动补页，记录上次自动补页后的条数，避免空页循环请求。
+    int m_searchAutoFillSize = -1;
     std::optional<Page> m_page;
     QString m_trackListScope;
     int m_trackListTarget = -1;
@@ -241,6 +249,19 @@ class NativeHud : public QObject {
     void modalDraw(double width);
     void loginPanel(double x, double y, double width);
     void libraryPanel(double x, double y, double width);
+    void savedPanel(double x, double y, double width);
+    // 检索面板按工具条、结果列表和页脚拆分，外框几何仍由弹窗宿主决定。
+    void searchPanel(double x, double y, double width);
+    void searchToolbar(double x, double y, double width);
+    void searchResultList(double x, double y, double width);
+    void searchResultRow(const Row &entry, double x, double y, double width, const QString &query);
+    void searchTitle(const QString &title, const QString &query, double x, double y, double size,
+                     double width);
+    void searchFooter(double x, double y, double width);
+    void clipHits(int first, const QRectF &area);
+    double searchScrollMaximum() const;
+    void resetSearchView();
+    void ensureSearchFilled();
     void discoverPanel(double x, double y, double width);
     void localPanel(double x, double y, double width);
     void playerBar(double x, double y, double width);

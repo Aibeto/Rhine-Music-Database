@@ -156,6 +156,7 @@ set(RHINE_APP_SOURCES
     Qt/src/PlayerBar.h
     Qt/src/PlayerBar.cpp
     Qt/src/NativeHudLibrary.cpp
+    Qt/src/NativeHudSearch.cpp
     Qt/src/NativeHudDiscover.cpp
     Qt/src/DiscoverMusicCard.cpp
     Qt/src/DiscoverArtwork.cpp
