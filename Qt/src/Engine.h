@@ -89,14 +89,12 @@ class Engine : public QObject {
         bool admitted = true;
     };
     using MusicTextures = QHash<QString, MusicTexture>;
-    MusicTextures musicTextures() const {
-        auto textures = m_musicTextures;
-        // 准入状态属于 GUI 线程；synchronize() 读这里时 GUI 线程被 QQuickRhiItem 阻塞，
-        // 与 m_musicTextures 本体的线程假设完全一致，不需要额外加锁。
-        for (auto it = textures.begin(); it != textures.end(); ++it) {
-            it->admitted = m_admission.isAdmitted(it.key());
-        }
-        return textures;
+    /**
+     * C03：准入状态在 step() 里一次性写进快照，synchronize() 只做一次隐式共享的拷贝，
+     * 不再逐项重写 admitted（那样每帧都要为每个条目 detach 一遍 QHash 节点）。
+     */
+    const MusicTextures &musicTextures() const {
+        return m_musicTextureSnapshot;
     }
     /// 探针/诊断用：0 表示准入延迟已关闭。
     int textureAdmissionDelayMs() const {
@@ -194,6 +192,8 @@ class Engine : public QObject {
   private:
     void notifySceneRenderers(bool visualChanged);
     quint64 m_geometryRevision = 0;
+    /// C03：准入状态随 musicTextures 一起在 GUI 线程生成，渲染线程只读这份快照。
+    MusicTextures m_musicTextureSnapshot;
     /// C01：按来源分开计数，避免把"输入唤醒"和"Host 失效唤醒"混成一个数字。
     quint64 m_wakesInput = 0, m_wakesHost = 0, m_wakesMedia = 0, m_wakesOther = 0;
     /// C01：requestSceneContent 与 stableFrames 复位的次数／原因。

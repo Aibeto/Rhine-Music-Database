@@ -5,6 +5,7 @@
 #endif
 #include "render/CoverPrepBudget.h"
 #include "render/MaterialSlotKey.h"
+#include "render/SceneSyncCache.h"
 #include "render/MotionPass.h"
 #include "render/RenderPolicy.h"
 #include "render/ScenePostProcess.h"
@@ -2470,10 +2471,9 @@ class ItemRenderer : public QQuickRhiItemRenderer {
     Engine::MusicTextures musicTextures;
     QImage cover;
     QString root;
-    /// C03：上一次同步用的内容版本。只有内容版本真的前进时才重新取帧／缓冲区／纹理，
-    /// 免得为了 HUD 变化重画一层时把同一份场景快照再拷一遍。
-    quint64 cachedRevision = 0;
-    bool cachedLighting = false;
+    /// C03：上一次同步用的签名。签名不变就复用上一份快照，免得为了 HUD 变化重画一层时
+    /// 把同一份场景快照再拷一遍、再 detach 两次。
+    RhineRender::SceneSyncSignature cachedSync;
 
   public:
     ~ItemRenderer() override {
@@ -2499,18 +2499,18 @@ class ItemRenderer : public QQuickRhiItemRenderer {
                 capabilityEngine = engine;
             }
 #endif
-            const quint64 revision = engine->sceneRevision();
-            const bool lighting = scene->lightingEnabled();
-            if (revision != cachedRevision || lighting != cachedLighting) {
+            const RhineRender::SceneSyncSignature signature{engine->sceneRevision(),
+                                                            engine->geometryRevision(),
+                                                            scene->lightingEnabled()};
+            if (!RhineRender::sceneSyncReusable(cachedSync, signature)) {
                 frame = engine->frame();
-                frame["opticalLightEnabled"] = lighting;
-                frame["geometryRevision"] = double(engine->geometryRevision());
+                frame["opticalLightEnabled"] = signature.lighting;
+                frame["geometryRevision"] = double(signature.geometryRevision);
                 buffers = engine->drawBuffers();
                 item = engine->current();
                 cover = engine->cover();
                 root = engine->root();
-                cachedRevision = revision;
-                cachedLighting = lighting;
+                cachedSync = signature;
             }
             musicTextures = engine->musicTextures();
             // C04：这一份快照已经被取走。只写原子序号，队列回调在主线程恢复节拍。

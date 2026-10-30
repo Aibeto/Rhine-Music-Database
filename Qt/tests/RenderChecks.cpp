@@ -5,6 +5,7 @@
 // 都能离线跑。
 #include "render/MaterialSlotKey.h"
 #include "render/RenderPolicy.h"
+#include "render/SceneSyncCache.h"
 
 #include <QString>
 #include <cstdio>
@@ -227,6 +228,30 @@ bool materialSlotKeys()
     return ok;
 }
 
+// C03：同步阶段要不要重新取场景快照。少判一项就会在某一帧画出上一帧的内容（开灯后仍是
+// 关灯的烘焙、装配体重算后仍是旧几何），而这类画面滞后又只在特定操作顺序下出现。
+bool sceneSyncCache()
+{
+    bool ok = true;
+    const RhineRender::SceneSyncSignature base{42, 7, false};
+    ok &= check(RhineRender::sceneSyncReusable(base, base), QStringLiteral("签名完全相同 → 复用"),
+                QStringLiteral("true"), boolText(RhineRender::sceneSyncReusable(base, base)));
+    ok &= check(!RhineRender::sceneSyncReusable(base, RhineRender::SceneSyncSignature{43, 7, false}),
+                QStringLiteral("场景版本前进 → 不复用"), QStringLiteral("false"),
+                boolText(RhineRender::sceneSyncReusable(base, RhineRender::SceneSyncSignature{43, 7, false})));
+    ok &= check(!RhineRender::sceneSyncReusable(base, RhineRender::SceneSyncSignature{42, 8, false}),
+                QStringLiteral("几何版本前进 → 不复用"), QStringLiteral("false"),
+                boolText(RhineRender::sceneSyncReusable(base, RhineRender::SceneSyncSignature{42, 8, false})));
+    // 开灯/关灯会改装配体的烘焙结果，但场景版本可能没前进：光照必须单独参与判断。
+    ok &= check(!RhineRender::sceneSyncReusable(base, RhineRender::SceneSyncSignature{42, 7, true}),
+                QStringLiteral("光照开关翻转 → 不复用"), QStringLiteral("false"),
+                boolText(RhineRender::sceneSyncReusable(base, RhineRender::SceneSyncSignature{42, 7, true})));
+    ok &= check(RhineRender::SceneSyncSignature{1, 2, true} == RhineRender::SceneSyncSignature{1, 2, true},
+                QStringLiteral("相同签名相等"), QStringLiteral("true"),
+                boolText(RhineRender::SceneSyncSignature{1, 2, true} == RhineRender::SceneSyncSignature{1, 2, true}));
+    return ok;
+}
+
 } // namespace
 
 int main()
@@ -236,6 +261,7 @@ int main()
     ok &= timingStatusNames();
     ok &= motionModeTable();
     ok &= materialSlotKeys();
+    ok &= sceneSyncCache();
     // 放在最后：它会永久翻转进程级的时间戳登记标志。
     ok &= timestampRegistration();
     if (!ok) {

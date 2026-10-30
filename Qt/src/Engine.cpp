@@ -990,6 +990,14 @@ void Engine::step(double time) {
             ++it;
         }
     }
+    // C03：准入状态只在这里写一次。synchronize() 拿到的就是这份快照，不再对每个条目
+    // 重新赋值 admitted——那会让整块 QHash 每帧 detach 一遍。
+    m_musicTextureSnapshot.clear();
+    for (auto it = m_musicTextures.cbegin(); it != m_musicTextures.cend(); ++it) {
+        auto entry = it.value();
+        entry.admitted = m_admission.isAdmitted(it.key());
+        m_musicTextureSnapshot.insert(it.key(), entry);
+    }
     auto commands = object["commands"].toArray();
     if (commands != m_commands) {
         m_commands = commands;
