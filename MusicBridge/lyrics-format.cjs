@@ -91,6 +91,10 @@ function attachTranslation(lines, translation) {
     const translated = parseLrc(translation);
     // 对齐到同一来源的最近时间标签，避免按数组下标拼接导致缺行后整体错位。
     for (const line of lines) {
+        // 只有时间戳的间奏行没有可翻译的原文，不能借用相邻句子的译文。
+        if (!line.text) {
+            continue;
+        }
         let closest = null;
         let distance = 700;
         for (const candidate of translated) {
@@ -186,6 +190,8 @@ function normalizeLyrics(provider, body, metadata = {}) {
     const plainText = timed
         ? ''
         : original
+              // 网易云把作词、作曲等署名放在整行 JSON 里，不能当成歌词正文显示。
+              .replace(/^\s*\{"t":\d+,"c":.*$/gm, '')
               .replace(/^\[[a-z]+:.*\]\s*$/gim, '')
               .replace(/\[[^\]\n]+\]/g, '')
               .trim();
