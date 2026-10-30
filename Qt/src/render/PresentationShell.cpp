@@ -64,6 +64,14 @@ quint64 bindingKey(const QRhiTexture *a, const QRhiTexture *b) {
     return (quint64(quintptr(a)) * 0x9E3779B97F4A7C15ull) ^ quint64(quintptr(b));
 }
 
+/// 已排序样本取分位。呈现间隔（gapP*）与 A02 的 begin/end 分位共用同一套取整规则，
+/// 避免两处"分位"因为四舍五入/向下取整不同而对不上。
+double sortedQuantile(const QList<double> &sorted, double quantile) {
+    const int last = sorted.size() - 1;
+    const int index = std::clamp(int(std::lround(quantile * last)), 0, last);
+    return sorted.at(index);
+}
+
 } // namespace
 
 PresentationShell::PresentationShell(QQmlEngine &engine, Engine &backend, QString backendName,
@@ -571,14 +579,9 @@ void PresentationShell::refreshGapStats() {
         sorted.append(m_gapRing[size_t(index)]);
     }
     std::sort(sorted.begin(), sorted.end());
-    const auto pick = [&sorted](double quantile) {
-        const int last = sorted.size() - 1;
-        const int index = std::clamp(int(std::lround(quantile * last)), 0, last);
-        return sorted.at(index);
-    };
-    m_stats.gapP50Ms = pick(0.50);
-    m_stats.gapP95Ms = pick(0.95);
-    m_stats.gapP99Ms = pick(0.99);
+    m_stats.gapP50Ms = sortedQuantile(sorted, 0.50);
+    m_stats.gapP95Ms = sortedQuantile(sorted, 0.95);
+    m_stats.gapP99Ms = sortedQuantile(sorted, 0.99);
     m_stats.gapMaxMs = sorted.last();
     const auto over = [&sorted](double limit) {
         return int(
@@ -588,6 +591,41 @@ void PresentationShell::refreshGapStats() {
     m_stats.over50 = over(50.0);
     m_stats.over100 = over(100.0);
     m_stats.sampleCount = int(sorted.size());
+}
+
+void PresentationShell::recordWaitSample(double beginMs, double endMs) {
+    m_beginRing[size_t(m_waitCursor)] = beginMs;
+    m_endRing[size_t(m_waitCursor)] = endMs;
+    m_waitCursor = (m_waitCursor + 1) % kWaitCapacity;
+    if (m_waitFilled < kWaitCapacity) {
+        ++m_waitFilled;
+    }
+    // 120 个样本排序成本可以忽略，但仍在每帧热路径上：每 8 个样本刷一次，
+    // 面板 500ms 采一次样，约 130ms 的刷新延迟看不出来。
+    if ((m_waitSamples % 8) == 0) {
+        refreshWaitStats();
+    }
+    ++m_waitSamples;
+}
+
+void PresentationShell::refreshWaitStats() {
+    if (m_waitFilled < 2) {
+        return;
+    }
+    QList<double> beginSorted;
+    QList<double> endSorted;
+    beginSorted.reserve(m_waitFilled);
+    endSorted.reserve(m_waitFilled);
+    for (int index = 0; index < m_waitFilled; ++index) {
+        beginSorted.append(m_beginRing[size_t(index)]);
+        endSorted.append(m_endRing[size_t(index)]);
+    }
+    std::sort(beginSorted.begin(), beginSorted.end());
+    std::sort(endSorted.begin(), endSorted.end());
+    m_stats.beginP95Ms = sortedQuantile(beginSorted, 0.95);
+    m_stats.beginP99Ms = sortedQuantile(beginSorted, 0.99);
+    m_stats.endP95Ms = sortedQuantile(endSorted, 0.95);
+    m_stats.endP99Ms = sortedQuantile(endSorted, 0.99);
 }
 
 void PresentationShell::publishStats(bool interpolatedThisStep) {
@@ -616,6 +654,22 @@ void PresentationShell::publishStats(bool interpolatedThisStep) {
     m_stats.swapchainRecreates = m_presenter ? m_presenter->swapchainRecreates() : 0;
     m_stats.deviceIdleWaits = m_presenter ? m_presenter->deviceIdleWaits() : 0;
     m_stats.resizeSkips = m_presenter ? m_presenter->resizeSkips() : 0;
+    // A02：离屏提交按"实际调用"计——呈现层取后端累计数（在真正 begin 成功处 +1），
+    // QML 场景层/UI 层由 step() 对 SceneLayerHost 的两个公开计数取差分后累加。
+    // 发布值 = 自上次 publishStats 以来发生的 beginFrame/endFrame 对数：正常一帧 3 次
+    // （场景层 + UI 层 + 呈现层），空闲跳帧 0 次；失败步的计数顺延到下一次发布。
+    const quint64 backendSubmits = m_presenter ? m_presenter->offscreenSubmits() : 0;
+    // 没有后端计数器的路径（RhiPresentationBackend 默认返回 0）退回呈现层自己的
+    // 成功计数，否则会只剩 QML 的两层、凭空少掉呈现层这一次。
+    const quint64 presenterTotal = backendSubmits > 0 ? backendSubmits : m_presenterSubmits;
+    // 后端重建会让累计数归零：夹住下溢，宁可在切换那一帧低估，也不要报出一个天文数字。
+    const quint64 presenterDelta =
+        presenterTotal >= m_lastPresenterSubmits ? presenterTotal - m_lastPresenterSubmits
+                                                 : presenterTotal;
+    m_lastPresenterSubmits = presenterTotal;
+    const quint64 layerDelta = m_layerSubmits - m_lastLayerSubmits;
+    m_lastLayerSubmits = m_layerSubmits;
+    m_stats.submitsPerFrame = int(presenterDelta + layerDelta);
     ++m_stats.serial;
     RhineFg::publish(m_stats);
 }
@@ -678,11 +732,20 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
     m_probe.restart();
     m_frameProbe.restart();
     const QRhi::FrameOpResult begun = m_presenter->beginFrame(frame, &cb);
-    m_stats.beginMs = blend(m_stats.beginMs, tookMs());
+    // A02：beginMs 的语义是"帧槽等待"——beginFrame 要等上一帧的命令缓冲/围栏归还。
+    // EMA 只能看趋势，原始样本单独留在 slotWaitMs/分位环里作为证据。
+    const double beginSample = tookMs();
+    m_stats.beginMs = blend(m_stats.beginMs, beginSample);
+    // 后端（Vulkan）在自己真正调用 beginOffscreenFrame 的地方量了一份；负数表示该
+    // 后端不提供，退回呈现层的计时（Metal 等路径）。两者差的是虚函数调用开销。
+    const double backendSlotWait = m_presenter->slotWaitMs();
+    m_stats.slotWaitMs = backendSlotWait >= 0.0 ? backendSlotWait : beginSample;
     if (begun != QRhi::FrameOpSuccess) {
         m_error = QStringLiteral("beginOffscreenFrame 失败（%1）").arg(int(begun));
         return false;
     }
+    // A02：begin 成功即计一次离屏提交（与后端 offscreenSubmits() 同一判据）。
+    ++m_presenterSubmits;
 
     // FG 的算法命令必须和合成落在同一个离屏帧里：先插值、再合成、最后注入信号量，
     // 三者由同一次提交保证顺序与可见性。
@@ -693,7 +756,12 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
     m_stats.compositeMs = blend(m_stats.compositeMs, tookMs());
     m_probe.restart();
     const bool presented = m_presenter->endFrame(frame, composed);
-    m_stats.endMs = blend(m_stats.endMs, tookMs());
+    // A02：endMs 的语义是"离屏收尾"——只做提交与呈现，没有读回时不应有同步等待。
+    const double endSample = tookMs();
+    m_stats.endMs = blend(m_stats.endMs, endSample);
+    // 成对样本只记 begin/end 都走完的帧：失败的 begin 没有 end，混进分位会把
+    // "槽等待"与"提交失败前的那段等待"搅在一起。
+    recordWaitSample(m_stats.slotWaitMs, endSample);
     if (!presented) {
         m_error = m_presenter->lastError();
         return false;
@@ -896,8 +964,14 @@ void PresentationShell::step() {
 
     m_probe.restart();
     const auto previousSceneFrames = m_host->sceneRenderCount();
+    const auto previousOverlayFrames = m_host->overlayRenderCount();
     const bool sceneRendered = m_host->renderFrame();
     m_stats.sceneMs = blend(m_stats.sceneMs, tookMs());
+    // A02：QML 场景层/UI 层每次真正渲染都是一次 QQuickRenderControl 的 beginFrame/endFrame。
+    // SceneLayerHost 没有提交计数接口（不在本次改动范围），只能对两个公开计数取差分；
+    // 立即累加，后面的早退路径（渲染失败/呈现失败）也能把它们算进去。
+    m_layerSubmits += (m_host->sceneRenderCount() - previousSceneFrames) +
+                      (m_host->overlayRenderCount() - previousOverlayFrames);
     if (!sceneRendered) {
         qWarning().noquote() << "FG: 离屏渲染失败" << m_host->lastError();
         scheduleNext();
@@ -962,14 +1036,27 @@ void PresentationShell::reportStats() {
         << QString::number(m_stats.dispatchMs, 'f', 2) << "合成"
         << QString::number(m_stats.compositeMs, 'f', 2) << "整帧"
         << QString::number(m_stats.frameMs, 'f', 2) << "复用"
-        << QString::number(m_stats.imageReuseMs, 'f', 1) << "起始"
-        << QString::number(m_stats.beginMs, 'f', 2)
-        << "收尾" << QString::number(m_stats.endMs, 'f', 2) << "空档"
+        << QString::number(m_stats.imageReuseMs, 'f', 1)
+        // A02 语义写死：begin = 帧槽等待（等上一帧提交的槽），end = 离屏收尾。
+        << "帧槽" << QString::number(m_stats.beginMs, 'f', 2)
+        << "离屏收尾" << QString::number(m_stats.endMs, 'f', 2) << "空档"
         << QString::number(m_stats.idleGapMs, 'f', 2) << "跳过" << m_skippedSteps
         // 重建 / 设备等待 / 尺寸去重：A10 的现场证据，一行看得出有没有白等 GPU。
         << "重建" << m_stats.swapchainRecreates << "等待" << m_stats.deviceIdleWaits << "尺寸跳过"
         << m_stats.resizeSkips
         << (m_frameClock.isValid() ? m_frameClock.restart() / double(m_presentedFrames - m_statsBase) : 0.0);
+    // A02：把两个"离屏边界"的语义写成一行，避免以后又把帧槽等待和收尾等待混成一个数。
+    qWarning().noquote()
+        << "FG 提交/等待: 提交" << m_stats.submitsPerFrame
+        << "次/帧（QML 场景层 + UI 层 + 呈现层，各一次 beginFrame/endFrame）" << "帧槽等待"
+        << QString::number(m_stats.slotWaitMs, 'f', 2)
+        << "ms（beginFrame 等上一帧提交的槽/围栏归还；原始样本，P95"
+        << QString::number(m_stats.beginP95Ms, 'f', 2) << "P99"
+        << QString::number(m_stats.beginP99Ms, 'f', 2) << "）" << "离屏收尾"
+        << QString::number(m_stats.endMs, 'f', 2)
+        << "ms（endFrame 只提交与呈现，无读回时不应同步等待；EMA，P95"
+        << QString::number(m_stats.endP95Ms, 'f', 2) << "P99"
+        << QString::number(m_stats.endP99Ms, 'f', 2) << "）";
     m_statsBase = m_presentedFrames;
 }
 

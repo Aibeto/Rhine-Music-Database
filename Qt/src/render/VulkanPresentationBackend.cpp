@@ -135,7 +135,18 @@ class VulkanPresentationBackend final : public PresentationBackend {
         }
     }
     QRhi::FrameOpResult beginFrame(const Frame &, QRhiCommandBuffer **commands) override {
-        return m_rhi->beginOffscreenFrame(commands);
+        // A02：帧槽等待只在这里量。beginOffscreenFrame 内部要等上一帧的命令缓冲/围栏
+        // 归还，以前这段时间被算进 beginMs 却没人说清它在等什么。计时只读时钟，
+        // 不插入额外同步，也不改变提交顺序或队列/信号量逻辑。
+        QElapsedTimer slotTimer;
+        slotTimer.start();
+        const QRhi::FrameOpResult result = m_rhi->beginOffscreenFrame(commands);
+        m_lastSlotWaitMs = double(slotTimer.nsecsElapsed()) / 1e6;
+        if (result == QRhi::FrameOpSuccess) {
+            // 只统计真正进入的离屏帧；失败时调用方不会走 endFrame，不该记成一次提交。
+            ++m_offscreenSubmitCount;
+        }
+        return result;
     }
     QRhiRenderTarget *target(const Frame &frame) const override {
         if (frame.imageIndex >= m_swapTargets.size()) {
@@ -248,6 +259,12 @@ class VulkanPresentationBackend final : public PresentationBackend {
     }
     quint64 resizeSkips() const override {
         return m_resizeSkips;
+    }
+    quint64 offscreenSubmits() const override {
+        return m_offscreenSubmitCount;
+    }
+    double slotWaitMs() const override {
+        return m_lastSlotWaitMs;
     }
     QString backendName() const override {
         return QStringLiteral("Vulkan");
@@ -470,6 +487,10 @@ class VulkanPresentationBackend final : public PresentationBackend {
     quint64 m_swapchainRecreates = 0;
     quint64 m_deviceIdleWaits = 0;
     quint64 m_resizeSkips = 0;
+    // A02：只做观测。m_offscreenSubmitCount 在 beginFrame 成功后 +1；m_lastSlotWaitMs 是
+    // 最近一次 beginFrame 的原始耗时（帧槽等待），两者都不参与任何提交/同步决策。
+    quint64 m_offscreenSubmitCount = 0;
+    double m_lastSlotWaitMs = 0.0;
     QString m_error;
 };
 } // namespace

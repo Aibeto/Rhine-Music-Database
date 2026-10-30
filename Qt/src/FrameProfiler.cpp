@@ -67,11 +67,19 @@ FrameProfiler::FrameProfiler(Engine *engine, const QString &path, QObject *paren
     if (!path.isEmpty()) {
         if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
             // 新列一律追加在末尾：旧分析脚本按列号读前 14 列，插在中间会让历史数据整体错位。
+            // 新增列口径（A02/A11）：fg_* 取呈现层最近一次 publish 的值，ledger_* 来自
+            // Engine::performance() 的异步快照——两者都不保证与同一行的 render_frames 属于
+            // 同一帧；ledger_*_peak 是最近 240 个渲染帧的**滚动**峰值（不是 lifetime 峰值）。
             stream << "timestamp_ms,step_cpu_ms,scene_native_ms,scene_metadata_ms,scene_buffers_ms,"
                       "latest_present_gap_ms,latest_sync_cpu_ms,latest_submit_cpu_ms,presents,draws,"
                       "returning_cards,culled_cards,shadow_only_cards,latest_gpu_draw_calls,"
                       "gpu_timing_status,render_frames,fg_frame_id,fg_frame_ms,fg_swapchain_recreates,"
-                      "fg_device_idle_waits,fg_resize_skips\n";
+                      "fg_device_idle_waits,fg_resize_skips,"
+                      "fg_submits_per_frame,fg_slot_wait_ms,fg_begin_p95_ms,fg_begin_p99_ms,"
+                      "fg_end_p95_ms,fg_end_p99_ms,"
+                      "ledger_resources_peak,ledger_resources_peak_frame,ledger_texture_bytes_peak,"
+                      "ledger_texture_bytes_peak_frame,ledger_frame_bindings,ledger_frame_cover_uploads,"
+                      "ledger_cover_uploads_per_frame,ledger_cover_retransmit_per_kframe\n";
         } else {
             qWarning() << "Cannot open frame profile:" << file.errorString();
         }
@@ -188,7 +196,19 @@ void FrameProfiler::collectStep() {
            << performance.value("gpuTimingStatus").toString() << ','
            << performance.value("renderFrames").toULongLong() << ',' << fg.frameId << ','
            << fg.frameMs << ',' << fg.swapchainRecreates << ',' << fg.deviceIdleWaits << ','
-           << fg.resizeSkips << '\n';
+           << fg.resizeSkips << ','
+           // A02：提交次数与两个离屏边界的等待（begin=帧槽等待，end=离屏收尾）。
+           << fg.submitsPerFrame << ',' << fg.slotWaitMs << ',' << fg.beginP95Ms << ','
+           << fg.beginP99Ms << ',' << fg.endP95Ms << ',' << fg.endP99Ms << ','
+           // A11：整帧资源账本（峰值是滚动 240 帧，帧号对得上 render_frames）。
+           << performance.value("gpuResourcesPeak").toULongLong() << ','
+           << performance.value("gpuResourcesPeakFrame").toULongLong() << ','
+           << performance.value("gpuTextureBytesPeak").toULongLong() << ','
+           << performance.value("gpuTextureBytesPeakFrame").toULongLong() << ','
+           << performance.value("frameBindings").toULongLong() << ','
+           << performance.value("frameCoverUploads").toULongLong() << ','
+           << performance.value("coverUploadsPerFrame").toDouble() << ','
+           << performance.value("coverRetransmitPerKFrame").toDouble() << '\n';
 }
 
 FrameProfiler::~FrameProfiler() {
@@ -298,7 +318,12 @@ void FrameProfiler::sample() {
     m_metrics.clear();
     for (const auto *key : {"idle", "sceneSleeping", "visible", "steps", "sceneUpdates", "hudUpdates",
                             "renderFrames", "gpuResources", "bindingCreations", "gpuMusicTextureBytes",
-                            "coverUploads", "gpuDrawCalls", "timerActive"}) {
+                            "coverUploads", "gpuDrawCalls", "timerActive",
+                            // A11 整帧资源账本：峰值是最近 240 个渲染帧的滚动峰值，
+                            // *_peak_frame 是持有该峰值的渲染帧号（与 renderFrames 同口径）。
+                            "gpuResourcesPeak", "gpuResourcesPeakFrame", "gpuTextureBytesPeak",
+                            "gpuTextureBytesPeakFrame", "frameBindings", "frameCoverUploads",
+                            "coverUploadsPerFrame", "coverRetransmitPerKFrame", "resourceBudgetMb"}) {
         m_metrics.insert(QString::fromLatin1(key), resources.value(QString::fromLatin1(key)));
     }
     m_metrics.insert("elapsedMs", clock.elapsed() - m_recordStartedMs);
@@ -359,6 +384,16 @@ void FrameProfiler::sample() {
     m_metrics.insert("fgSwapchainRecreates", fg.swapchainRecreates);
     m_metrics.insert("fgDeviceIdleWaits", fg.deviceIdleWaits);
     m_metrics.insert("fgResizeSkips", fg.resizeSkips);
+    // A02：帧槽等待 / 离屏收尾的 EMA 与原始分位分开暴露。面板要能回答"每帧提交几次、
+    // begin 等槽多久、end 收尾多久"，而不是只有一个含混的"起始/收尾"。
+    m_metrics.insert("fgSubmitsPerFrame", fg.submitsPerFrame);
+    m_metrics.insert("fgSlotWaitMs", fg.slotWaitMs);
+    m_metrics.insert("fgBeginMs", fg.beginMs);
+    m_metrics.insert("fgEndMs", fg.endMs);
+    m_metrics.insert("fgBeginP95Ms", fg.beginP95Ms);
+    m_metrics.insert("fgBeginP99Ms", fg.beginP99Ms);
+    m_metrics.insert("fgEndP95Ms", fg.endP95Ms);
+    m_metrics.insert("fgEndP99Ms", fg.endP99Ms);
     m_metrics.insert("fgSwapchainImages", fg.swapchainImages);
     m_metrics.insert("fgSwapchainFormat", fg.swapchainFormat);
     // 呈现模式决定帧率上限：FG 层自己建的交换链知道确切值；走默认路径时交换链归 Qt，
@@ -544,6 +579,33 @@ void FrameProfiler::formatMetrics() {
             .arg(cpu < 0 ? QStringLiteral("不可用") : number("mainProcessCpuOneCorePercent"), memory,
                  number("gpuDrawCalls", 0), number("gpuResources", 0))
             .arg(QString::number(m_metrics.value("gpuMusicTextureBytes").toDouble() / 1048576., 'f', 1));
+    // A02：提交/等待放在始终显示的详情区，而不是只在 FG 接管时才出现的 fgDetails——
+    // 默认呈现路径同样有 begin 等槽与 end 收尾，少一次提交也要能看见。
+    m_details += QStringLiteral("\n提交 / 等待    每帧提交 %1 次 · 帧槽等待 %2 ms（P95/P99 %3/%4）\n"
+                                "              离屏收尾 %5 ms（P95/P99 %6/%7）")
+                     .arg(number("fgSubmitsPerFrame", 0), number("fgSlotWaitMs", 2),
+                          number("fgBeginP95Ms", 2), number("fgBeginP99Ms", 2))
+                     .arg(number("fgEndMs", 2), number("fgEndP95Ms", 2), number("fgEndP99Ms", 2));
+    // A11：整帧资源账本（本帧 + 滚动峰值 + 重传率 + 预算）。峰值带帧号，便于回查 CSV 的
+    // render_frames；预算开关只告警不降级，所以这里显示"上限"而不是"是否已降级"。
+    const quint64 budgetMb = m_metrics.value("resourceBudgetMb").toULongLong();
+    m_details += QStringLiteral("\n整帧资源      本帧 资源 %1 个 · 纹理 %2 MiB\n"
+                                "              峰值（滚动 240 帧） 资源 %3 个 @帧 %4 · "
+                                "纹理 %5 MiB @帧 %6\n"
+                                "              SRB 新建 %7 个/帧 · 封面纹理上传 %8 次/帧 · "
+                                "封面重传率 %9 次/千帧\n"
+                                "              预算 %10")
+                     .arg(number("gpuResources", 0),
+                          QString::number(m_metrics.value("gpuMusicTextureBytes").toDouble() / 1048576.,
+                                          'f', 1),
+                          number("gpuResourcesPeak", 0), number("gpuResourcesPeakFrame", 0))
+                     .arg(QString::number(m_metrics.value("gpuTextureBytesPeak").toDouble() / 1048576.,
+                                          'f', 1),
+                          number("gpuTextureBytesPeakFrame", 0), number("frameBindings", 0),
+                          number("frameCoverUploads", 0))
+                     .arg(number("coverRetransmitPerKFrame", 2),
+                          budgetMb ? QStringLiteral("%1 MiB").arg(budgetMb)
+                                   : QStringLiteral("关（RHINE_RESOURCE_BUDGET_MB）"));
     // GPU 计时状态必须显式写出来：状态不是 ok 时数值列是空的（或上一个可信样本），
     // 只显示数字会让读者把"没测到"当成"GPU 不花时间"——A01 要修的就是这个坑。
     const QString gpuTiming = m_metrics.value("gpuTimingStatus").toString();

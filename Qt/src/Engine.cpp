@@ -225,7 +225,117 @@ QVariantMap Engine::performance() const {
     result.insert("gpuTimingStatus",
                   QString::fromLatin1(RhineRender::gpuTimingStatusName(RhineRender::GpuTimingStatus(
                       m_gpuTiming.load(std::memory_order_relaxed)))));
+
+    // ---- A11 整帧资源账本 ----
+    // 下面这些键和上面的"当前快照"不是同一口径，命名与 CSV 列都带 ledger/peak 前缀，
+    // 避免分析脚本把"窗口峰值"当成"本帧值"。峰值窗口 = 最近 kLedgerWindow 个渲染帧。
+    const quint64 renderFrames = m_renderFrames.load(std::memory_order_relaxed);
+    const quint64 coverUploads = m_coverUploads.load(std::memory_order_relaxed);
+    result.insert("gpuResourcesPeak", qulonglong(m_resourcesPeak.load(std::memory_order_relaxed)));
+    result.insert("gpuResourcesPeakFrame",
+                  qulonglong(m_resourcesPeakFrame.load(std::memory_order_relaxed)));
+    result.insert("gpuTextureBytesPeak",
+                  qulonglong(m_textureBytesPeak.load(std::memory_order_relaxed)));
+    result.insert("gpuTextureBytesPeakFrame",
+                  qulonglong(m_textureBytesPeakFrame.load(std::memory_order_relaxed)));
+    result.insert("frameBindings", qulonglong(m_frameBindings.load(std::memory_order_relaxed)));
+    result.insert("frameCoverUploads",
+                  qulonglong(m_frameCoverUploads.load(std::memory_order_relaxed)));
+    result.insert("coverUploadsPerFrame",
+                  m_coverUploadsPerFrameMilli.load(std::memory_order_relaxed) / 1000.0);
+    // 重传率：累计封面上传次数按"每千个渲染帧"归一。用千帧而不是比值，是因为正常情况
+    // 下每帧上传次数远小于 1，比值会长期贴在 0.0x 这种没有分辨率的刻度上。
+    result.insert("coverRetransmitPerKFrame",
+                  renderFrames ? coverUploads * 1000.0 / double(renderFrames) : 0.0);
+    const quint64 budgetBytes = resourceBudgetBytes();
+    result.insert("resourceBudgetMb", qulonglong(budgetBytes / (1024ull * 1024ull)));
     return result;
+}
+
+quint64 Engine::resourceBudgetBytes() {
+    // 默认 0 = 关闭。只接受正数；写错（负数/非数字）按关闭处理，避免把预算误当 1 字节。
+    static const quint64 bytes = [] {
+        bool ok = false;
+        const qlonglong mb = qEnvironmentVariable("RHINE_RESOURCE_BUDGET_MB").toLongLong(&ok);
+        return ok && mb > 0 ? quint64(mb) * 1024ull * 1024ull : quint64(0);
+    }();
+    return bytes;
+}
+
+/** A11：渲染线程每帧调用一次，维护滚动窗口峰值、本帧增量与封面上传速率。 */
+void Engine::noteFrameLedger(quint64 resources, quint64 bindings, quint64 textureBytes,
+                             quint64 coverUploads) {
+    // frame 已经是 ++ 之后的值：对外的帧号口径与 renderFrames 一致（1 基）。
+    const quint64 frame = m_renderFrames.load(std::memory_order_relaxed);
+    m_frameBindings.store(bindings, std::memory_order_relaxed);
+    m_frameCoverUploads.store(coverUploads, std::memory_order_relaxed);
+
+    // 封面上传速率用 EMA（alpha=0.05，约 20 帧窗口）：单帧样本抖动大，而"是不是每帧
+    // 都在重传"恰恰要看持续水平。不用呈现层那套 0.15，是为了压住偶发的一两次上传。
+    m_coverUploadsEma = m_coverUploadsEma <= 0.0
+                            ? double(coverUploads)
+                            : m_coverUploadsEma * 0.95 + double(coverUploads) * 0.05;
+    m_coverUploadsPerFrameMilli.store(quint64(m_coverUploadsEma * 1000.0 + 0.5),
+                                      std::memory_order_relaxed);
+
+    const bool full = m_ledgerFilled >= kLedgerWindow;
+    const LedgerSlot expired = m_ledgerWindow[m_ledgerCursor];
+    m_ledgerWindow[m_ledgerCursor] = LedgerSlot{frame, resources, textureBytes};
+    m_ledgerCursor = (m_ledgerCursor + 1) % kLedgerWindow;
+    if (!full) {
+        ++m_ledgerFilled;
+    }
+
+    // 三种情况必须重算：窗口还没填满（峰值帧号可能变）、出现更大的样本、或者刚被
+    // 覆盖掉的旧样本正好是当前峰值的持有者（最大值离开了窗口）。其余情况沿用旧峰值，
+    // 不用每帧扫 240 个槽——这是渲染线程上的热路径。
+    const quint64 resourcesPeak = m_resourcesPeak.load(std::memory_order_relaxed);
+    const quint64 texturePeak = m_textureBytesPeak.load(std::memory_order_relaxed);
+    if (!full || resources >= resourcesPeak || textureBytes >= texturePeak ||
+        expired.resources == resourcesPeak || expired.textureBytes == texturePeak) {
+        recomputeLedgerPeaks();
+    }
+
+    // 预算告警：只打印一次，不改渲染行为。让预算触发降级会把"诊断"变成隐藏的
+    // 质量开关，之后所有对比数据都失去可比性。
+    const quint64 budgetBytes = resourceBudgetBytes();
+    if (budgetBytes > 0 && textureBytes > budgetBytes &&
+        !m_budgetWarned.exchange(true, std::memory_order_relaxed)) {
+        const double currentMiB = double(textureBytes) / (1024.0 * 1024.0);
+        const double budgetMiB = double(budgetBytes) / (1024.0 * 1024.0);
+        qWarning().noquote()
+            << QStringLiteral("资源预算超限：整帧驻留纹理 %1 MiB 超过上限 %2 MiB"
+                              "（RHINE_RESOURCE_BUDGET_MB，第 %3 个渲染帧）。"
+                              "建议：减少同时驻留的封面数或降低封面尺寸，"
+                              "也可以把上限调到 %4 MiB 以上。本告警只打印一次，"
+                              "不改变渲染行为。")
+                   .arg(currentMiB, 0, 'f', 1)
+                   .arg(budgetMiB, 0, 'f', 1)
+                   .arg(frame)
+                   .arg(currentMiB, 0, 'f', 0);
+    }
+}
+
+/** 按时间顺序扫一遍环形窗口，取资源个数/纹理字节的滚动峰值及其持有帧号。 */
+void Engine::recomputeLedgerPeaks() {
+    quint64 bestResources = 0, bestResourcesFrame = 0;
+    quint64 bestTextureBytes = 0, bestTextureBytesFrame = 0;
+    // 从最老的槽开始按时间顺序遍历，`>=` 让相同峰值取更新的那一帧（复查时更有意义）。
+    for (int i = 0; i < m_ledgerFilled; ++i) {
+        const LedgerSlot &slot = m_ledgerWindow[(m_ledgerCursor + i) % kLedgerWindow];
+        if (slot.resources >= bestResources) {
+            bestResources = slot.resources;
+            bestResourcesFrame = slot.frame;
+        }
+        if (slot.textureBytes >= bestTextureBytes) {
+            bestTextureBytes = slot.textureBytes;
+            bestTextureBytesFrame = slot.frame;
+        }
+    }
+    m_resourcesPeak.store(bestResources, std::memory_order_relaxed);
+    m_resourcesPeakFrame.store(bestResourcesFrame, std::memory_order_relaxed);
+    m_textureBytesPeak.store(bestTextureBytes, std::memory_order_relaxed);
+    m_textureBytesPeakFrame.store(bestTextureBytesFrame, std::memory_order_relaxed);
 }
 /** 仅在画面变化时通知唯一场景，静止时保留按需休眠。 */
 void Engine::notifySceneRenderers(bool visualChanged) {

@@ -56,8 +56,28 @@ struct Stats {
     double presentMs = 0.0;
     /// QRhi 的离屏帧边界：这两处会隐式等 GPU 完成，之前的计时刚好把它们漏掉了，
     /// 于是出现"各项耗时都 <1ms、帧间隔却 30ms+"的怪现象。
+    /// A02 起语义写死（两者都是 EMA，alpha=0.15）：
+    ///   beginMs = **帧槽等待**：beginFrame 要等上一帧的命令缓冲/围栏归还，可能包含
+    ///             上一帧 endFrame 提交后的隐式同步；它衡量的是"帧槽什么时候空出来"。
+    ///   endMs   = **离屏收尾**：endFrame 只做提交与呈现；没有读回时这里不应该出现
+    ///             同步等待，一旦 p95 明显抬升，说明存在回读或队列被塞满。
     double beginMs = 0.0;
     double endMs = 0.0;
+    /// 最近一次 beginFrame 的原始耗时（ms），即本次"帧槽等待"，未做 EMA。
+    /// beginMs 只能看趋势，这个样本才能对上具体帧；配合 beginP95Ms/beginP99Ms
+    /// 判断是不是偶发的槽复用等待。
+    double slotWaitMs = 0.0;
+    /// beginMs / endMs 的滚动分位（最近 120 个**原始样本**，不是 EMA 值）。
+    /// 均值和 EMA 会把一次 20ms 的等待摊平到看不见，p95/p99 才能证明"偶发但致命"
+    /// 的槽等待/收尾等待确实存在（A02 的证据要求）。
+    double beginP95Ms = 0.0;
+    double beginP99Ms = 0.0;
+    double endP95Ms = 0.0;
+    double endP99Ms = 0.0;
+    /// 本帧（自上次 publishStats 以来）实际发生的离屏 beginFrame/endFrame 对数：
+    /// 呈现层 1 次 + QML 场景层/UI 层各 0~1 次（只有 dirty 才提交）。正常一帧是 3 次，
+    /// 空闲跳帧是 0 次；它是"每帧到底提交了几次离屏帧"的直接证据（A02）。
+    int submitsPerFrame = 0;
     /// 两步之间（定时器等待 + 事件循环排队）花掉的时间。
     double idleGapMs = 0.0;
 

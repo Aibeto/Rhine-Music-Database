@@ -13,6 +13,7 @@
 #include <QUrl>
 #include <QQuickWindow>
 #include <QPointer>
+#include <array>
 #include <atomic>
 class Engine : public QObject {
     Q_OBJECT
@@ -128,6 +129,10 @@ class Engine : public QObject {
         if (gpuTimeMs > 0) {
             m_gpuTimeMicros.store(quint64(gpuTimeMs * 1000.0 + 0.5), std::memory_order_relaxed);
         }
+        // A11：整帧资源账本必须在这里聚合。performance() 只看得到"最近一次快照"，
+        // 既无法判断峰值出现在哪一帧，也无法把"本帧新增绑定/上传"与累计值分开；
+        // 而 recordRender 是唯一同时拿到本帧全部资源入参的地方（渲染线程调用）。
+        noteFrameLedger(resources, bindings, textureBytes, coverUploads);
     }
     bool ready() const;
     int selfTest();
@@ -159,6 +164,45 @@ class Engine : public QObject {
     std::atomic<quint64> m_gpuTimeMicros{0};
     // 存 int 而不是枚举：原子量只要一个字的读写，转回枚举时不必担心填充或对齐差异。
     std::atomic<int> m_gpuTiming{int(RhineRender::GpuTimingStatus::Unsupported)};
+
+    // ---- A11 整帧资源账本 ----
+    // 口径（不要混用）：
+    //   resources   = 本帧驻留资源**个数**（RhiScene 把 resources/sized/transient 相加）；
+    //   textureBytes= 本帧驻留音乐纹理**字节**快照（不是本帧增量，见 RhiScene.cpp:1865）；
+    //   bindings    = 本帧新建 SRB 个数（RhiScene 已做差分）；
+    //   coverUploads= 本帧封面纹理上传**次数**（RhiScene 只提供次数，没有字节数）。
+    // 峰值窗口 = 最近 kLedgerWindow 个渲染帧的滚动最大值，不是"自启动以来的 lifetime
+    // 峰值"：启动期一次性上传会把 lifetime 峰值永久抬高，之后再贵也看不出来；滚动窗口
+    // 才能回答"当前这一段帧到底占多少"。窗口约 240 帧 ≈ 60fps 下 4 秒。
+    static constexpr int kLedgerWindow = 240;
+    struct LedgerSlot {
+        quint64 frame = 0;
+        quint64 resources = 0;
+        quint64 textureBytes = 0;
+    };
+    // 环形窗口只由渲染线程写（recordRender 的调用方），其他线程只读原子峰值。
+    std::array<LedgerSlot, kLedgerWindow> m_ledgerWindow{};
+    int m_ledgerCursor = 0;
+    int m_ledgerFilled = 0;
+    std::atomic<quint64> m_resourcesPeak{0};
+    std::atomic<quint64> m_resourcesPeakFrame{0};
+    std::atomic<quint64> m_textureBytesPeak{0};
+    std::atomic<quint64> m_textureBytesPeakFrame{0};
+    std::atomic<quint64> m_frameBindings{0};
+    std::atomic<quint64> m_frameCoverUploads{0};
+    // 每帧封面平均上传次数（EMA，千分整数发布）。用整数原子避免 std::atomic<double>
+    // 在 32 位目标上退化成锁；performance() 再除以 1000 还原。
+    std::atomic<quint64> m_coverUploadsPerFrameMilli{0};
+    // 写侧只在渲染线程累加，读侧不直接碰它。
+    double m_coverUploadsEma = 0.0;
+    // 预算告警只打一次：这个开关是诊断用的，每帧刷屏会淹没真正要看的日志。
+    std::atomic<bool> m_budgetWarned{false};
+    void noteFrameLedger(quint64 resources, quint64 bindings, quint64 textureBytes,
+                         quint64 coverUploads);
+    void recomputeLedgerPeaks();
+    // RHINE_RESOURCE_BUDGET_MB 解析结果（字节，0=关闭）。缓存成静态量：环境变量在进程
+    // 生命周期内不变，每帧重新 getenv 只会给渲染线程添无谓的字符串分配。
+    static quint64 resourceBudgetBytes();
     MusicTextures m_musicTextures;
     Glyphs m_glyphs;
     QTimer timer, mediaTimer;
