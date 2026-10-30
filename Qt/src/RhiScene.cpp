@@ -2514,6 +2514,7 @@ class ItemRenderer : public QQuickRhiItemRenderer {
             }
             musicTextures = engine->musicTextures();
             // C04：这一份快照已经被取走。只写原子序号，队列回调在主线程恢复节拍。
+            engine->noteSceneConsumed(engine->sceneRevision());
             // C01：自定义同步耗时（复制帧／缓冲区／纹理快照）单独上报。
             engine->recordSceneSync(double(syncTimer.nsecsElapsed()) / 1e6);
         }

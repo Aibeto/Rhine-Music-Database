@@ -87,22 +87,26 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
             //   tick   —— 引擎定时器回调次数（含被合并掉的空转）
             //   step   —— 真正跑完的完整 step 次数
             //   render —— 渲染线程上报的实际呈现/绘制次数
-            static quint64 lastSteps = 0, lastScene = 0, lastHud = 0, lastRender = 0, lastWakes = 0,
-                           lastRequests = 0, lastChanged = 0, lastResetInput = 0, lastResetScene = 0,
-                           lastGpuSamples = 0;
+            static quint64 lastSteps = 0, lastSkipped = 0, lastScene = 0, lastHud = 0, lastRender = 0,
+                           lastWakes = 0, lastRequests = 0, lastChanged = 0, lastResetInput = 0,
+                           lastResetScene = 0, lastGpuSamples = 0;
             const quint64 render = m_renderFrames.load(std::memory_order_relaxed);
             const quint64 gpuMicros = m_gpuTimeMicros.load(std::memory_order_relaxed);
             const double avgGap = m_paceTicks > 1 ? double(m_paceGapSum) / (m_paceTicks - 1) / 1e6 : 0;
             const double avgStep = m_paceTicks > 0 ? double(m_paceStepSum) / m_paceTicks / 1e6 : 0;
-            qInfo("节拍诊断: tick/s=%llu step/s=%llu sceneUpd/s=%llu hudUpd/s=%llu "
+            const quint64 published = m_pacing.published();
+            const quint64 consumed = m_pacing.consumed();
+            qInfo("节拍诊断: tick/s=%llu step/s=%llu skip/s=%llu sceneUpd/s=%llu hudUpd/s=%llu "
                   "render/s=%llu changed/s=%llu "
                   "wake/s=%llu(输入 %llu/Host %llu/媒体 %llu/其他 %llu) req/s=%llu "
                   "gpu=%.2fms(最近已完成帧,%s,n=%llu) sync场=%.2fms(n=%llu) "
+                  "published=%llu consumed=%llu 未消费差=%llu "
                   "interval=%dms timerActive=%d sleeping=%d sceneSleeping=%d rotating=%d "
                   "hudAnimating=%d pendingAnim=%d stableFrames=%d "
                   "stableReset/s=%llu(输入 %llu/场景 %llu) | "
                   "间隔均=%.2fms 最大=%.2fms step均=%.2fms 最大=%.2fms",
-                  qulonglong(m_steps) - lastSteps, qulonglong(m_sceneUpdates) - lastScene, qulonglong(m_hudUpdates) - lastHud,
+                  qulonglong(m_steps) - lastSteps, qulonglong(m_pacing.skipped()) - lastSkipped,
+                  qulonglong(m_sceneUpdates) - lastScene, qulonglong(m_hudUpdates) - lastHud,
                   qulonglong(render) - lastRender, qulonglong(m_changedSteps) - lastChanged,
                   qulonglong(m_wakes) - lastWakes, qulonglong(m_wakesInput), qulonglong(m_wakesHost),
                   qulonglong(m_wakesMedia), qulonglong(m_wakesOther),
@@ -111,7 +115,9 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
                       m_gpuTiming.load(std::memory_order_relaxed))),
                   qulonglong(m_gpuSamples) - lastGpuSamples,
                   m_syncMicros.load(std::memory_order_relaxed) / 1000.0,
-                  qulonglong(m_syncSamples.load(std::memory_order_relaxed)), timer.interval(), int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping),
+                  qulonglong(m_syncSamples.load(std::memory_order_relaxed)), qulonglong(published),
+                  qulonglong(consumed), qulonglong(published > consumed ? published - consumed : 0),
+                  timer.interval(), int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping),
                   int(m_discRotating), int(app->hud.animating(m_animationTime)),
                   int(m_frame.value("pendingAnimations").toBool()), m_stableFrames,
                   qulonglong(m_stableResetInput) + qulonglong(m_stableResetScene) - lastResetInput -
@@ -120,6 +126,7 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
                   qulonglong(m_stableResetScene) - lastResetScene, avgGap,
                   double(m_paceGapMax) / 1e6, avgStep, double(m_paceStepMax) / 1e6);
             lastSteps = qulonglong(m_steps);
+            lastSkipped = qulonglong(m_pacing.skipped());
             lastWakes = m_wakes;
             lastChanged = m_changedSteps;
             lastRequests = m_sceneRequests;
@@ -389,6 +396,36 @@ void Engine::notifySceneRenderers(bool visualChanged) {
 void Engine::requestSceneContent() {
     ++m_sceneRequests;
     notifySceneRenderers(true);
+    // C04：资源就绪也算一次"视觉快照发布"。它不推进模拟，但要让节拍知道
+    // "还有一份没被消费"，否则下一拍会当成无事可做。
+    m_pacing.publish(sceneRevision(), clock.elapsed());
+}
+/**
+ * C04：渲染线程在 synchronize() 里调用。只写原子序号，再排一次队列回调；不在渲染线程
+ * 等 GUI，也不做任何可能阻塞的分配。
+ */
+void Engine::noteSceneConsumed(quint64 revision) {
+    if (revision == 0) {
+        return;
+    }
+    const quint64 previous = m_sceneConsumed.load(std::memory_order_relaxed);
+    if (revision <= previous) {
+        return;
+    }
+    m_sceneConsumed.store(revision, std::memory_order_relaxed);
+    // 同一个序号只排一次唤醒：渲染线程可能连续同步很多帧。
+    quint64 notified = m_consumeNotified.load(std::memory_order_relaxed);
+    if (revision > notified && m_consumeNotified.compare_exchange_strong(notified, revision)) {
+        QMetaObject::invokeMethod(this, "sceneConsumed", Qt::QueuedConnection);
+    }
+}
+void Engine::sceneConsumed() {
+    m_pacing.consume(m_sceneConsumed.load(std::memory_order_relaxed));
+    // 渲染线程已经取走上一份，待办动画／输入需要下一拍；不该靠 1ms 轮询自己撞上。
+    if (m_started && m_visible && !timer.isActive()) {
+        m_lastTick = clock.elapsed();
+        timer.start(0);
+    }
 }
 void Engine::wake(bool input) {
     wake(input ? WakeSource::Input : WakeSource::Other);
@@ -397,6 +434,7 @@ void Engine::wake(WakeSource source) {
     switch (source) {
     case WakeSource::Input:
         ++m_wakesInput;
+        m_inputPending = true;
         break;
     case WakeSource::Host:
         ++m_wakesHost;
@@ -564,6 +602,24 @@ void Engine::tick() {
     }
     m_paceEnterNs = enterNs;
     const auto now = clock.elapsed();
+    // C04：完整 step 只在"这一份快照还有机会被看到"时跑。渲染线程还没取走上一份，
+    // 现在算出来的中间状态会被直接覆盖——这部分 CPU 在任何一帧上都看不到。
+    const bool inputPending = m_inputPending || m_wheelPending || m_pressed || m_pointerPending;
+    const bool workPending = inputPending || scene.changed() || !m_sceneSleeping || m_discRotating ||
+                             app->hud.animating(m_animationTime) ||
+                             m_frame.value("pendingAnimations").toBool() || m_temporalFramesRemaining > 0 ||
+                             m_frame.value("mode") == "boot";
+    if (!inputPending) {
+        const auto decision = m_pacing.decide(workPending, false, now);
+        if (decision.action == RhineRender::FramePacingPolicy::Action::Skip) {
+            m_pacing.noteStep(true);
+            ++m_stepsSkipped;
+            ++m_paceTicks;
+            // 1ms 只为尽早看到消费进度；这一次 tick 本身几乎不花钱。
+            timer.setInterval(1);
+            return;
+        }
+    }
     m_animationTime += qMin<qint64>(now - m_lastTick, 50) / 1000.;
     m_lastTick = now;
     flushPointer();
@@ -593,6 +649,10 @@ void Engine::tick() {
     m_paceStepSum += stepNs;
     m_paceStepMax = qMax(m_paceStepMax, stepNs);
     ++m_paceTicks;
+    // C04：发布序号就是内容版本；没有视觉变化时这里不会前进，策略自然放行下一拍。
+    m_pacing.publish(sceneRevision(), clock.elapsed());
+    m_pacing.noteStep(false);
+    m_inputPending = false;
     // 动态帧间隔：不设固定周期常数，帧率上限完全交给呈现侧（垂直同步/缓冲回收）。
 #ifdef Q_OS_LINUX
     // 注意 blockedNs 的口径：它只覆盖 tick() 内部、step() 之外的微秒级开销（指针 flush、
@@ -606,12 +666,12 @@ void Engine::tick() {
     //   · 阻塞 ≤ 2ms：说明呈现不阻塞，继续连轴转只会空转烧 CPU，让出 1ms。
 #endif
     // RHINE_TICK_MS 仍可作为排障时人为压帧的覆盖值（>0 时生效）。
-    const qint64 frameNs = clock.nsecsElapsed() - enterNs;
-    const qint64 blockedNs = frameNs - stepNs;
     const int fixedMs = frameIntervalMs();
     const bool rotationOnly = m_discRotating && m_sceneSleeping && !app->hud.animating(m_animationTime) &&
                               now - m_lastInput >= 750 && !m_pressed;
-    int intervalMs = blockedNs > 2000000 ? 0 : 1;
+    // C04：节奏只由"上一份快照有没有被消费"决定。tick() 内部量到的 frameNs-stepNs
+    // 测不到呈现阻塞（呈现工作在别的回调里），原来用它推断节流只会恒定落到 1ms。
+    int intervalMs = m_pacing.awaitingConsumption() ? 1 : 0;
     if (rotationOnly) {
         intervalMs = 33;
     }
@@ -621,7 +681,7 @@ void Engine::tick() {
     static const bool forceAnimate = qEnvironmentVariableIsSet("RHINE_DIAG_ANIMATE");
     if (!forceAnimate && now - m_lastInput >= 750 && !m_pressed && m_sceneSleeping && !scene.changed() &&
         !app->hud.animating(m_animationTime) && !m_discRotating && m_frame["mode"] != "boot" &&
-        m_temporalFramesRemaining == 0) {
+        m_temporalFramesRemaining == 0 && !m_pacing.awaitingConsumption()) {
         timer.stop();
         m_sleeping = true;
         emit stateChanged();

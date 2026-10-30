@@ -2,6 +2,7 @@
 #include "Glyphs.h"
 #include "Host.h"
 #include "NativeApplication.h"
+#include "render/FramePacingPolicy.h"
 #include "render/MusicTextureAdmission.h"
 #include "render/RenderPolicy.h"
 #ifdef Q_OS_DARWIN
@@ -146,6 +147,13 @@ class Engine : public QObject {
         m_syncMicros.store(quint64(ms * 1000.0 + 0.5), std::memory_order_relaxed);
         m_syncSamples.fetch_add(1, std::memory_order_relaxed);
     }
+    /**
+     * C04：渲染线程在 synchronize() 里报告"这一份快照已被取走"。写入原子序号后经队列
+     * 回到主线程唤醒节拍；渲染线程不等 GUI，也不在这里做任何分配。
+     */
+    void noteSceneConsumed(quint64 revision);
+    /// 队列回调：主线程看到消费进度后，若有待办就立刻恢复节拍。
+    Q_INVOKABLE void sceneConsumed();
     void recordRender(quint64 resources, quint64 bindings = 0, quint64 textureBytes = 0,
                       quint64 coverUploads = 0, quint64 drawCalls = 0, double gpuTimeMs = 0,
                       RhineRender::GpuTimingStatus gpuTiming =
@@ -192,6 +200,13 @@ class Engine : public QObject {
   private:
     void notifySceneRenderers(bool visualChanged);
     quint64 m_geometryRevision = 0;
+    /// C04：发布／消费序号对账。m_sceneRevision 就是发布序号，渲染线程回填消费序号。
+    RhineRender::FramePacingPolicy m_pacing;
+    std::atomic<quint64> m_sceneConsumed{0};
+    /// 已经为哪个序号排过唤醒，避免渲染线程每帧都投递一次队列调用。
+    std::atomic<quint64> m_consumeNotified{0};
+    /// 输入优先于消费反馈：置位后下一次 tick 不跳过完整 step。
+    bool m_inputPending = false;
     /// C03：准入状态随 musicTextures 一起在 GUI 线程生成，渲染线程只读这份快照。
     MusicTextures m_musicTextureSnapshot;
     /// C01：按来源分开计数，避免把"输入唤醒"和"Host 失效唤醒"混成一个数字。
@@ -199,6 +214,8 @@ class Engine : public QObject {
     /// C01：requestSceneContent 与 stableFrames 复位的次数／原因。
     quint64 m_sceneRequests = 0;
     quint64 m_stableResetInput = 0, m_stableResetScene = 0;
+    /// C04：被合并掉的完整 step。
+    quint64 m_stepsSkipped = 0;
     /// C01：GPU 样本数（数值为 0 的成功采样不计数）。
     quint64 m_gpuSamples = 0;
     /// 探针：唤醒次数与"场景真的变了"的拍数。空闲仍空转时，这两条决定往哪查。

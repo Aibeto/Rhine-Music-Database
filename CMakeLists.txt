@@ -641,6 +641,16 @@ if(MSVC)
 endif()
 add_test(NAME qt_music_texture_admission_regression COMMAND RhineMusicTextureAdmissionRegression)
 
+# C04：用"发布／消费"序号合并过量完整 step 是 header-only 纯策略，不读时钟、不接事件循环。
+# 写错的后果不是崩溃：要么白白多算一份会被覆盖的中间状态，要么动画停在半路，只能靠用例拦。
+qt_add_executable(RhineFramePacingRegression Qt/tests/FramePacingChecks.cpp)
+target_include_directories(RhineFramePacingRegression PRIVATE Qt/src)
+target_link_libraries(RhineFramePacingRegression PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(RhineFramePacingRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_frame_pacing_regression COMMAND RhineFramePacingRegression)
+
 # Linux 显卡选择里能离线验证的部分：PCI 地址解析、序号 → 环境变量的映射、序号失效时的回退。 写错的后果是"选错卡"或"配置失效后仍注入变量"，只能靠用例拦。三平台都编， sysfs
 # 相关用例在源码里按平台裁剪。
 qt_add_executable(RhineGpuChoiceRegression Qt/tests/LinuxGpuChecks.cpp Qt/src/LinuxGraphics.cpp
