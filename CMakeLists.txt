@@ -651,6 +651,16 @@ if(MSVC)
 endif()
 add_test(NAME qt_frame_pacing_regression COMMAND RhineFramePacingRegression)
 
+# D06：Vulkan 资源策略的纯用例（arena 步长/动态偏移/实例池/深度消费者/缓存代号）。
+# 只依赖 Qt6::Core，不建 QGuiApplication，也不碰 VkDevice——离线就能跑。
+qt_add_executable(RhineVulkanResourceRegression Qt/tests/VulkanResourceChecks.cpp)
+target_include_directories(RhineVulkanResourceRegression PRIVATE Qt/src)
+target_link_libraries(RhineVulkanResourceRegression PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(RhineVulkanResourceRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_vulkan_resource_regression COMMAND RhineVulkanResourceRegression)
+
 # Linux 显卡选择里能离线验证的部分：PCI 地址解析、序号 → 环境变量的映射、序号失效时的回退。 写错的后果是"选错卡"或"配置失效后仍注入变量"，只能靠用例拦。三平台都编， sysfs
 # 相关用例在源码里按平台裁剪。
 qt_add_executable(RhineGpuChoiceRegression Qt/tests/LinuxGpuChecks.cpp Qt/src/LinuxGraphics.cpp

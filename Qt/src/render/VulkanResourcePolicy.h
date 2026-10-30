@@ -101,4 +101,46 @@ inline bool depthStoreRequired(bool motionConfigured, bool temporal, bool warpPr
     return motionConfigured || temporal || warpProbe || metalFxActive;
 }
 
+
+/// 把偏移对齐到 alignment（2 的幂）；对齐非法时原样返回，交给调用方发现配置错误。
+inline quint64 alignTo(quint64 value, quint64 alignment)
+{
+    if (alignment <= 1) {
+        return value;
+    }
+    return (value + alignment - 1) / alignment * alignment;
+}
+
+/**
+ * 绑定是否必须重设。
+ * 只看 SRB 指针会把"同一个 SRB 的两个动态偏移"混成一次绑定，第二个 draw 就会读到
+ * 第一个 draw 的材质；静态 SRB 的偏移没有意义，不参与比较。
+ */
+inline bool bindingRebindRequired(bool sameBindings, bool dynamic, bool previousDynamic, quint32 offset,
+                                quint32 previousOffset)
+{
+    if (!sameBindings || dynamic != previousDynamic) {
+        return true;
+    }
+    return dynamic && offset != previousOffset;
+}
+
+/// 缓存的共享资源还能不能用：arena／设备代号换代后必须重建。
+inline bool resourceGenerationMatches(quint64 cached, quint64 current)
+{
+    return cached == current;
+}
+
+/// 缓存项该不该退休：本帧没被引用，或者代号已经过期。
+inline bool pruneRetireNeeded(bool usedThisFrame, bool generationMatches)
+{
+    return !usedThisFrame || !generationMatches;
+}
+
+/// 整块直写必须覆盖本帧所有被引用的槽位，否则会读到上一帧的残值。
+inline bool directWriteCoversAllSlots(quint32 writtenSlots, quint32 usedSlots)
+{
+    return writtenSlots >= usedSlots;
+}
+
 } // namespace RhineRender

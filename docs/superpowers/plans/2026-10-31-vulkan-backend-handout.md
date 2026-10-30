@@ -70,11 +70,14 @@
 
 ## D06：测试、独立开关与交付
 
+实施：`Qt/tests/VulkanResourceChecks.cpp` 8 组共 57 项断言，已注册 `RhineVulkanResourceRegression`／`qt_vulkan_resource_regression`（Qt6::Core，不建 QGuiApplication、不碰 VkDevice）。四个开关都是 opt-in 且只在 Vulkan 路径读：`RHINE_VK_UNIFORM_ARENA`（D02）、`RHINE_VK_INSTANCE_ARENA`／`RHINE_VK_DIRECT_WRITE`（D03，两步各自独立）、`RHINE_VK_DISCARD_UNUSED_DEPTH`（D04）；关掉即回到原来的逐材质 uniform buffer／逐 draw 实例 buffer／照旧 store 深度。定向构建与测试已跑：四个目标增量编译通过，`ctest -R '^qt_(vulkan_resource|render_policy|music_texture_admission|frame_pacing)_regression$'` 4/4 通过；主程序只做编译验证、没有运行。**功能完成，性能待验**：应用侧只有计数（创建／更新／绑定／跳过／上传字节），没有硬件时间，任何“变快了”的说法都还没有证据支撑。
+
+
 新增纯策略文件 `Qt/src/render/VulkanResourcePolicy.h` 和 `Qt/tests/VulkanResourceChecks.cpp`，注册 Core-only 目标 RhineVulkanResourceRegression／qt_vulkan_resource_regression；不要在离线测试创建 QGuiApplication 或 VkDevice。
 
-- [ ] 先写失败用例：任意有效 alignment 的 packing、offset／range 溢出与扩容、相同 SRB 不同 offset 不能跳绑、资源／设备代号换代、共享 SRB 单个引用退出／最后引用退出、实例 offset／stride、深度消费者真值表、直写与 batch 互斥及跨帧必须初始化。纯测试验证策略，不冒充驱动／GPU 生命周期验收。
-- [ ] 诊断开关建议 D02=RHINE_VK_UNIFORM_ARENA、D03=RHINE_VK_INSTANCE_ARENA／RHINE_VK_DIRECT_WRITE、D04=RHINE_VK_DISCARD_UNUSED_DEPTH；先 opt-in、仅 Vulkan 生效，其他后端保留原路径。一个开关只控制一个实验；四者可组合但逐项测后才测组合。
-- [ ] 实施后定向编译／测试，再编译主程序但不运行；这些命令本轮未执行：
+- [x] 先写失败用例：任意有效 alignment 的 packing、offset／range 溢出与扩容、相同 SRB 不同 offset 不能跳绑、资源／设备代号换代、共享 SRB 单个引用退出／最后引用退出、实例 offset／stride、深度消费者真值表、直写与 batch 互斥及跨帧必须初始化。纯测试验证策略，不冒充驱动／GPU 生命周期验收。
+- [x] 诊断开关建议 D02=RHINE_VK_UNIFORM_ARENA、D03=RHINE_VK_INSTANCE_ARENA／RHINE_VK_DIRECT_WRITE、D04=RHINE_VK_DISCARD_UNUSED_DEPTH；先 opt-in、仅 Vulkan 生效，其他后端保留原路径。一个开关只控制一个实验；四者可组合但逐项测后才测组合。
+- [x] 实施后定向编译／测试，再编译主程序但不运行；这些命令本轮已执行：
 
 ~~~sh
 cmake --build output/qt-build -j$(nproc) --target RhineVulkanResourceRegression RhineRenderPolicyRegression RhineMusicTextureAdmissionRegression RhineFramePacingRegression
@@ -82,7 +85,7 @@ ctest --test-dir output/qt-build --output-on-failure -R '^qt_(vulkan_resource|re
 ~~~
 
 - [ ] 用户手工验收：固定 C 后基线，首次／返回滚动、静止、换封面、快速焦点切换、AA 模式切换、resize／DPR／隐藏恢复各检查；单开关配对 ABBA 至少三组，冷热缓存分开，记录 P50/P95/P99、CPU 录制与 GPU 有效样本、资源／绑定／更新量、输入响应和图像一致性。验证层／capture 单独跑，不混入正式性能数据。
-- [ ] buffer／descriptor 变少不是提速证明；同负载端到端无收益或有回归则关闭，不追加限帧／降画质。无硬件数据写“功能完成，性能待验”。独立交回改动、测试、原始计数／样本、回退方法；D05 需另附 Qt patch 和二进制来源。
+- [x] buffer／descriptor 变少不是提速证明；同负载端到端无收益或有回归则关闭，不追加限帧／降画质。无硬件数据写“功能完成，性能待验”。独立交回改动、测试、原始计数／样本、回退方法；D05 需另附 Qt patch 和二进制来源。
 
 **顺序：** D01 → D02 → D03／D04 分别 A/B → D06；D05 单独立项。每个实验若风险高于已测收益，可以停在门槛结论，不必全做。
 
