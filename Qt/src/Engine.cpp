@@ -70,6 +70,7 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
     connect(&timer, &QTimer::timeout, this, &Engine::tick);
     mediaTimer.setInterval(1000);
     connect(&mediaTimer, &QTimer::timeout, this, &Engine::pollMedia);
+    connect(&m_gamepad, &Gamepad::pressed, this, &Engine::gamepadPressed);
     // 节拍诊断（RHINE_PACE_DIAG=1）：每秒打印一次「引擎 tick 数 vs 实际渲染数」，
     // 用来判定帧率是被引擎定时器限住、还是被呈现侧限住。
     if (qEnvironmentVariableIsSet("RHINE_PACE_DIAG")) {
@@ -105,6 +106,7 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
 Engine::~Engine() {
     timer.stop();
     mediaTimer.stop();
+    m_gamepad.setEnabled(false);
     app.reset();
     host.shutdown();
 }
@@ -264,6 +266,7 @@ void Engine::setVisible(bool value) {
         return;
     }
     m_visible = value;
+    m_gamepad.setEnabled(value);
     if (!value) {
         flushPointer();
         app->pointer("pointercancel", 0, 0);
@@ -491,6 +494,38 @@ void Engine::toggleFullscreen() {
         m_window->showFullScreen();
     }
 }
+void Engine::gamepadPressed(const QString &button) {
+    if (button == "up") {
+        key("ArrowUp", false);
+    } else if (button == "down") {
+        key("ArrowDown", false);
+    } else if (button == "left") {
+        key("ArrowLeft", false);
+    } else if (button == "right") {
+        key("ArrowRight", false);
+    } else if (button == "a") {
+        key("Enter", false);
+    } else if (button == "b") {
+        key("Escape", false);
+    } else if (button == "select") {
+        action("menu");
+    } else if (button == "start") {
+        action("home");
+    } else if (button == "lb") {
+        action("column-prev");
+    } else if (button == "rb") {
+        action("column-next");
+    } else if (button == "lt") {
+        action("player:prev");
+    } else if (button == "rt") {
+        action("player:next");
+    } else if (button == "ls") {
+        action("player:toggle");
+    } else if (button == "rs") {
+        action("player:open");
+    }
+}
+
 bool Engine::keyEvent(int keyCode, int modifiers, QString text) {
     const bool accepted = keyEventImpl(keyCode, modifiers, text);
     // 探针：确认按键真的走进了 QML 输入层，以及有没有被消费掉（RHINE_KEY_PROBE=1）。

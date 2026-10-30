@@ -1,6 +1,10 @@
 # 将应用的 QML 扫描限定在 Qt 源码目录，避免遍历部署包和 Node 依赖。 资源、平台依赖和打包钩子由根目录配置完成后再统一结束目标初始化。
 qt_add_executable(RhineMusicDatabase WIN32 MACOSX_BUNDLE MANUAL_FINALIZATION ${RHINE_APP_SOURCES})
+target_sources(RhineMusicDatabase PRIVATE src/Gamepad.cpp src/Gamepad.h)
 set_target_properties(RhineMusicDatabase PROPERTIES RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+if(WIN32)
+    target_link_libraries(RhineMusicDatabase PRIVATE xinput9_1_0)
+endif()
 set_source_files_properties(qml/Main.qml PROPERTIES QT_RESOURCE_ALIAS Main.qml)
 set_source_files_properties(qml/PerformancePanel.qml PROPERTIES QT_RESOURCE_ALIAS PerformancePanel.qml)
 set_source_files_properties(qml/WindowChrome.qml PROPERTIES QT_RESOURCE_ALIAS WindowChrome.qml)
