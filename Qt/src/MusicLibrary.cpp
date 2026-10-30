@@ -85,6 +85,16 @@ void MusicLibrary::changed() {
     emit invalidated();
 }
 
+/** 清除可重建的缓存与本地记录；登录状态、账号设置和本地音乐库保持不变。 */
+void MusicLibrary::clearCaches() {
+    host->clearCache();
+    player.clearCaches();
+    searchHistory.clear();
+    suggestions.clear();
+    host->setPreference("search-history", "[]");
+    changed();
+}
+
 QString MusicLibrary::providerName() const {
     if (provider == "kugou" && kugouEdition == "lite") {
         return QStringLiteral("酷狗概念版");

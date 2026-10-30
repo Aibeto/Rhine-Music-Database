@@ -73,6 +73,7 @@ void NativeHud::openModal(QString kind) {
     closing = false;
     // 换页时收起所有下拉块，避免展开状态跨页面残留。
     expandedPreference.clear();
+    cacheMessage.clear();
     motion.set(true, lastTime, reduced);
     query.clear();
     listOffset = 0;
@@ -405,6 +406,11 @@ void NativeHud::action(QString value) {
             const bool enabled = m_host->preference("auto-update") != "off";
             m_host->setPreference("auto-update", enabled ? "off" : "on");
         }
+        return;
+    }
+    if (value == "cache:clear") {
+        m_music->clearCaches();
+        cacheMessage = QStringLiteral("已清除");
         return;
     }
     auto &music = *m_music;

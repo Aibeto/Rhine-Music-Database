@@ -2,6 +2,7 @@
 #include "AppStorage.h"
 #include "MusicData.h"
 #include <QCoreApplication>
+#include <QDir>
 #include <QMediaDevices>
 #include <QElapsedTimer>
 #include <QFile>
@@ -70,6 +71,50 @@ bool runNativeSessionChecks(const QString &root, const QString &audioURL) {
             restarted.saveSession();
         }
         QFile::remove(AppStorage::dataDirectory() + "/session.json");
+        AppStorage::settings().clear();
+    }
+    // 清除缓存只删除可重建数据：元数据、歌词与记录清空，登录状态和本地音乐库保留。
+    {
+        Host cacheHost(root, true);
+        MusicLibrary cached(&cacheHost, {});
+        cacheHost.offline = false;
+        cached.provider = "netease";
+        cached.api.provider = "netease";
+        cached.searchHistory = {QStringLiteral("旧检索")};
+        cacheHost.setPreference("search-history", QStringLiteral("[\"旧检索\"]"));
+        cacheHost.setPreference("play-history", QStringLiteral("[{\"id\":\"1\"}]"));
+        cacheHost.setPreference("local-cover-cache", QStringLiteral("{\"1:1\":\"cover\"}"));
+        cacheHost.setPreference("lyrics-cache", QStringLiteral("[{\"key\":\"netease:1\"}]"));
+        cacheHost.setPreference("theme", QStringLiteral("dark"));
+        cacheHost.setPreference("account-id-netease", QStringLiteral("42"));
+        const QDir cache(AppStorage::cacheDirectory());
+        const auto metadata = cache.filePath("metadata");
+        const auto library = AppStorage::dataDirectory() + "/local-library";
+        QDir().mkpath(metadata);
+        QDir().mkpath(cache.filePath("qml"));
+        QDir().mkpath(cache.filePath("shaders"));
+        QDir().mkpath(library);
+        for (const auto &path : {metadata + "/entry.json", cache.filePath("qml/entry.bin"),
+                                 cache.filePath("shaders/pipeline.cache"), library + "/index.json"}) {
+            QFile file(path);
+            if (file.open(QIODevice::WriteOnly)) {
+                file.write("fixture");
+            }
+        }
+        cached.clearCaches();
+        ok &= check(!QFile::exists(metadata + "/entry.json") && !QDir(cache.filePath("qml")).exists() &&
+                        !QDir(cache.filePath("shaders")).exists(),
+                    "cache directories removed");
+        ok &= check(QFile::exists(library + "/index.json"), "local library preserved");
+        ok &= check(cacheHost.preference("lyrics-cache") == "[]" &&
+                        cacheHost.preference("play-history") == "[]" &&
+                        cacheHost.preference("search-history") == "[]" &&
+                        cacheHost.preference("local-cover-cache") == "{}" && cached.searchHistory.isEmpty(),
+                    "lyrics, history and cover caches cleared");
+        ok &= check(cacheHost.preference("theme") == "dark" &&
+                        cacheHost.preference("account-id-netease") == "42",
+                    "settings and account preserved");
+        // 清掉本用例写入的偏好，避免影响后续会话恢复检查。
         AppStorage::settings().clear();
     }
     NativeApplication original(&host, &glyphs, &scene, content);

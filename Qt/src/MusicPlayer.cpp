@@ -652,6 +652,21 @@ void MusicPlayer::clearHistory() {
     emit changed();
 }
 
+/** 清除歌词、播放记录与本地封面缓存；登录状态、队列和播放位置保持不变。 */
+void MusicPlayer::clearCaches() {
+    if (remoteCommand("clearCaches", {})) {
+        return;
+    }
+    lyrics.clearCache();
+    clearHistory();
+    localCovers = {};
+    m_host->setPreference("local-cover-cache", "{}");
+    // 当前歌词可能来自刚清掉的缓存，按同一首歌重新读取才能看到修正后的解析结果。
+    if (!current.isEmpty()) {
+        lyrics.load(current, true);
+    }
+}
+
 QJsonObject MusicPlayer::playbackSnapshot() const {
     return {{"current", current},
             {"queue", queue.toJson()},

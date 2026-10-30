@@ -139,6 +139,15 @@ void LyricsController::clear() {
     positionMs = 0;
 }
 
+/** 清除歌词缓存；当前文档由调用方决定是否按同一首歌重新读取。 */
+void LyricsController::clearCache() {
+    if (remoteCommand("clearCache", {})) {
+        return;
+    }
+    m_cache = {};
+    persist();
+}
+
 MusicApi &LyricsController::api(const QString &provider) {
     const auto index = PROVIDERS.indexOf(provider);
     return *m_apis[index < 0 ? 0 : index];

@@ -674,7 +674,8 @@ void NativeHud::settings(double x, double y, double width) {
     constexpr double preferenceTop = 424;
     constexpr double rowStep = 66;
     const auto performanceTop = preferenceTop + rows.size() * rowStep + 76 + dropdownExtra;
-    const auto updateTop = performanceTop + 310;
+    // 缓存清理按钮单独占一行，排在软件更新标题之前。
+    const auto updateTop = performanceTop + 380;
     const auto projectTop = updateTop + 310;
     settingsContentBottom = projectTop + 278;
     const auto viewport =
@@ -842,6 +843,11 @@ void NativeHud::settings(double x, double y, double width) {
     button(discRotation ? "开启 / 点击关闭" : "关闭 / 点击了解风险", left + usable - 280,
            y + performanceTop + 166, 264, 44, "disc-rotation", 16);
     text("默认关闭；开启会增加持续渲染、耗电和发热。", left, y + performanceTop + 232, 15);
+    // 缓存清理没有可切换的值，单独一行排在软件更新标题之上。
+    fill(left, y + updateTop - 98, usable, 56, tint);
+    text("STORAGE / 存储与缓存", left + 16, y + updateTop - 80, 18, "demibold");
+    button(cacheMessage.isEmpty() ? "清除缓存" : "已清除", left + usable - 280, y + updateTop - 92, 264, 44,
+           "cache:clear", 16);
     rule(left, y + updateTop - 20, usable, 0.2);
     text("SOFTWARE UPDATE / 软件更新", left, y + updateTop, 16, "demibold");
     const auto &updater = m_host->updater;

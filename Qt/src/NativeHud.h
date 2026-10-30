@@ -95,6 +95,8 @@ class NativeHud : public QObject {
     double settingsScroll = 0;
     // 设置页下拉块：非空时该偏好行展开成选项列表（目前只有抗锯齿使用）。
     QString expandedPreference;
+    // 清除缓存后的结果提示；重新打开设置页时清空。
+    QString cacheMessage;
     double settingsScrollMaximum() const {
         return settingsContentBottom - SettingsViewportBottom;
     }

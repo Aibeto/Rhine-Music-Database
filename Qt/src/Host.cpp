@@ -989,6 +989,19 @@ void Host::invalidateMetadata() {
         metadata.remove(name);
     }
 }
+/** 清除可重建的缓存；登录凭据、账号设置与本地音乐库保持不变。 */
+void Host::clearCache() {
+    if (remote) {
+        remote->call("host.clearCache");
+        return;
+    }
+    invalidateMetadata();
+    // QML 与渲染管线的磁盘缓存由框架按需重建；删除失败（如 Windows 文件占用）不影响本次清理。
+    const QDir cacheDirectory(AppStorage::cacheDirectory());
+    for (const auto &name : {"qml", "shaders"}) {
+        QDir(cacheDirectory.filePath(QString::fromLatin1(name))).removeRecursively();
+    }
+}
 namespace {
 // 可读写的偏好键。读取与写入必须共用同一份名单：两份名单一旦分叉，写入会成功但读回
 // 为空，界面上的表现就是"设置完立刻跳回原值"。

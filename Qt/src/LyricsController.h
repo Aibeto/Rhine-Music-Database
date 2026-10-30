@@ -8,6 +8,7 @@ class LyricsController : public QObject {
   public:
     explicit LyricsController(Host *host, QObject *parent = nullptr);
     void clear();
+    void clearCache();
     void load(const QJsonObject &track, bool retry = false);
     void matchCover(const QJsonObject &track);
     void selectLocalSource(const QJsonObject &track, const QString &source);

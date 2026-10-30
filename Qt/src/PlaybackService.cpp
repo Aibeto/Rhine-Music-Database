@@ -335,6 +335,8 @@ QJsonObject PlaybackService::hostCommand(const QString &method, const QJsonObjec
                                            arguments["position"].toDouble(), arguments["paused"].toBool());
     } else if (method == "invalidateMetadata") {
         m_host.invalidateMetadata();
+    } else if (method == "clearCache") {
+        m_host.clearCache();
     } else if (method == "diagnostics") {
         m_host.enablePlaybackDiagnostics(arguments["enabled"].toBool());
     } else {
@@ -379,6 +381,8 @@ bool PlaybackService::playerCommand(const QString &method, const QJsonObject &ar
         m_player.setAlternative(arguments["enabled"].toBool());
     } else if (method == "clearHistory") {
         m_player.clearHistory();
+    } else if (method == "clearCaches") {
+        m_player.clearCaches();
     } else {
         return false;
     }
@@ -399,6 +403,8 @@ bool PlaybackService::lyricsCommand(const QString &method, const QJsonObject &ar
         lyrics.applyGlobalOffset();
     } else if (method == "clear") {
         lyrics.clear();
+    } else if (method == "clearCache") {
+        lyrics.clearCache();
     } else {
         return false;
     }

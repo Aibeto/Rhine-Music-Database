@@ -45,6 +45,7 @@ class MusicLibrary : public QObject {
         return provider == "local";
     }
     void refreshLocal();
+    void clearCaches();
     void searchLocal(QString text, QString kind = {});
     void importLocal(const QStringList &paths);
     std::unique_ptr<LocalMusicLibrary> local;
