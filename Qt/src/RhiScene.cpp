@@ -2239,7 +2239,10 @@ class Renderer {
         static QElapsedTimer dbgClock;
         static double dbgBuild = 0, dbgRecord = 0;
         static double dbgPostSum = 0, dbgTexSum = 0, dbgListSum = 0;
+        // 峰值比均值更能说明卡顿：20 帧均值会把一次 30 ms 的上传摊成 1.5 ms。
+        static double dbgTexMax = 0, dbgListMax = 0, dbgBuildMax = 0, dbgRecordMax = 0;
         static int dbgFrames = 0;
+        static int dbgDraws = 0;
         dbgClock.start();
 #endif
         if (qEnvironmentVariableIsSet("RHINE_DEBUG_DRAWS")) {
@@ -2347,12 +2350,19 @@ class Renderer {
         dbgListSum += dbgListMs;
         dbgBuild += dbgBuildMs;
         dbgRecord += double(dbgRecordClock.nsecsElapsed()) / 1e6;
+        dbgTexMax = std::max(dbgTexMax, dbgTexMs);
+        dbgListMax = std::max(dbgListMax, dbgListMs);
+        dbgBuildMax = std::max(dbgBuildMax, dbgBuildMs);
+        dbgRecordMax = std::max(dbgRecordMax, double(dbgRecordClock.nsecsElapsed()) / 1e6);
         if (++dbgFrames >= 20 && qEnvironmentVariableIsSet("RHINE_FG_DIAG")) {
-            qWarning("3D内部: 后处理 %.1f  纹理 %.1f  draw列表 %.1f  构建 %.1f  录制 %.1f ms (%d 帧均值)",
-                     dbgPostSum / dbgFrames, dbgTexSum / dbgFrames, dbgListSum / dbgFrames,
-                     dbgBuild / dbgFrames, dbgRecord / dbgFrames, dbgFrames);
+            qWarning("3D内部: 后处理 %.1f  纹理 %.1f/峰%.1f  draw列表 %.1f/峰%.1f  构建 %.1f/峰%.1f  "
+                     "录制 %.1f/峰%.1f ms | draws %lld (%d 帧均值)",
+                     dbgPostSum / dbgFrames, dbgTexSum / dbgFrames, dbgTexMax, dbgListSum / dbgFrames,
+                     dbgListMax, dbgBuild / dbgFrames, dbgBuildMax, dbgRecord / dbgFrames, dbgRecordMax,
+                     qlonglong(draws.size()), dbgFrames);
             dbgBuild = dbgRecord = 0;
             dbgPostSum = dbgTexSum = dbgListSum = 0;
+            dbgTexMax = dbgListMax = dbgBuildMax = dbgRecordMax = 0;
             dbgFrames = 0;
         }
 #endif

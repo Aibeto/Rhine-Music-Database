@@ -183,6 +183,9 @@ class Engine : public QObject {
   private:
     void notifySceneRenderers(bool visualChanged);
     quint64 m_geometryRevision = 0;
+    /// 探针：唤醒次数与"场景真的变了"的拍数。空闲仍空转时，这两条决定往哪查。
+    quint64 m_wakes = 0;
+    quint64 m_changedSteps = 0;
     /// A03：内容版本，只在内容真的变了时自增（见 notifySceneRenderers/requestSceneContent）。
     std::atomic<quint64> m_sceneRevision{0};
     std::atomic<quint64> m_hudRevision{0};

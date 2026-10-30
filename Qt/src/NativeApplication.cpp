@@ -67,6 +67,7 @@ void NativeApplication::initialize() {
 #ifdef Q_OS_LINUX
 // RHINE_STEP_PROBE=1：拆开 app->step 内部（场景采样 / HUD 绘制 / 观察与返回对象构建）。
 static double nacSampleSum = 0, nacDrawSum = 0, nacRestSum = 0;
+static double nacSampleMax = 0, nacDrawMax = 0, nacRestMax = 0;
 static int nacFrames = 0;
 
 #endif
@@ -104,14 +105,22 @@ QJsonObject NativeApplication::step(double time, double width, bool reuseScene) 
         nacSampleSum += nacSampleMs;
         nacDrawSum += nacDrawEnd - nacSampleMs;
         nacRestSum += nacTotal - nacDrawEnd;
+        nacSampleMax = std::max(nacSampleMax, nacSampleMs);
+        nacDrawMax = std::max(nacDrawMax, nacDrawEnd - nacSampleMs);
+        nacRestMax = std::max(nacRestMax, nacTotal - nacDrawEnd);
         if (++nacFrames >= 60) {
             const double n = nacFrames;
             qInfo().noquote()
-                << QStringLiteral("app->step 内部: 场景采样 %1 ms | HUD 绘制 %2 ms | 其余(观察+返回拷贝) %3 ms")
+                << QStringLiteral("app->step 内部: 场景采样 %1/峰%2 ms | HUD 绘制 %3/峰%4 ms | "
+                                  "其余(观察+返回拷贝) %5/峰%6 ms")
                        .arg(nacSampleSum / n, 0, 'f', 2)
+                       .arg(nacSampleMax, 0, 'f', 2)
                        .arg(nacDrawSum / n, 0, 'f', 2)
-                       .arg(nacRestSum / n, 0, 'f', 2);
+                       .arg(nacDrawMax, 0, 'f', 2)
+                       .arg(nacRestSum / n, 0, 'f', 2)
+                       .arg(nacRestMax, 0, 'f', 2);
             nacSampleSum = nacDrawSum = nacRestSum = 0;
+            nacSampleMax = nacDrawMax = nacRestMax = 0;
             nacFrames = 0;
         }
     }

@@ -83,19 +83,30 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
         auto *diag = new QTimer(this);
         diag->setInterval(1000);
         connect(diag, &QTimer::timeout, this, [this] {
-            static quint64 lastSteps = 0, lastScene = 0, lastHud = 0, lastRender = 0;
+            static quint64 lastSteps = 0, lastScene = 0, lastHud = 0, lastRender = 0, lastWakes = 0,
+                           lastChanged = 0;
             const quint64 render = m_renderFrames.load(std::memory_order_relaxed);
+            const quint64 gpuMicros = m_gpuTimeMicros.load(std::memory_order_relaxed);
             const double avgGap = m_paceTicks > 1 ? double(m_paceGapSum) / (m_paceTicks - 1) / 1e6 : 0;
             const double avgStep = m_paceTicks > 0 ? double(m_paceStepSum) / m_paceTicks / 1e6 : 0;
-            qInfo("节拍诊断: tick/s=%llu sceneUpd/s=%llu hudUpd/s=%llu render/s=%llu "
+            qInfo("节拍诊断: tick/s=%llu sceneUpd/s=%llu hudUpd/s=%llu render/s=%llu wake/s=%llu "
+                  "changed/s=%llu gpu=%.2fms(%s) "
                   "interval=%dms timerActive=%d sleeping=%d sceneSleeping=%d rotating=%d "
-                  "hudAnimating=%d | 间隔均=%.2fms 最大=%.2fms step均=%.2fms 最大=%.2fms",
+                  "hudAnimating=%d pendingAnim=%d stableFrames=%d | "
+                  "间隔均=%.2fms 最大=%.2fms step均=%.2fms 最大=%.2fms",
                   qulonglong(m_steps) - lastSteps, qulonglong(m_sceneUpdates) - lastScene,
-                  qulonglong(m_hudUpdates) - lastHud, qulonglong(render) - lastRender, timer.interval(),
+                  qulonglong(m_hudUpdates) - lastHud, qulonglong(render) - lastRender,
+                  qulonglong(m_wakes) - lastWakes, qulonglong(m_changedSteps) - lastChanged,
+                  gpuMicros / 1000.0,
+                  RhineRender::gpuTimingStatusName(RhineRender::GpuTimingStatus(
+                      m_gpuTiming.load(std::memory_order_relaxed))), timer.interval(),
                   int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping), int(m_discRotating),
-                  int(app->hud.animating(m_animationTime)), avgGap, double(m_paceGapMax) / 1e6, avgStep,
+                  int(app->hud.animating(m_animationTime)),
+                  int(m_frame.value("pendingAnimations").toBool()), m_stableFrames, avgGap, double(m_paceGapMax) / 1e6, avgStep,
                   double(m_paceStepMax) / 1e6);
             lastSteps = qulonglong(m_steps);
+            lastWakes = m_wakes;
+            lastChanged = m_changedSteps;
             lastScene = qulonglong(m_sceneUpdates);
             lastHud = qulonglong(m_hudUpdates);
             lastRender = render;
@@ -360,6 +371,7 @@ void Engine::requestSceneContent() {
     notifySceneRenderers(true);
 }
 void Engine::wake(bool input) {
+    ++m_wakes;
     const bool wasSleeping = m_sleeping;
     const auto now = clock.elapsed();
     if (input) {
@@ -808,6 +820,9 @@ void Engine::step(double time) {
         scene.timings = {};
     }
     ++m_steps;
+    if (scene.changed()) {
+        ++m_changedSteps;
+    }
     const bool reuse = m_sceneSleeping && !scene.changed();
     const auto object = app->step(time, m_width / (m_height / 1080), reuse);
 #ifdef Q_OS_LINUX
