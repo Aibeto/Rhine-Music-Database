@@ -44,6 +44,8 @@ class ScenePostProcess : public SceneResources {
               const QList<QRhiTexture *> &textures);
     void fsrQuad(QRhiCommandBuffer *commands, const QString &kind, QRhiRenderTarget *destination,
                  QRhiTexture *source, const Fsr1Con &constants);
+    /** RHINE_POST_PROBE 下按“路径切换”打一次日志；未开启时只有一次静态布尔判断。 */
+    void probe(const char *path, const char *detail);
     QString m_mode;
     QSize m_renderSize;
     QSize m_displaySize;
@@ -52,6 +54,10 @@ class ScenePostProcess : public SceneResources {
     Target m_history[2];
     int m_historyIndex = 0;
     bool m_historyValid = false;
+    // 上一次写入 RHINE_FSR_ENGINE 的值：值只由“FSR3 是否可用”决定，不必每帧 qputenv。
+    QByteArray m_fsrEngine;
+    // RHINE_POST_PROBE 下上一次打印的路径标签，避免同一路径每帧刷屏。
+    QString m_probePath;
     QRhiBuffer *m_globals = nullptr;
     QRhiBuffer *m_constants = nullptr;
     QRhiBuffer *m_rcasConstants = nullptr;
