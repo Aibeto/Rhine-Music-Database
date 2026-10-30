@@ -150,6 +150,9 @@ class Renderer {
 #endif
     int sampleCount = 1;
     QString sizedAaMode;
+    // A05：运动矢量附件当前是否真的分配了。它是目标形状的一部分，必须和尺寸/采样数/
+    // AA 模式一起参与 resize() 的早退比较，否则切换 AA 模式后会沿用旧目标。
+    bool motionTarget = false;
     QString root;
     std::vector<std::unique_ptr<QRhiResource>> resources, sized, transient;
     QHash<QString, Mesh> meshes;
@@ -539,11 +542,25 @@ class Renderer {
         const auto nextSize = postProcess->renderSize(value);
         const int nextSamples = postProcess->samples();
         const auto nextMode = qEnvironmentVariable("RHINE_AA_MODE");
-        if (viewSize == value && size == nextSize && sampleCount == nextSamples && sizedAaMode == nextMode) {
+        // A05：只有确实有人读时才挂运动矢量附件。
+        //   · 多采样目标本来就没有第二个 draw buffer 可写，维持原来的让路策略；
+        //   · 单采样时看配置（AA 模式 + FG 开关）而不是 FSR 运行期可用性，否则能力
+        //     探测翻一次就重建整帧目标；重投影探针也要读矢量图，不能一并裁掉。
+        const bool wantMotion = nextSamples <= 1 &&
+                                (postProcess->motionConfigured() ||
+                                 qEnvironmentVariableIsSet("RHINE_WARP_PROBE"));
+        if (viewSize == value && size == nextSize && sampleCount == nextSamples &&
+            sizedAaMode == nextMode && motionTarget == wantMotion) {
             return;
+        }
+        if (motionTarget != wantMotion) {
+            // 现场核对用：只在真的切换时打一行，不按帧刷屏。
+            qInfo().noquote() << "运动矢量目标:" << (wantMotion ? "分配" : "不分配")
+                              << "| AA" << nextMode << "| samples" << nextSamples;
         }
         sampleCount = nextSamples;
         sizedAaMode = nextMode;
+        motionTarget = wantMotion;
 #endif
         viewSize = value;
         size = nextSize;
@@ -558,12 +575,13 @@ class Renderer {
             create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, sampleCount, rtFlags), true));
         auto resolved = sampleCount > 1 ? texture(size, QRhiTexture::RGBA16F, rtFlags, true) : nullptr;
 #ifdef Q_OS_LINUX
-        // 单采样时额外挂一张运动矢量目标，供插帧/时域直接读取，省掉第二趟几何。
-        // 注意：OpenGL 后端只有一个 draw buffer，片元着色器必须改用不带 location=1 的变体
-        // （opticalSurfaceNoMrt.frag），见 pipeline()。附件本身两个后端都挂着。
-        motionVectors = sampleCount > 1
-                            ? nullptr
-                            : create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1, rtFlags), true));
+        // 运动矢量只在 wantMotion 时分配：off/fxaa/msaa 或 FG 关闭时少一张 RGBA16F，
+        // 也少一遍第二附件的写出带宽。是否带第二个颜色附件由 motionVectors 指针表达：
+        // 为空时 makeTarget 走单附件，pipeline() 据此选 surfaceNoMrt 变体（GL 只有一个
+        // draw buffer，不能在片元着色器里声明 location=1）。
+        motionVectors = motionTarget
+                            ? create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1, rtFlags), true))
+                            : nullptr;
         color = makeTarget(attachment, depth, resolved, motionVectors);
 #else
         color = makeTarget(attachment, depth, resolved);

@@ -15,6 +15,15 @@ class ScenePostProcess : public SceneResources {
     int samples() const;
     bool temporal() const;
     bool needsMotion() const;
+    /**
+     * 目标分配口径：只看"配置"里会不会产生运动矢量消费者（AA 模式 + FG 开关），
+     * 不看 FSR 运行期是否可用。
+     *
+     * 为什么不复用 needsMotion()：消费侧要回答的是"这一帧算不算"，所以要看运行期能力；
+     * 分配侧要回答的是"将来会不会有人读"，只能看配置。若分配也看能力，FSR 前几帧才
+     * 探测出可用时会多一次整帧目标重建（附件出现/消失），白白抖一帧。
+     */
+    bool motionConfigured() const;
     bool active() const;
     void prepare(QSize render, QSize display, const QJsonObject &frame);
     QRhiRenderTarget *inputTarget() const {

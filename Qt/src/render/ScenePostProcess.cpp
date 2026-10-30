@@ -1,4 +1,5 @@
 #include "ScenePostProcess.h"
+#include "RenderPolicy.h"
 #include "../fsr/FsrSharpness.h"
 #include <QFile>
 #include <QJsonArray>
@@ -68,6 +69,14 @@ bool ScenePostProcess::temporal() const {
 }
 bool ScenePostProcess::needsMotion() const {
     return temporal() || RhineFg::isEnabled();
+}
+/**
+ * 目标分配口径：只看配置。AA 模式给出"是不是时域"（taa/fsr/fsr3），FG 宿主开关给出
+ * "插帧要不要读矢量"。运行期能力一律不参与，理由见头文件注释。
+ */
+bool ScenePostProcess::motionConfigured() const {
+    return RhineRender::modeNeedsMotion(qEnvironmentVariable("RHINE_AA_MODE")) ||
+           RhineFg::isEnabled();
 }
 bool ScenePostProcess::active() const {
     return m_mode == "fxaa" || m_mode == "taa" || isFsr(m_mode);
