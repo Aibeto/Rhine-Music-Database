@@ -1,5 +1,6 @@
 #include "NativeHud.h"
 #include "MusicDiscover.h"
+#include "DiscoverMusicCard.h"
 #include <algorithm>
 #include <cmath>
 
@@ -40,7 +41,17 @@ void NativeHud::wheel(double x, double y, double delta, std::optional<int> steps
             return;
         }
         if (modal == "discover") {
-            listOffset = std::clamp(listOffset + step, 0, std::max(0, int(music.discover->items.size()) - 6));
+            const auto bounds = modalBounds(width);
+            const auto viewport = DiscoverMusicCard::layout(bounds, music.discover->items.size()).viewport;
+            if (!closing && !categoryPicker && viewport.contains(x, y - motion.offset)) {
+                const auto movement = distance.value_or(step * 60.);
+                discoverScroll = std::clamp(discoverScroll + movement, 0., discoverScrollMaximum);
+                // 只在滚动接近已载入内容末尾时续载，绘制过程不发起列表请求。
+                if (movement > 0 && discoverScroll >= discoverScrollMaximum - 120 &&
+                    !music.discover->loading && music.discover->more) {
+                    music.discover->load(music.discover->tab, true);
+                }
+            }
             return;
         }
         if (modal == "player") {

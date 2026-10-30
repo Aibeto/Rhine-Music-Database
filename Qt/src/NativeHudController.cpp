@@ -77,6 +77,7 @@ void NativeHud::openModal(QString kind) {
     query.clear();
     listOffset = 0;
     settingsScroll = 0;
+    discoverScroll = 0;
     activeGroup.clear();
     artistTab = "songs";
     categoryPicker = false;
@@ -471,7 +472,7 @@ void NativeHud::action(QString value) {
         auto &discover = *music.discover;
         const auto name = parts.value(1);
         if (name == "tab") {
-            listOffset = 0;
+            discoverScroll = 0;
             categoryPicker = false;
             categoryPage = 0;
             discover.load(parts.value(2));
@@ -486,7 +487,7 @@ void NativeHud::action(QString value) {
                 closeModal();
             }
         } else if (name == "area" && music.provider == "qq") {
-            listOffset = 0;
+            discoverScroll = 0;
             discover.newSongArea = parts.value(2);
             discover.load("new-songs");
         } else if (name == "categories") {
@@ -496,20 +497,18 @@ void NativeHud::action(QString value) {
                 discover.loadCategories();
             }
         } else if (name == "category-page") {
-            const auto pages =
-                std::max(1, (int(discover.categories.size()) + CategoryPageSize - 1) / CategoryPageSize);
+            const int allCategory = music.provider != "qq" || discover.categories.isEmpty() ? 1 : 0;
+            const auto pages = std::max(
+                1, (int(discover.categories.size()) + allCategory + CategoryPageSize - 1) / CategoryPageSize);
             const auto step = parts.value(2) == "prev" ? -1 : 1;
             categoryPage = std::clamp(categoryPage + step, 0, pages - 1);
         } else if (name == "category") {
-            listOffset = 0;
+            discoverScroll = 0;
             categoryPicker = false;
             discover.category = decode(parts.value(2));
             discover.load("categories");
         } else if (name == "more") {
             discover.load(discover.tab, true);
-        } else if (name == "prev" || name == "next") {
-            const auto maximum = std::max(0, int(discover.items.size()) - 6);
-            listOffset = std::clamp(listOffset + (name == "prev" ? -6 : 6), 0, maximum);
         }
         return;
     }

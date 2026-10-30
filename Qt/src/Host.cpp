@@ -677,7 +677,7 @@ QString Host::fromLink(QString input) const {
     }
     return kind + ":" + id;
 }
-void Host::loadCover(QString input, TextReply callback) {
+void Host::loadCover(QString input, TextReply callback, int maximumDimension) {
     // 后台仅保留封面地址；像素解码与纹理由可退出的 GUI 独占。
     if (playbackOnly) {
         schedule(0, [input, callback] { callback(input); });
@@ -727,9 +727,11 @@ void Host::loadCover(QString input, TextReply callback) {
         callback({});
         return;
     }
+    // 档案缩略图使用较小解码预算；未指定尺寸的现有调用仍保留 1024 像素封面。
+    const auto dimension = std::clamp(maximumDimension, 128, 1024);
     QUrlQuery query(url);
     query.removeAllQueryItems("param");
-    query.addQueryItem("param", "1024y1024");
+    query.addQueryItem("param", QString::number(dimension) + "y" + QString::number(dimension));
     url.setQuery(query);
     auto key = url.toString();
     if (images.contains(key)) {
@@ -806,7 +808,7 @@ void Host::loadCover(QString input, TextReply callback) {
                 }
             }
         });
-        watcher->setFuture(QtConcurrent::run([bytes] {
+        watcher->setFuture(QtConcurrent::run([bytes, dimension] {
             QBuffer buffer;
             buffer.setData(bytes);
             buffer.open(QIODevice::ReadOnly);
@@ -815,9 +817,9 @@ void Host::loadCover(QString input, TextReply callback) {
             if (!size.isValid() || size.width() > 8192 || size.height() > 8192) {
                 return QImage();
             }
-            // 保留大封面的细节；小图不在解码阶段放大，避免重复插值。
-            if (size.width() > 1024 || size.height() > 1024) {
-                reader.setScaledSize(size.scaled(1024, 1024, Qt::KeepAspectRatio));
+            // 小图不在解码阶段放大，避免重复插值。
+            if (size.width() > dimension || size.height() > dimension) {
+                reader.setScaledSize(size.scaled(dimension, dimension, Qt::KeepAspectRatio));
             }
             return reader.read();
         }));

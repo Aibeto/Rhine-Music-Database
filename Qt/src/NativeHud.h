@@ -20,6 +20,8 @@ struct HudSceneActions {
     std::function<void(bool)> coverFront;
 };
 
+class DiscoverArtwork;
+
 class NativeHud : public QObject {
     Q_OBJECT
   public:
@@ -74,6 +76,8 @@ class NativeHud : public QObject {
     bool categoryPicker = false;
     int categoryPage = 0;
     static constexpr int CategoryPageSize = 40;
+    double discoverScroll = 0;
+    double discoverScrollMaximum = 0;
     QString themeMode;
     int listOffset = 0;
     int musicCollection = 1;
@@ -155,6 +159,9 @@ class NativeHud : public QObject {
     QCache<QString, QString> m_fitCache{512};
     std::map<QString, UiMotion::RollingLabel> m_rolling;
     QString m_sortNotice;
+    // QObject 子对象拥有生命周期，封面回调不跨越 HUD 销毁。
+    DiscoverArtwork *m_discoverArtwork = nullptr;
+    QString m_discoverScrollScope;
     QString m_songQueueFeedbackKey;
     QHash<QString, QString> m_songQueueFeedback;
     // 每个按钮独立计时，重复点击重启计时器；HUD 销毁时自动取消回调。

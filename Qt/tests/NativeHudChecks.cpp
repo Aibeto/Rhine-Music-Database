@@ -3,6 +3,8 @@
 #include "MusicData.h"
 #include "MusicDiscover.h"
 #include "PlayerBar.h"
+#include "DiscoverArtwork.h"
+#include "DiscoverMusicCard.h"
 #include <QCoreApplication>
 #include <QElapsedTimer>
 #include <QThread>
@@ -10,6 +12,8 @@
 #include <QGuiApplication>
 #include <QJsonDocument>
 #include <QSet>
+#include <QTemporaryDir>
+#include <QUrl>
 #include <cmath>
 #include <cstdio>
 
@@ -391,6 +395,40 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
     bool ok = checkSorting(root, glyphs, content);
     ok &= checkPlayerBar(glyphs);
     ok &= checkPlayerInput(root, glyphs, content);
+    {
+        // 快速切换可见页时，迟到的封面不能重新写回新页；只保留当前页的键。
+        QTemporaryDir directory;
+        QImage red(24, 24, QImage::Format_RGB32);
+        red.fill(Qt::red);
+        QImage green(24, 24, QImage::Format_RGB32);
+        green.fill(Qt::green);
+        const auto redPath = directory.path() + "/first.png";
+        const auto greenPath = directory.path() + "/second.png";
+        if (!directory.isValid() || !red.save(redPath) || !green.save(greenPath)) {
+            qCritical() << "Cannot prepare discovery artwork fixture";
+            return false;
+        }
+        DiscoverArtwork artwork(&host);
+        const auto first = QUrl::fromLocalFile(redPath).toString();
+        const auto second = QUrl::fromLocalFile(greenPath).toString();
+        artwork.show("old-account", {first});
+        artwork.show("new-account", {second});
+        QElapsedTimer elapsed;
+        elapsed.start();
+        while (artwork.image(second).isEmpty() && elapsed.elapsed() < 3000) {
+            QCoreApplication::processEvents();
+            QThread::msleep(5);
+        }
+        if (!artwork.image(first).isEmpty() || host.image(artwork.image(second)).isNull()) {
+            qCritical() << "Discovery artwork accepted stale data or lost the current image";
+            ok = false;
+        }
+        artwork.show("new-account", {});
+        if (!artwork.image(second).isEmpty()) {
+            qCritical() << "Discovery artwork retained a hidden-page image";
+            ok = false;
+        }
+    }
     int testCount = 0;
 
     // 测试所有平台和主题组合
@@ -814,6 +852,129 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             }
 
             // === 测试 7: 每日推荐资料库入口 ===
+            // 固定外框内连续滚动：首屏两个特殊卡加五列方形档案，底部可访问最后一项。
+            music->discover->tab = "playlists";
+            const auto originalMore = music->discover->more;
+            music->discover->more = false;
+            hud.openModal("discover");
+            for (const double stageWidth : {1280.0, 1920.0, 2560.0}) {
+                hud.discoverScroll = 0;
+                hud.draw(archiveFrame, stageWidth, 50);
+                const auto modalWidth = std::min(1260.0, stageWidth - 100);
+                const QRectF expected((stageWidth - modalWidth) / 2, 122, modalWidth, 836);
+                if (hud.modalBounds(stageWidth) != expected) {
+                    qCritical() << "Discovery redesign changed its external bounds";
+                    ok = false;
+                }
+                QVector<QRectF> cards;
+                for (int index = 0; index < 7; ++index) {
+                    const auto target = getHit(hud.hits, "discover:item:" + QString::number(index));
+                    const QRectF rectangle(target["x"].toDouble(), target["y"].toDouble(),
+                                           target["width"].toDouble(), target["height"].toDouble());
+                    if (target.isEmpty() || !expected.contains(rectangle)) {
+                        qCritical() << "Discovery card missing or outside panel" << index << stageWidth;
+                        ok = false;
+                    }
+                    for (const auto &previous : cards) {
+                        if (previous.intersects(rectangle)) {
+                            qCritical() << "Discovery item hit targets overlap";
+                            ok = false;
+                        }
+                    }
+                    if (index >= 2 && (!cards.isEmpty() && index > 2) && rectangle.y() != cards.last().y()) {
+                        qCritical() << "Discovery archive must have five cards per row";
+                        ok = false;
+                    }
+                    cards.append(rectangle);
+                }
+                if (hasAction(hud.hits, "discover:next") || hasAction(hud.hits, "discover:prev")) {
+                    qCritical() << "Discovery content still uses pagination controls";
+                    ok = false;
+                }
+                const auto viewport =
+                    DiscoverMusicCard::layout(expected, music->discover->items.size()).viewport;
+                // 标题和面板之外的滚动不应移动档案，触控板的连续距离则应精确累计。
+                hud.wheel(expected.center().x(), expected.top() + 150, -120, 1, 75.);
+                if (hud.discoverScroll != 0) {
+                    qCritical() << "Discovery header intercepted archive scrolling";
+                    ok = false;
+                }
+                hud.wheel(viewport.center().x(), viewport.center().y(), 0, 0, 75.);
+                if (hud.discoverScroll != 75) {
+                    qCritical() << "Discovery lost continuous trackpad distance";
+                    ok = false;
+                }
+                hud.wheel(viewport.center().x(), viewport.center().y(), -120, 1, 10000.);
+                hud.draw(archiveFrame, stageWidth, 50);
+                const auto last = music->discover->items.size() - 1;
+                if (!hasAction(hud.hits, "discover:item:" + QString::number(last)) ||
+                    hasAction(hud.hits, "discover:item:0") ||
+                    hud.discoverScroll != hud.discoverScrollMaximum) {
+                    qCritical() << "Discovery scrolling lost the last archive or retained special cards";
+                    ok = false;
+                }
+                for (const auto &value : hud.hits) {
+                    const auto target = value.toObject();
+                    if (!target["action"].toString().startsWith("discover:item:")) {
+                        continue;
+                    }
+                    const QRectF rectangle(target["x"].toDouble(), target["y"].toDouble(),
+                                           target["width"].toDouble(), target["height"].toDouble());
+                    if (!viewport.contains(rectangle)) {
+                        qCritical() << "Scrolled archive hit target escaped its viewport";
+                        ok = false;
+                    }
+                }
+                hud.wheel(viewport.center().x(), viewport.center().y(), 120, -1, -10000.);
+            }
+            music->discover->more = originalMore;
+            const auto originalFirst = music->discover->items.first();
+            const auto originalThird = music->discover->items.at(2);
+            const QString coverKey = "file:///rhine-offline/discovery-cover.png";
+            QImage wideCover(200, 100, QImage::Format_RGB32);
+            wideCover.fill(Qt::green);
+            host.fixtureImage(coverKey, wideCover);
+            auto covered = originalFirst.toObject();
+            covered["cover"] = coverKey;
+            music->discover->items[0] = covered;
+            const QString squareKey = "file:///rhine-offline/discovery-square.png";
+            QImage squareCover(100, 100, QImage::Format_RGB32);
+            squareCover.fill(Qt::blue);
+            host.fixtureImage(squareKey, squareCover);
+            auto squareEntry = originalThird.toObject();
+            squareEntry["cover"] = squareKey;
+            music->discover->items[2] = squareEntry;
+            hud.draw(archiveFrame, 1920, 50);
+            bool aspectPreserved = false;
+            bool squarePreserved = false;
+            bool framedCover = false;
+            bool centeredTab = false;
+            const auto selectedTab = getHit(hud.hits, "discover:tab:playlists");
+            const auto tabCenter = selectedTab["x"].toDouble() + selectedTab["width"].toDouble() / 2;
+            for (const auto &value : hud.commands) {
+                const auto command = value.toArray();
+                if (command.first() == "rotate") {
+                    framedCover = std::abs(command.at(1).toDouble() - 0.0872664626) < 0.00001;
+                }
+                if (command.first() == "text" && command.at(1) == "推荐歌单") {
+                    const auto center = command.at(2).toDouble() + glyphs.width("推荐歌单", 12) / 2;
+                    centeredTab = std::abs(center - tabCenter) < 0.01;
+                }
+                if (command.size() == 6 && command.first() == "image" && command.at(1) == squareKey) {
+                    squarePreserved = std::abs(command.at(4).toDouble() - command.at(5).toDouble()) < 0.01;
+                }
+                if (command.size() == 6 && command.first() == "image" && command.at(1) == coverKey) {
+                    aspectPreserved =
+                        std::abs(command.at(4).toDouble() / command.at(5).toDouble() - 2) < 0.001;
+                }
+            }
+            if (!aspectPreserved || !squarePreserved || !framedCover || !centeredTab) {
+                qCritical() << "Discovery cover or centered tabs regressed" << aspectPreserved
+                            << squarePreserved << framedCover << centeredTab;
+                ok = false;
+            }
+            music->discover->items[0] = originalFirst;
+            music->discover->items[2] = originalThird;
             music->discover->tab = "daily";
             hud.openModal("discover");
             hud.draw(archiveFrame, 1920, 50);
@@ -848,6 +1009,20 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             if (!hasAction(hud.hits, "discover:category:1") || !hasAction(hud.hits, "discover:category:2")) {
                 qCritical() << provider << "category list missing choices" << (dark ? "dark" : "light");
                 ok = false;
+            }
+            if (provider == "netease") {
+                music->discover->categories = {};
+                for (int index = 0; index < NativeHud::CategoryPageSize; ++index) {
+                    music->discover->categories.append(QJsonObject{{"id", "edge-" + QString::number(index)},
+                                                                   {"name", QString::number(index)}});
+                }
+                hud.categoryPage = 0;
+                hud.action("discover:category-page:next");
+                hud.draw(archiveFrame, 1920, 50);
+                if (!hasAction(hud.hits, "discover:category:edge-39")) {
+                    qCritical() << "Discovery category pagination omitted the final entry after All";
+                    ok = false;
+                }
             }
 
             delete music;

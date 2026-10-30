@@ -172,6 +172,13 @@ void NativeHud::modalDraw(double width) {
          dark ? QJsonArray{0.15, 0.15, 0.15, 1, "calibratedWhite"} : QJsonArray{0.929, 0.922, 0.894, 1});
     hits = {};
     m_modalControls = true;
+    if (modal == "discover") {
+        // 发现页独立绘制内部外观；弹层边界、遮罩、位移动画与关闭流程仍由宿主管理。
+        discoverPanel(x, y, usable);
+        m_modalControls = false;
+        restore();
+        return;
+    }
     QString category = "MUSIC DIRECTORY";
     if (modal == "settings") {
         category = "SYSTEM PREFERENCES";
@@ -226,8 +233,6 @@ void NativeHud::modalDraw(double width) {
         limited(music.status, x + 53, y + 775, 12, usable - 106);
     } else if (modal == "local") {
         localPanel(x, y, usable);
-    } else if (modal == "discover") {
-        discoverPanel(x, y, usable);
     } else if (modal == "player") {
         playerPanel(x, y, usable);
     } else if (modal == "settings") {
@@ -653,8 +658,8 @@ void NativeHud::settings(double x, double y, double width) {
 #ifdef Q_OS_DARWIN
     rows.append({"METALFX / 帧生成 · 重启生效", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
 #else
-    rows.append({"FRAME GENERATION / 帧生成 · 重启生效", fgUi.value,
-                 fgUi.clickable ? "fg" : "fg:unavailable"});
+    rows.append(
+        {"FRAME GENERATION / 帧生成 · 重启生效", fgUi.value, fgUi.clickable ? "fg" : "fg:unavailable"});
 #endif
 #else
     // 帧生成是独立开关，不随抗锯齿模式循环。呈现层在能力可用时常驻接管窗口，
