@@ -1,4 +1,5 @@
 #include "NativeCards.h"
+#include "render/HotPathProbe.h"
 #include <QMatrix4x4>
 #include <algorithm>
 #include <cstring>
@@ -31,6 +32,7 @@ QMatrix4x4 localMatrix(const QJsonArray &values) {
  * 每张卡片只传一份根矩阵；局部偏移仅对标签等非单位部件计算。
  */
 QString NativeCards::expand(QJsonObject &frame, const QByteArray &bytes, SceneDrawBuffers &buffers) {
+    RhineRender::HotPathTimer cardTimer(RhineRender::hotPathWindow().cardNs);
     if (frame.contains("actorTemplate")) {
         parts = frame["actorTemplate"].toArray();
     }
@@ -40,6 +42,7 @@ QString NativeCards::expand(QJsonObject &frame, const QByteArray &bytes, SceneDr
         return QStringLiteral("Invalid native card packet");
     }
     auto draws = frame["draws"].toArray();
+    const qsizetype initialDraws = draws.size();
     for (qsizetype index = 0; index < cards.size(); ++index) {
         double state[stride];
         memcpy(state, bytes.constData() + index * stride * sizeof(double), sizeof(state));
@@ -145,6 +148,11 @@ QString NativeCards::expand(QJsonObject &frame, const QByteArray &bytes, SceneDr
             draws.append(draw);
         }
     }
+    auto &hotPath = RhineRender::hotPathWindow();
+    hotPath.cardCalls.fetch_add(1);
+    hotPath.cards.fetch_add(quint64(cards.size()));
+    hotPath.cardParts.fetch_add(quint64(parts.size()));
+    hotPath.cardDraws.fetch_add(quint64(draws.size() - initialDraws));
     frame["draws"] = draws;
     frame.remove("actorTemplate");
     frame.remove("actors");

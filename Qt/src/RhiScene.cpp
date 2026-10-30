@@ -5,6 +5,7 @@
 #include "render/MetalFxBackend.h"
 #endif
 #include "render/CoverPrepBudget.h"
+#include "render/HotPathProbe.h"
 #include "render/MaterialSlotKey.h"
 #include "render/SceneSyncCache.h"
 #include "render/MotionPass.h"
@@ -2219,6 +2220,7 @@ class Renderer {
         return result;
     }
     QRhiBuffer *instance(QJsonObject draw) {
+        RhineRender::HotPathTimer packTimer(RhineRender::hotPathWindow().packNs);
         auto &state = instances[draw["id"].toInt()];
         if (state.used == generation) {
             return state.buffer;
@@ -2330,6 +2332,7 @@ class Renderer {
             bytes = QByteArray(reinterpret_cast<const char *>(values.data()),
                                values.size() * sizeof(Instance));
         }
+        RhineRender::hotPathWindow().packBytes.fetch_add(quint64(bytes.size()));
         if (instancePoolEnabled) {
             // 池化：CPU 侧只留本帧字节，GPU buffer 由 poolInstances() 统一分配与上传。
             state.bytes = bytes;
@@ -2497,6 +2500,7 @@ class Renderer {
      * 透明与透射物体保留原排序；每个实例继续使用原来的矩阵、主题和揭示状态。
      */
     QList<Draw> batchDraws(const QList<Draw> &input) {
+        RhineRender::HotPathTimer batchTimer(RhineRender::hotPathWindow().batchNs);
         QList<Draw> result;
         QList<QByteArray> bytes;
         QList<QByteArray> keys;
@@ -2537,6 +2541,11 @@ class Renderer {
             }
             bytes[index].append(instances.value(data["id"].toInt()).bytes);
             result[index].data["count"] = result[index].data["count"].toInt() + data["count"].toInt();
+        }
+        auto &hotPath = RhineRender::hotPathWindow();
+        hotPath.batchCount.fetch_add(quint64(result.size()));
+        for (const auto &chunk : bytes) {
+            hotPath.batchBytes.fetch_add(quint64(chunk.size()));
         }
         for (int i = 0; i < result.size(); ++i) {
             if (!keys[i].isEmpty()) {
@@ -2631,6 +2640,7 @@ class Renderer {
             instancePool.cursor = 0;
             return;
         }
+        quint64 compareBytes = 0, uploadBytes = 0, uploads = 0;
         QHash<QByteArray, InstancePoolMirror> next;
         next.reserve(slices.size());
         for (int i = 0; i < slices.size(); ++i) {
@@ -2639,7 +2649,10 @@ class Renderer {
             const auto previous = instancePool.mirror.constFind(slice.key);
             const bool same = previous != instancePool.mirror.constEnd() && previous->bytes == slice.state->bytes;
             const quint64 previousOffset = previous != instancePool.mirror.constEnd() ? previous->offset : ~quint64(0);
+            compareBytes += quint64(slice.state->bytes.size());
             if (RhineRender::poolWriteNeeded(same, offset, previousOffset)) {
+                uploadBytes += quint64(slice.state->bytes.size());
+                ++uploads;
                 updates->updateDynamicBuffer(instancePool.buffer, int(offset), int(slice.state->bytes.size()),
                                              slice.state->bytes.constData());
                 if (vkProbe) {
@@ -2653,6 +2666,10 @@ class Renderer {
         }
         instancePool.mirror = next;
         instancePool.cursor = cursor;
+        auto &poolProbe = RhineRender::hotPathWindow();
+        poolProbe.poolCompareBytes.fetch_add(compareBytes);
+        poolProbe.poolUploadBytes.fetch_add(uploadBytes);
+        poolProbe.poolUploads.fetch_add(uploads);
     }
     void geometry(QRhiCommandBuffer *cb, const QList<Draw> &draws) {
         // 所有后端共用同一条「先去重再提交」的路径：先把每个 draw 的 pipeline 算出来
