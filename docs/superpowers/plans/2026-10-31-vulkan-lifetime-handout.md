@@ -47,9 +47,11 @@
 
 位置：[归位推进／删除](../../../Qt/src/NativeSceneUpdate.cpp#L193)、[draw 展开](../../../Qt/src/NativeSceneFrame.cpp#L114)、[资源退场](../../../Qt/src/RhiScene.cpp#L2806)。
 
-- [ ] 每次选择新增 actor 会展开多个 draw；只有 lift 与 rotation 收敛才移除 actor。测 returning 数、年龄、实际 dt 和删除数，确认 C04 合并 step 后时钟仍真实推进，停止后确实全部归位、所引用的 music key／材质／实例随之退出活动集合。
-- [ ] 若有同一 cell 的重复归位实体或永不收敛状态，修状态机及增删对称性；若只是输入持续快于归位速度，区分暂时动画积压和永久退化，保持视觉语义。初轮不硬截 returning 数、不跳动画、不提弹簧速度来制造提升。
-- [ ] 加有限往返的状态机测试：无输入并推进到满足现有收敛条件后，returning=0；主实例、draw／活动资源回到相同基线。GPU 原生释放可滞后提交完成，不能要求同一 CPU 帧立即下降；也不能用手工 resize／重启清理来当修复。
+> 实施：归位不收敛的根因是落位用了 `Spring::damp(0, 4.5, seconds)`——每步乘子 `(1+rate·h)·e^{-rate·h}` 在 60 fps 下约 0.99727，等效时间常数≈6 秒，且随帧率变化；改成 `SceneLifetime::returningLiftStep()` 的帧率无关指数衰减（标称速率仍是 4.5／减弱 35），单份归位寿命从近一分钟降到约 3.3 秒。`select()` 另修了重复归位：同一格先移除旧那份（位置完全重合，只是重复展开部件、重复引用同一 music key）。按计划首轮**没有**硬截 returning 数、没有跳动画、没有提弹簧速度；积压仍是暂时的（每帧换格时稳态≈200 份，停止输入后数秒清空）。探针：frame 增 `returningAgeMax`，`3D内部` 行打印 `归位 N(最老 X.XXs)`；新增 Core-only 用例 `Qt/tests/SceneLifetimeChecks.cpp`（17 项，含 400 次往返 churn 与满积压收敛）。未做运行期实测（计划禁止自动跑 GUI），age／数量需人工带 `RHINE_FG_DIAG=1` 观察。
+
+- [x] 每次选择新增 actor 会展开多个 draw；只有 lift 与 rotation 收敛才移除 actor。测 returning 数、年龄、实际 dt 和删除数，确认 C04 合并 step 后时钟仍真实推进，停止后确实全部归位、所引用的 music key／材质／实例随之退出活动集合。
+- [x] 若有同一 cell 的重复归位实体或永不收敛状态，修状态机及增删对称性；若只是输入持续快于归位速度，区分暂时动画积压和永久退化，保持视觉语义。初轮不硬截 returning 数、不跳动画、不提弹簧速度来制造提升。
+- [x] 加有限往返的状态机测试：无输入并推进到满足现有收敛条件后，returning=0；主实例、draw／活动资源回到相同基线。GPU 原生释放可滞后提交完成，不能要求同一 CPU 帧立即下降；也不能用手工 resize／重启清理来当修复。
 
 ## E05：进一步 Vulkan 减负，修复稳定后独立 A/B
 

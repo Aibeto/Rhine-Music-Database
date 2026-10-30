@@ -91,6 +91,8 @@ class NativeScene {
         double clarity = 0;
         double theme = 0;
         QString musicKey;
+        /// E04：归位已存在多久（秒）。用来丢弃"最老的一份"，也用来观察积压年龄。
+        double age = 0;
     };
     struct Cinema {
         double time;

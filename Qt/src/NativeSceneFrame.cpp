@@ -69,10 +69,12 @@ void NativeScene::emitFrame(double time) {
         draws.append(draw);
     }
     QJsonArray returningKeys;
+    double returningAgeMax = 0;
     for (const auto &actor : m_returning) {
         if (!actor.musicKey.isEmpty()) {
             returningKeys.append(actor.musicKey);
         }
+        returningAgeMax = std::max(returningAgeMax, actor.age);
     }
     frame = {{"pendingAnimations", m_viewer->pending()},
              {"pointerCursor", m_cursor},
@@ -91,6 +93,7 @@ void NativeScene::emitFrame(double time) {
              {"returningPartNodes", 0},
              {"globalSubdued", 0},
              {"returningMusicKeys", returningKeys},
+             {"returningAgeMax", returningAgeMax},
              {"time", time},
              {"draws", draws},
              {"view", m_view.json()},

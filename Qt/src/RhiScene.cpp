@@ -2935,6 +2935,7 @@ class Renderer {
         dbgPre.restart();
         const int dbgParts = int(draws.size());
         const int dbgReturning = int(frame["returningMusicKeys"].toArray().size());
+        const double dbgReturningAge = frame["returningAgeMax"].toDouble();
 #endif
         // E03：直写映射的生命周期收进 prepare()——容量规划→开始映射→写满→收尾，
         // 不再由调用方在 prepare 外面包一层（那层包在 ensureMaterialArena 之前）。
@@ -3084,11 +3085,11 @@ class Renderer {
             // "返回滚动 draw 变多"和"每个 draw 变贵"。
             qWarning("3D内部(%d 帧): 后处理 %.1f  纹理 %.1f/峰%.1f  draw改写 %.1f/峰%.1f  "
                      "装配 %.1f/峰%.1f  构建 %.1f/峰%.1f  录制 %.1f/峰%.1f ms | "
-                     "draws %d 部件 %d 实例 %d 归位 %d",
+                     "draws %d 部件 %d 实例 %d 归位 %d(最老 %.2fs)",
                      dbgFrames, dbgPostSum / dbgFrames, dbgTexSum / dbgFrames, dbgTexMax,
                      dbgMusicSum / dbgFrames, dbgMusicMax, dbgListSum / dbgFrames, dbgListMax,
                      dbgBuild / dbgFrames, dbgBuildMax, dbgRecord / dbgFrames, dbgRecordMax,
-                     int(draws.size()), dbgParts, dbgInstances, dbgReturning);
+                     int(draws.size()), dbgParts, dbgInstances, dbgReturning, dbgReturningAge);
             dbgBuild = dbgRecord = 0;
             dbgPostSum = dbgTexSum = dbgListSum = dbgMusicSum = 0;
             dbgTexMax = dbgListMax = dbgBuildMax = dbgRecordMax = dbgMusicMax = 0;

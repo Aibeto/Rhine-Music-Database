@@ -661,6 +661,11 @@ if(MSVC)
 endif()
 add_test(NAME qt_vulkan_resource_regression COMMAND RhineVulkanResourceRegression)
 
+qt_add_executable(RhineSceneLifetimeRegression Qt/tests/SceneLifetimeChecks.cpp)
+target_include_directories(RhineSceneLifetimeRegression PRIVATE Qt/src)
+target_link_libraries(RhineSceneLifetimeRegression PRIVATE Qt6::Core)
+add_test(NAME qt_scene_lifetime_regression COMMAND RhineSceneLifetimeRegression)
+
 # Linux 显卡选择里能离线验证的部分：PCI 地址解析、序号 → 环境变量的映射、序号失效时的回退。 写错的后果是"选错卡"或"配置失效后仍注入变量"，只能靠用例拦。三平台都编， sysfs
 # 相关用例在源码里按平台裁剪。
 qt_add_executable(RhineGpuChoiceRegression Qt/tests/LinuxGpuChecks.cpp Qt/src/LinuxGraphics.cpp

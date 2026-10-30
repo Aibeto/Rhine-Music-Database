@@ -1,4 +1,5 @@
 #include "NativeScene.h"
+#include "SceneLifetimePolicy.h"
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -192,6 +193,7 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
     const auto entryZ = cinema ? -23 * std::pow(1 - entranceTime, 2) : -28 * (1 - entry);
     for (int index = m_returning.size() - 1; index >= 0; --index) {
         auto &actor = m_returning[index];
+        actor.age += seconds;
         const auto position = cellPosition(actor.cell);
         const auto baseY = position.y + field(actor.cell.row, actor.cell.lane);
         actor.rotation.y = SceneMotion::returnStep(actor.rotation.y, seconds, m_reduced);
@@ -201,7 +203,10 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
                 actor.returnY.reset();
             }
         } else {
-            actor.lift.damp(0, m_reduced ? 35 : 4.5, seconds);
+            // E04：改用与帧率无关的指数衰减；`Spring::damp` 的每步乘子会让 60 fps 下
+            // 的实际时间常数落到约 6 秒，归位卡片因此滞留近一分钟。
+            actor.lift.value = SceneLifetime::returningLiftStep(actor.lift.value, seconds, m_reduced);
+            actor.lift.velocity = 0;
         }
         actor.position = {position.x - trackX, baseY + actor.lift.value + hoverLift(actor.cell),
                           position.z + entryZ + m_rail.value};
