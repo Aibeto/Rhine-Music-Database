@@ -9,6 +9,13 @@ namespace {
 double lerp(double from, double to, double amount) {
     return (1 - amount) * from + amount * to;
 }
+
+// 实例身份取网格坐标而不是列表下标：按距离重排、可见集合增删都不会改变"这块卡片是谁"。
+// lane 与 row 各自落在 int16 内（只有超过 2048 才会 rebase 平移坐标系），
+// 因此 16+16 位编码在同一帧内不碰撞，跨帧也只跟格子本身绑定。
+quint32 cellInstanceId(SceneMotion::Cell cell) {
+    return quint32(quint16(cell.lane)) << 16 | quint16(cell.row);
+}
 }
 
 double NativeScene::field(double row, double lane) const {
@@ -227,6 +234,8 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
     const SceneMath::Frustum coverage(m_projection * m_view);
     QByteArray visibleMatrices;
     QByteArray themes;
+    // 与 visibleMatrices 同步增长的逐实例 id，条数必须严格对齐，运动矢量才敢按下标配对。
+    QVector<quint32> instanceIds;
     m_drawnCells.clear();
     m_drawnMatrices.clear();
     auto candidateProjection =
@@ -254,6 +263,7 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
         m_drawnCells.append(cell);
         m_drawnMatrices.append(matrix);
         visibleMatrices.append(matrix.bytes());
+        instanceIds.append(cellInstanceId(cell));
         const auto theme = float(m_theme.sample(cell, time));
         themes.append(reinterpret_cast<const char *>(&theme), sizeof(theme));
     }
@@ -284,23 +294,27 @@ void NativeScene::update(double time, std::optional<Cinema> cinema) {
             QVector<Matrix> matrices;
             QByteArray sortedMatrices;
             QByteArray sortedThemes;
+            QVector<quint32> sortedIds;
             cells.reserve(m_drawnCells.size());
             matrices.reserve(m_drawnMatrices.size());
             sortedMatrices.reserve(visibleMatrices.size());
             sortedThemes.reserve(themes.size());
+            sortedIds.reserve(instanceIds.size());
             for (const auto index : order) {
                 cells.append(m_drawnCells[index]);
                 matrices.append(m_drawnMatrices[index]);
                 sortedMatrices.append(m_drawnMatrices[index].bytes());
                 sortedThemes.append(themes.constData() + index * int(sizeof(float)), sizeof(float));
+                sortedIds.append(instanceIds[index]);
             }
             m_drawnCells = cells;
             m_drawnMatrices = matrices;
             visibleMatrices = sortedMatrices;
             themes = sortedThemes;
+            instanceIds = sortedIds;
         }
     }
-    drawBuffers[10] = {visibleMatrices, themes};
+    drawBuffers[10] = {visibleMatrices, themes, instanceIds};
     double neighborTop = -1e100;
     for (int row = selectedRow - 5; row <= selectedRow + 5; ++row) {
         if (row != selectedRow) {

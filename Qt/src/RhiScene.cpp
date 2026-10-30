@@ -190,11 +190,24 @@ class Renderer {
     };
     QHash<int, BufferState> instances;
 #ifdef Q_OS_LINUX
-    // 运动矢量 MRT 所需的上一帧状态：逐 draw 的实例矩阵与上一帧 VP。
-    QHash<int, QByteArray> previousInstanceMatrices;
+    // 运动矢量 MRT 所需的上一帧状态。
+    //  previousInstanceMatrices：主路径，key = drawId<<32 | 实例 id，按稳定 id 精确配对；
+    //    实例列表每帧都按相机距离重排，只有 id 能表达"同一条实例"。
+    //    值存定长 PackedMatrix 而不是 QByteArray：每帧要写上千条，64 字节的 QByteArray
+    //    每条都是一次堆分配，而定长值直接躺在 QHash 的节点里，清空重填能复用节点。
+    //  previousInstanceBlocks：旧路径（按平移列配对）要按上一帧的下标取矩阵，只有整块字节
+    //    保留得住顺序，所以两张表并存；没有实例 id 的 draw（地台）也只能走这条。
+    QHash<quint64, PackedMatrix> previousInstanceMatrices;
+    QHash<int, QByteArray> previousInstanceBlocks;
+    // 上一帧逐 draw 记录到的实例条数：与当前 ids 条数不一致就说明可见集合刚变过，
+    // id 表必然缺项，这一帧整块退回平移列配对，避免大面积 zero-velocity。
+    QHash<int, int> previousInstanceCounts;
     QMatrix4x4 previousViewProjection;
     QElapsedTimer frameClock;
     bool motionHistoryValid = false;
+    // 配对探针（RHINE_MOTION_PROBE=1）：本帧按 id 命中 / 按平移列回退命中 / 完全没配上的实例数。
+    quint64 motionByIdHits = 0, motionFallbackHits = 0, motionMisses = 0;
+    int motionProbeFrames = 0;
     QRhiTexture *motionVectors = nullptr;
     // 重投影插帧探针（RHINE_WARP_PROBE=1）：把当前场景颜色按运动矢量前推到 t 相位。
     // 与 FFX 插值不同，相位 t 可任意取（FFX 硬编码 0.5），且不需要第二趟几何。
@@ -561,6 +574,15 @@ class Renderer {
         sampleCount = nextSamples;
         sizedAaMode = nextMode;
         motionTarget = wantMotion;
+#endif
+#ifdef Q_OS_LINUX
+        // 走到这里说明颜色目标真的要重建（尺寸/采样数/AA 模式变了）：上一帧的 VP 与实例矩阵
+        // 都对应旧目标，继续拿它们算重投影会在新目标的第一帧里得到完全错误的方向。
+        // 早退分支在上面，所以静止画面不会每帧清表。
+        previousInstanceMatrices.clear();
+        previousInstanceBlocks.clear();
+        previousInstanceCounts.clear();
+        motionHistoryValid = false;
 #endif
         viewSize = value;
         size = nextSize;
@@ -1061,27 +1083,46 @@ class Renderer {
         if (state.used == generation) {
             return state.buffer;
         }
+        const int drawId = draw["id"].toInt();
+        const int count = draw["count"].toInt();
         const auto matrices = matrixBytes(draw);
+        // 取引用而不是 QHash::value()：后者会把整块实例矩阵按值拷一遍，循环里每实例再查一次
+        // 就是几百次整块拷贝。none 只用来顶住"本帧没有这个 draw"的空绑定。
+        static const SceneDrawData none;
+        const auto nativeFound = nativeBuffers.constFind(drawId);
+        const SceneDrawData &native = nativeFound != nativeBuffers.constEnd() ? *nativeFound : none;
 #ifdef Q_OS_LINUX
-        // 上一帧实例按平移列配对：列表滚动后顺序会变，按索引直接配对会给出错误速度。
+        // 探针开关只读一次环境变量；默认关闭时下面的计数分支整段是死代码（零成本）。
+        static const bool motionProbe = qEnvironmentVariableIntValue("RHINE_MOTION_PROBE") == 1;
+        const auto &ids = native.ids;
+        // 主路径的准入条件：本帧带实例 id，且上一帧同一 draw 记录到的条数与之一致。
+        // 条数不一致说明可见格子刚增删过，上一帧 id 表必然缺项；这时整块退回旧路径，
+        // 比"按 id 只配上一半、另一半速度归零"更不容易看到撕裂。
+        const bool byId = !ids.isEmpty() && previousInstanceCounts.value(drawId, -1) == int(ids.size());
+        // 旧路径：按平移列配对。列表滚动后顺序会变，按索引直接配对会给出错误速度。
+        // 保留给没有实例 id 的 draw（地台）以及上面条数对不上的那一帧。
+        static const QByteArray noBlock;
+        const auto blockFound = previousInstanceBlocks.constFind(drawId);
+        const QByteArray &previousBytes =
+            blockFound != previousInstanceBlocks.constEnd() ? *blockFound : noBlock;
         QHash<QByteArray, int> previousTranslations;
-        const auto previousBytes = previousInstanceMatrices.value(draw["id"].toInt());
-        for (int index = 0; (index + 1) * 64 <= previousBytes.size(); ++index) {
-            previousTranslations.insert(previousBytes.mid(index * 64 + 48, 16), index);
-        }
         QHash<int, int> previousMatched;
-        for (int index = 0; (index + 1) * 64 <= matrices.size(); ++index) {
-            const int match = previousTranslations.value(matrices.mid(index * 64 + 48, 16), -1);
-            if (match >= 0) {
-                previousMatched.insert(index, match);
+        if (!byId) {
+            for (int index = 0; (index + 1) * 64 <= previousBytes.size(); ++index) {
+                previousTranslations.insert(previousBytes.mid(index * 64 + 48, 16), index);
+            }
+            for (int index = 0; (index + 1) * 64 <= matrices.size(); ++index) {
+                const int match = previousTranslations.value(matrices.mid(index * 64 + 48, 16), -1);
+                if (match >= 0) {
+                    previousMatched.insert(index, match);
+                }
             }
         }
 #endif
-        const auto native = nativeBuffers.value(draw["id"].toInt());
         const auto themes = draw["themes"].toArray();
         std::vector<Instance> values;
-        values.reserve(draw["count"].toInt());
-        for (int i = 0; i < draw["count"].toInt(); ++i) {
+        values.reserve(count);
+        for (int i = 0; i < count; ++i) {
             Instance value;
             if ((i + 1) * 64 <= matrices.size()) {
                 memcpy(value.model.elements, matrices.constData() + i * 64, 64);
@@ -1098,12 +1139,38 @@ class Renderer {
             value.state = {n(draw, "quality"), n(draw, "clarity"), theme, hero ? 1.f : 0.f};
 #ifdef Q_OS_LINUX
             value.previousModel = PackedMatrix();
-            const auto previous = previousInstanceMatrices.value(draw["id"].toInt());
-            const int previousIndex = previousMatched.value(i, -1);
-            if (previousIndex >= 0 && (previousIndex + 1) * 64 <= previous.size()) {
-                memcpy(value.previousModel.elements, previous.constData() + previousIndex * 64, 64);
-            } else if ((i + 1) * 64 <= matrices.size()) {
-                memcpy(value.previousModel.elements, matrices.constData() + i * 64, 64);
+            bool paired = false;
+            if (byId && i < ids.size()) {
+                // key = drawId<<32 | 实例 id：两个维度压成一把哈希，省掉每组再挂一层 QHash。
+                const auto exact =
+                    previousInstanceMatrices.constFind(quint64(quint32(drawId)) << 32 | quint64(ids[i]));
+                if (exact != previousInstanceMatrices.constEnd()) {
+                    value.previousModel = *exact;
+                    paired = true;
+                    if (motionProbe) {
+                        ++motionByIdHits;
+                    }
+                }
+            }
+            if (!paired) {
+                const int previousIndex = previousMatched.value(i, -1);
+                if (previousIndex >= 0 && (previousIndex + 1) * 64 <= previousBytes.size()) {
+                    memcpy(value.previousModel.elements, previousBytes.constData() + previousIndex * 64, 64);
+                    paired = true;
+                    if (motionProbe) {
+                        ++motionFallbackHits;
+                    }
+                }
+            }
+            if (!paired) {
+                // 完全没配上就退回当前矩阵（速度 0）：宁可静一帧，也不要拿别的实例的矩阵
+                // 算出一片乱流方向的矢量。
+                if ((i + 1) * 64 <= matrices.size()) {
+                    memcpy(value.previousModel.elements, matrices.constData() + i * 64, 64);
+                }
+                if (motionProbe) {
+                    ++motionMisses;
+                }
             }
 #endif
             values.push_back(value);
@@ -1750,10 +1817,50 @@ class Renderer {
         publishMotionInputs(frame);
         previousViewProjection = unjitteredVp;
         previousInstanceMatrices.clear();
-        for (const auto &draw : data) {
-            previousInstanceMatrices.insert(draw.data["id"].toInt(), matrixBytes(draw.data));
+        previousInstanceBlocks.clear();
+        previousInstanceCounts.clear();
+        // 没有运动矢量附件时（AA 模式让路或 FG 关闭）previousModel 根本没人读，
+        // 每帧上千条记录纯属开销，直接跳过。重新分配目标一定会走 resize()，
+        // 那里已经把三张表清空，所以不会出现"跳过若干帧后接着用跨目标重建的旧矩阵"。
+        if (motionTarget) {
+            for (const auto &draw : data) {
+                const int drawId = draw.data["id"].toInt();
+                // 整块字节始终按 draw 记一份：旧路径要按上一帧的下标取矩阵，只有它保得住顺序。
+                const auto bytes = matrixBytes(draw.data);
+                previousInstanceBlocks.insert(drawId, bytes);
+                const auto native = nativeBuffers.constFind(drawId);
+                if (native == nativeBuffers.constEnd() || native->ids.isEmpty()) {
+                    continue;  // 没有实例 id 的 draw（地台）下一帧只能走平移列配对。
+                }
+                const auto &ids = native->ids;
+                PackedMatrix previous;
+                int recorded = 0;
+                for (int index = 0; index < int(ids.size()); ++index) {
+                    if ((index + 1) * 64 > bytes.size()) {
+                        break;
+                    }
+                    memcpy(previous.elements, bytes.constData() + index * 64, sizeof(previous.elements));
+                    previousInstanceMatrices.insert(quint64(quint32(drawId)) << 32 | quint64(ids[index]),
+                                                    previous);
+                    ++recorded;
+                }
+                // 条数按"真正写进去的"记：矩阵字节比 id 少时下一帧这条闸门就该判 false，
+                // 而不是被 ids.size() 蒙过去、让后半截实例静默丢速度。
+                previousInstanceCounts.insert(drawId, recorded);
+            }
         }
         motionHistoryValid = true;
+        // 配对探针：每 120 帧一行，说明这一帧到底有多少实例是按 id 配上的、
+        // 退回平移列配上的、以及完全没配上（速度按 0 处理）的。
+        // 静止画面下应当全部是"按 id"；滚动时允许回退计数短暂占多数。
+        static const bool motionProbe = qEnvironmentVariableIntValue("RHINE_MOTION_PROBE") == 1;
+        if (motionProbe && ++motionProbeFrames >= 120) {
+            qInfo().noquote() << "运动矢量配对: 按 id" << qint64(motionByIdHits) << "| 平移列回退"
+                              << qint64(motionFallbackHits) << "| 未配对" << qint64(motionMisses)
+                              << "| MRT" << (motionTarget ? "开" : "关");
+            motionProbeFrames = 0;
+            motionByIdHits = motionFallbackHits = motionMisses = 0;
+        }
 #else
         velocityPass(cb, data, frame);
 #endif

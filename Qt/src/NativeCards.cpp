@@ -53,6 +53,10 @@ QString NativeCards::expand(QJsonObject &frame, const QByteArray &bytes, SceneDr
             matrixValues[i] = float(state[i]);
         }
         const QByteArray rootBytes(reinterpret_cast<const char *>(matrixValues), sizeof(matrixValues));
+        // 卡片 draw 各自只含一个实例（count=1），但被选中的主体每帧都在移动：
+        // 补上稳定 id 之后运动矢量能按 id 取到上一帧矩阵，而不再因为平移列变了就退回当前矩阵、
+        // 把速度算成 0。同一 draw 内实例唯一，用卡片 id 即可（部件差异已经体现在 draw id 里）。
+        const QVector<quint32> ids{quint32(card["id"].toInt())};
         for (const auto &entry : parts) {
             const auto part = entry.toObject();
             const bool shadowOnly = card["shadowOnly"].toBool();
@@ -137,7 +141,7 @@ QString NativeCards::expand(QJsonObject &frame, const QByteArray &bytes, SceneDr
                 }
                 matrixBytes = QByteArray(reinterpret_cast<const char *>(matrixValues), sizeof(matrixValues));
             }
-            buffers.insert(id, {matrixBytes, {}});
+            buffers.insert(id, {matrixBytes, {}, ids});
             draws.append(draw);
         }
     }
