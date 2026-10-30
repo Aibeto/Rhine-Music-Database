@@ -3,6 +3,7 @@
 #ifdef Q_OS_DARWIN
 #include "render/MetalFxBackend.h"
 #endif
+#include "render/CoverPrepBudget.h"
 #include "render/MotionPass.h"
 #include "render/RenderPolicy.h"
 #include "render/ScenePostProcess.h"
@@ -368,6 +369,9 @@ class Renderer {
     QSet<qint64> coverSyncFallback;             // 预处理失败的 revision：改走同步路径
     QQueue<CoverPrepareResult> uploadQueue;     // 已算完、等上传预算的成品
     quint64 coverSerial = 0;
+    // B03：在途名额由独立账本管，逻辑取消（撤意图、切歌、淘汰）不归还名额——
+    // 工作线程还在跑，名额就还被占着，否则反复取消就能把实际并发顶到上限之上。
+    RhineRender::CoverPrepBudget coverBudget{COVER_PREP_MAX_INFLIGHT};
     bool coverAsyncDisabled = false;  // 线程池拒绝过任务：此后一律同步
     // 单帧离屏参考渲染（renderReference）只跑一帧，没有"后续帧"可以等异步结果，
     // 由调用方置位强制同步，否则参考图里的封面会退化成占位图。
@@ -382,6 +386,7 @@ class Renderer {
     quint64 droppedQueue = 0;       // 探针：队列溢出丢弃数
     quint64 deferredFrames = 0;     // 探针：本周期内因预算顺延过上传的帧数
     QVector<int> firstVisibleFrames;
+    quint64 cancelledDemands = 0;   // 探针：逻辑取消的需求数（撤意图/切歌/淘汰）
     int probeFrames = 0;
     bool coverProbe = qEnvironmentVariableIntValue("RHINE_TEXTURE_PROBE") == 1;
     QSize size;
@@ -1050,20 +1055,23 @@ class Renderer {
      * 异步（线程池拒绝），调用方必须退回同步路径。
      */
     PrepStart startCoverPrep(const QString &key, const QImage &image, int coverSize, qint64 revision) {
-        if (coverPrep.size() >= COVER_PREP_MAX_INFLIGHT) {
+        const auto ticket = coverBudget.acquire(coverSerial + 1);
+        if (!ticket.acquired) {
             return PrepStart::Busy;
         }
-        const CoverPrepRequest request{++coverSerial, key, frameIndex};
+        const CoverPrepRequest request{ticket.serial, key, frameIndex};
         auto task = new CoverPrepareTask(mailbox, image, coverSize, revision, request.serial, key,
                                          request.frame);
         // 用 tryStart 而不是 start：线程池正在析构时必须能看出来，否则封面会静默消失。
         if (!QThreadPool::globalInstance()->tryStart(task)) {
             // 失败时 Qt 对 runnable 的所有权在不同版本里不一致（有的版本会替调用方删），
             // 这里不 delete：最坏是关停瞬间漏一个 QRunnable，换的是绝不重复释放。
+            coverBudget.release(ticket.serial);
             coverAsyncDisabled = true;
             qWarning("封面预处理线程池不可用，封面回退同步路径");
             return PrepStart::Unavailable;
         }
+        coverSerial = ticket.serial;
         coverPrep.insert(revision, request);
         return PrepStart::Started;
     }
@@ -1102,7 +1110,7 @@ class Renderer {
             // 没人再要就别建纹理，否则会留下一张 textureOrder 永远选不到、也就永远不淘汰的
             // 孤儿纹理（textureOrder 里根本没有这个 key）。
             if (coverTextures.contains(result.revision) ||
-                !coverWanted.values().contains(result.revision)) {
+                !RhineRender::coverRevisionWanted(coverWanted, result.revision)) {
                 ++droppedStale;
                 continue;
             }
@@ -1143,6 +1151,9 @@ class Renderer {
             incoming.swap(mailbox->queue);
         }
         for (auto &result : incoming) {
+            // 账本先结清：每个在途请求恰好收一条结果，取消过的也要结清，否则名额
+            // 会因为"逻辑取消"永久泄漏（或反过来被反复归还，把上限顶高）。
+            coverBudget.release(result.serial);
             // 过期判定看三件事：请求代号还是不是当前那一个（切歌/淘汰会作废代号）、
             // 是否还有 key 想要这个 revision、以及是不是已经有别的路径把它做出来了。
             const auto request = coverPrep.value(result.revision);
@@ -1152,8 +1163,8 @@ class Renderer {
                 // coverWorkPending() 当成"还在路上"而永久请求新帧，也不给重发留机会。
                 coverPrep.remove(result.revision);
             }
-            if (!current || coverTextures.contains(result.revision) ||
-                !coverWanted.values().contains(result.revision)) {
+            if (!RhineRender::shouldAcceptPreparedCover(current, coverTextures.contains(result.revision),
+                                                        coverWanted, result.revision)) {
                 ++droppedStale;
                 continue;  // 整块 QByteArray 随 result 析构一起释放
             }
@@ -1185,7 +1196,7 @@ class Renderer {
         reportCoverProbe();
     }
     /** 还有预处理在路上、或成品没传完：需要再要一帧，否则结果会一直躺在队列里。 */
-    bool coverWorkPending() const { return !uploadQueue.isEmpty() || !coverPrep.isEmpty(); }
+    bool coverWorkPending() const { return !uploadQueue.isEmpty() || coverBudget.inflight() > 0; }
     /** RHINE_TEXTURE_PROBE=1 时每 120 帧一行；字段名固定，方便直接 grep/喂脚本。 */
     void reportCoverProbe() {
         if (!coverProbe || (++probeFrames % 120) != 0) {
@@ -1216,12 +1227,30 @@ class Renderer {
         deferredFrames = 0;
     }
     /**
+     * B03：撤掉已经没有任何候选 key 想要（也不在当前场景里）的封面需求。
+     * 只清意图、不动已上传纹理：热缓存要继续复用，等 LRU 自然退休。
+     */
+    void pruneCoverDemands() {
+        for (auto it = coverWanted.begin(); it != coverWanted.end();) {
+            if (!activeTextureKeys.contains(it.key())) {
+                it = coverWanted.erase(it);
+                ++cancelledDemands;
+            } else {
+                ++it;
+            }
+        }
+    }
+    /**
      * 作废某 key 名下的在途预处理：结果回来时判不过请求代号，直接丢弃。
      * 只在"这张图已经没人要"时调用——还被别的 key 要着的 revision 必须留着。
      */
     void discardCoverPrepFor(const QString &key) {
         for (auto it = coverPrep.begin(); it != coverPrep.end();) {
-            if (it.value().key == key && !coverWanted.values().contains(it.key())) {
+            if (it.value().key == key && !RhineRender::coverRevisionWanted(coverWanted, it.key())) {
+                // 逻辑取消：只撤请求记录，不归还并发名额——任务可能还在线程池里跑，
+                // 名额要等 drainCoverPrep 收到它的结果才结清。
+                coverBudget.cancel(it.value().serial);
+                ++cancelledDemands;
                 it = coverPrep.erase(it);
             } else {
                 ++it;
@@ -2098,7 +2127,8 @@ class Renderer {
 #endif
         updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
         ++generation;
-        // 帧号先递增：后续统计靠它算帧差。
+        // 帧号先递增：updateMusic 里的"准入→换绑"样本靠它算帧差。成品回收则移到需求
+        // 更新之后（见下），否则本帧会先绑一张随即被撤销的封面，下一帧再换回去。
         ++frameIndex;
         // 每帧重置 arena：实例数据按帧重建，偏移从 0 开始。
         activeTextureKeys.clear();
@@ -2107,8 +2137,8 @@ class Renderer {
         for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
             activeTextureKeys.insert(it.key());
         }
-        // B02：先更新身份与纹理选择，再消费在途结果。顺序反了的话，本帧会先绑上一张
-        // 即将被撤销的封面，下一帧再换回去——肉眼就是闪一下。
+        // B02/B03：先更新身份与有效需求，再消费在途结果与上传队列。顺序反了的话，
+        // 本帧会先绑上一张即将被撤销的封面，下一帧再换回去——肉眼就是闪一下。
         // 恢复图形设备时只还原"已准入且确实缺纹理"的旧唱片：路过的条目永远不补资源。
         for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
             if (it.key() != currentMusicKey && it->admitted && !labels.contains(it.key()) &&
@@ -2117,6 +2147,7 @@ class Renderer {
             }
         }
         updateMusic(item, cover, musicTextures.value(currentMusicKey).admitted);
+        pruneCoverDemands();
         drainCoverPrep();
 #ifdef Q_OS_LINUX
         const double dbgTexMs = double(dbgPre.nsecsElapsed()) / 1e6;
