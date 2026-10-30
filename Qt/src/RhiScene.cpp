@@ -4,6 +4,7 @@
 #include "render/MetalFxBackend.h"
 #endif
 #include "render/CoverPrepBudget.h"
+#include "render/MaterialSlotKey.h"
 #include "render/MotionPass.h"
 #include "render/RenderPolicy.h"
 #include "render/ScenePostProcess.h"
@@ -339,7 +340,8 @@ class Renderer {
     QRhiTexture *warpSource = nullptr;
     QRhiTexture *warpVectors = nullptr;
 #endif
-    QHash<QString, MaterialState> materials;
+    // C02：键用整数 id/mesh 加短名字，去掉每帧每 draw 的临时字符串分配与长串哈希。
+    QHash<RhineRender::MaterialSlotKey, MaterialState> materials;
     QHash<QString, QRhiShaderResourceBindings *> postBindings;
     QHash<QString, QString> labelRevisions;
     QHash<QString, qint64> coverRevisions;
@@ -930,7 +932,11 @@ class Renderer {
                 }
                 d["opacity"] = opacity;
             }
-            d["debugIndex"] = int(result.size());
+            // C02：debugIndex 只有 RHINE_DEBUG_TINT 的诊断着色会读。默认不写，未改动的 draw
+            // 就能与输入共享同一份 QJsonObject，不必为了一个诊断字段每帧深拷贝。
+            if (qEnvironmentVariableIsSet("RHINE_DEBUG_TINT")) {
+                d["debugIndex"] = int(result.size());
+            }
             result << d;
             // 密集背景采用透光档案壳，不在每个占位实例中塞入不透明的白色盘体。
             if (name != "Frosted_Polymer" || d["shadowOnly"].toBool() || d["instanced"].toBool()) {
@@ -1333,23 +1339,30 @@ class Renderer {
      * 封面合成与预处理全部跳过，绘制侧回落到中性占位——绝不借用上一首的纹理。
      */
     void updateMusic(const QJsonObject &value, QImage image, bool admitted) {
-        const auto key = value["key"].toString("empty");
+        // 空条目不占纹理槽：启动阶段或选中项清空时，key 为空，如果照旧登记，会白占一条
+        // 标签纹理与 LRU 名额（而且永远不会再被用到）。这种情况只更新条目本身。
+        const auto key = value["key"].toString();
+        const bool hasKey = !key.isEmpty();
         const auto labelRevision = value["title"].toString() + "|" + value["artist"].toString() + "|" +
                                    value["kind"].toString() + "|" + value["id"].toString();
         const qint64 coverRevision = image.cacheKey();
         musicItem = value;
-        textureOrder.removeAll(key);
-        textureOrder << key;
+        if (hasKey) {
+            textureOrder.removeAll(key);
+            textureOrder << key;
+        }
         // 单帧离屏参考渲染必须当帧出图，是唯一可以绕过准入的门槛例外。
         const bool allowResources = admitted || forceSynchronousCover;
         if (!allowResources) {
             ++gatedUpdates;
         }
-        if (admitted && !forceSynchronousCover && !covers.contains(key) && !admittedFrame.contains(key)) {
+        if (hasKey && admitted && !forceSynchronousCover && !covers.contains(key)
+            && !admittedFrame.contains(key)) {
             // 从准入这一刻开始等封面换绑，用于探针统计"焦点稳定→画面到位"的帧数。
             admittedFrame.insert(key, frameIndex);
         }
-        if (allowResources && (!labels.contains(key) || labelRevisions.value(key) != labelRevision)) {
+        if (hasKey && allowResources
+            && (!labels.contains(key) || labelRevisions.value(key) != labelRevision)) {
             if (const auto previous = labels.value(key)) {
                 invalidateBindings(previous);
             }
@@ -1369,7 +1382,7 @@ class Renderer {
         // 登记的意图已经不是当前这张图了：撤销意图并作废在途请求，否则迟到的结果会把
         // 已经切走的封面又贴回来。有图才判（默认值取当前 revision，没登记时本分支不触发）；
         // 空图沿用原语义——一旦该 key 有了封面，后续空图不再改写它。
-        if (!image.isNull() && coverWanted.value(key, coverRevision) != coverRevision) {
+        if (hasKey && !image.isNull() && coverWanted.value(key, coverRevision) != coverRevision) {
             coverWanted.remove(key);
             discardCoverPrepFor(key);
         }
@@ -1377,7 +1390,8 @@ class Renderer {
             !covers.contains(key) || (!image.isNull() && coverRevisions.value(key) != coverRevision);
         // 已经为这个 revision 登记过意图（在途/排队/等预算）就什么都不做。
         // 若每帧重新发起，上一张结果会被判成过期并被丢掉，封面永远上不了屏。
-        if (coverChanging && allowResources && coverWanted.value(key, qint64(-1)) != coverRevision) {
+        if (hasKey && coverChanging && allowResources
+            && coverWanted.value(key, qint64(-1)) != coverRevision) {
             // 先登记"这个 key 想要哪个 revision"：异步结果回来时靠它判断还有人要不要，
             // 也是整条链唯一一处声明意图的地方。旧封面此刻不退休——换绑时由
             // bindCoverTexture 一并处理，这样等待期间画面仍是上一张封面而不是占位灰块。
@@ -1711,6 +1725,9 @@ class Renderer {
         int start;
         int count;
         QRhiShaderResourceBindings *bindings;
+        /// C02：prepare() 已经算过一次材质；批处理、几何提交与诊断都复用它，
+        /// 避免同一帧对同一个 draw 反复读二十来个 JSON 字段。
+        Surface material;
 #ifdef Q_OS_LINUX
         // arena 内偏移；instances 为 nullptr 时生效（0 也合法，表示 arena 起点）。
         int instanceOffset = 0;
@@ -1718,7 +1735,11 @@ class Renderer {
     };
     QList<Draw> prepare(const QList<QJsonObject> &draws, bool decorationHigh) {
         QList<Draw> result;
+        result.reserve(draws.size());
         const auto stages = QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage;
+        // 这两项只与当前曲目有关，和具体 draw 无关：循环外算一次。
+        const auto selectedKey = musicItem["key"].toString("empty");
+        const auto currentCover = covers.value(selectedKey, placeholderCover);
         for (auto d : draws) {
             if (d["count"].toInt() <= 0) {
                 continue;
@@ -1755,15 +1776,14 @@ class Renderer {
             } else if (!d["floor"].toBool()) {
                 continue;
             }
-            const auto resourceKey =
-                QString::number(d["id"].toInt()) + "/" + QString::number(mesh) + "/" + d["name"].toString();
+            // C02：键用整数 id/mesh 加短名字，不再拼临时字符串。
+            const RhineRender::MaterialSlotKey resourceKey{d["id"].toInt(), mesh, d["name"].toString()};
             auto &state = materials[resourceKey];
             state.used = generation;
             const auto material = surface(d);
             const auto mb = dynamicBuffer(
                 state.uniform, QByteArray(reinterpret_cast<const char *>(&material), sizeof(material)),
                 QRhiBuffer::UniformBuffer);
-            const auto selectedKey = musicItem["key"].toString("empty");
             const auto key = d["musicSelected"].toBool() ? selectedKey : d["musicKey"].toString();
             QRhiTexture *label = white;
             if (mesh == -5) {
@@ -1779,9 +1799,6 @@ class Renderer {
                                            : labels.value(key, white);
             }
             // 着色器只有盘面读取封面，只有标签读取文字；其他表面绑定稳定的占位纹理。
-            // 查看封面页的绘制来自装配体，key 不是曲目 key，直接查表会落回占位图，
-            // 表现成"封面没贴上去、只看到烘焙壳体"。查不到时用当前曲目的封面。
-            const auto currentCover = covers.value(selectedKey, placeholderCover);
             // 查看封面页的绘制来自装配体，key 不是曲目 key（空），仍回落当前曲目封面；
             // 归位卡片则不许借：不是当前曲目就绑定占位纹理。
             const auto coverFallback = key.isEmpty() || key == selectedKey ? currentCover : placeholderCover;
@@ -1809,7 +1826,7 @@ class Renderer {
                                                                normalAtlas, linear)},
                     false);
             }
-            result.append({d, vertices, indices, instance(d), label, cover, start, count, state.bindings});
+            result.append({d, vertices, indices, instance(d), label, cover, start, count, state.bindings, material});
         }
         return result;
     }
@@ -1826,7 +1843,7 @@ class Renderer {
         QHash<QByteArray, int> groupSlots;
         for (const auto &draw : input) {
             const auto &data = draw.data;
-            const auto material = surface(data);
+            const auto &material = draw.material;
             const bool eligible =
                 !data["transparent"].toBool() && material.flags.x() != 2 && data["depthWrite"].toBool();
             if (!eligible) {
@@ -1884,7 +1901,7 @@ class Renderer {
             if (data["shadowOnly"].toBool()) {
                 continue;
             }
-            const bool hashed = surface(data).flags.x() == 2;
+            const bool hashed = draw.material.flags.x() == 2;
             const bool blend = hashed || data["transparent"].toBool();
             const bool depthWrite = hashed || !blend || data["depthWrite"].toBool();
             auto *pass = pipeline("surface", draw.bindings, color.rp, false,
@@ -2263,7 +2280,7 @@ class Renderer {
                 std::fprintf(
                     stderr, "draw #%02d %-26s mesh=%d type=%.0f side=%.0f opacity=%.2f transparent=%d\n",
                     draw.data["debugIndex"].toInt(), qPrintable(draw.data["name"].toString()),
-                    draw.data["mesh"].toInt(), surface(draw.data).flags.x(), draw.data["side"].toDouble(),
+                    draw.data["mesh"].toInt(), draw.material.flags.x(), draw.data["side"].toDouble(),
                     draw.data["opacity"].toDouble(), draw.data["transparent"].toBool() ? 1 : 0);
             }
             std::fflush(stderr);

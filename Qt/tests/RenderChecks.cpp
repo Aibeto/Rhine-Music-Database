@@ -3,6 +3,7 @@
 // 这些判断写错不会崩溃，只会让面板/CSV 把"没请求"说成"没样本"、把配置缺口算成驱动延迟，
 // 所以只能靠用例拦。本文件只依赖 Qt6::Core：不建 QGuiApplication、不碰 QRhi，三平台 CI
 // 都能离线跑。
+#include "render/MaterialSlotKey.h"
 #include "render/RenderPolicy.h"
 
 #include <QString>
@@ -199,6 +200,33 @@ bool timestampRegistration()
     return ok;
 }
 
+// C02：材质槽的键。键算错不会崩，只会让两条 draw 共用同一份 uniform 与纹理绑定槽，
+// 表现成装配体某一部分突然换上了别处的材质 —— 截图里很难认出来，只能靠用例拦。
+bool materialSlotKeys()
+{
+    bool ok = true;
+    const RhineRender::MaterialSlotKey base{17, 3, QStringLiteral("Ivory_Edges")};
+    const RhineRender::MaterialSlotKey same{17, 3, QStringLiteral("Ivory_Edges")};
+    ok &= check(base == same, QStringLiteral("id/mesh/名字 相同 → 键相等"), QStringLiteral("true"),
+                boolText(base == same));
+    ok &= check(qHash(base) == qHash(same), QStringLiteral("相等键的哈希相同"), QStringLiteral("true"),
+                boolText(qHash(base) == qHash(same)));
+    ok &= check(base != RhineRender::MaterialSlotKey{18, 3, QStringLiteral("Ivory_Edges")},
+                QStringLiteral("id 不同 → 键不等"), QStringLiteral("true"),
+                boolText(base != RhineRender::MaterialSlotKey{18, 3, QStringLiteral("Ivory_Edges")}));
+    ok &= check(base != RhineRender::MaterialSlotKey{17, 4, QStringLiteral("Ivory_Edges")},
+                QStringLiteral("mesh 不同 → 键不等"), QStringLiteral("true"),
+                boolText(base != RhineRender::MaterialSlotKey{17, 4, QStringLiteral("Ivory_Edges")}));
+    // 同一个装配 draw 换材质时 id/mesh 可能不变，名字必须参与比较。
+    ok &= check(base != RhineRender::MaterialSlotKey{17, 3, QStringLiteral("Frosted_Polymer")},
+                QStringLiteral("名字不同 → 键不等"), QStringLiteral("true"),
+                boolText(base != RhineRender::MaterialSlotKey{17, 3, QStringLiteral("Frosted_Polymer")}));
+    ok &= check(base != RhineRender::MaterialSlotKey{17, 3, QString()},
+                QStringLiteral("空名字与具名 → 键不等"), QStringLiteral("true"),
+                boolText(base != RhineRender::MaterialSlotKey{17, 3, QString()}));
+    return ok;
+}
+
 } // namespace
 
 int main()
@@ -207,6 +235,7 @@ int main()
     ok &= timingTruthTable();
     ok &= timingStatusNames();
     ok &= motionModeTable();
+    ok &= materialSlotKeys();
     // 放在最后：它会永久翻转进程级的时间戳登记标志。
     ok &= timestampRegistration();
     if (!ok) {
