@@ -201,4 +201,28 @@ inline bool poolSliceFits(quint64 offset, quint64 bytes, quint64 capacity)
     return offset <= capacity && bytes <= capacity - offset;
 }
 
+/**
+ * E05a：紧凑实例（model64 + state16 = 80 字节）只在本次管线确实没有运动矢量
+ * 或其他历史消费者时可用；有 motion／TAA／warp 就必须保留 144 字节的 previousModel。
+ */
+inline bool compactInstanceAllowed(bool requested, bool hasMotionConsumers)
+{
+    return requested && !hasMotionConsumers;
+}
+
+/// 实例步长：紧凑 80 字节，完整版按平台（Linux 144、其余 80）。
+inline quint32 instanceStride(bool compact, quint32 fullStride)
+{
+    return compact ? 80u : fullStride;
+}
+
+/// 紧凑实例省掉的实例载荷比例：44.4%（64/144）。只是载荷口径，不是带宽或 FPS 预测。
+inline double instancePayloadSaving(bool compact, quint32 fullStride)
+{
+    if (!compact || fullStride == 0) {
+        return 0.0;
+    }
+    return double(fullStride - quint32(80)) / double(fullStride);
+}
+
 } // namespace RhineRender

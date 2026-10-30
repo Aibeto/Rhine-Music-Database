@@ -27,7 +27,10 @@ layout(binding = 5) uniform sampler2D cover;
 layout(binding = 6) uniform sampler2D normalAtlas;
 layout(location = 0) out vec4 fragColor;
 // 第二个颜色附件：运动矢量（RG = 屏幕 UV 位移，BA 预留给 FSR3）。
+#ifdef RHINE_SINGLE_PASS_MOTION
+// 只有带运动矢量附件的管线才会写这个输入；紧凑实例变体没有它，声明了也用不上。
 layout(location = 12) in vec2 v_velocity;
+#endif
 /** 只插值烘焙光场的相邻高度切片；没有实时光源求值、光线追踪或折射背景采样。 */
 vec3 bakedIllumination() {
     // 三维光场由硬件三线性采样；RGB 按 sRGB8(线性/4) 存放，这里手工解码后乘回 4.0。

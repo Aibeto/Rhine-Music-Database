@@ -382,6 +382,9 @@ set(RHINE_OPTICAL_SHADER_DEFINES)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND RHINE_OPTICAL_SHADER_DEFINES RHINE_SINGLE_PASS_MOTION=1)
 endif()
+# E05a：紧凑实例（80 字节）的第二套着色器烘焙放在独立子目录：
+# qt_add_shaders 把 .qsb 写到当前二进制目录的 .qsb/ 下，同一目录对同一份源码烘两次会撞规则。
+add_subdirectory(Qt/shaders/compact)
 qt_add_shaders(
     RhineMusicDatabase
     "rhine_enhancement_shaders"

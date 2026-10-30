@@ -287,6 +287,54 @@ bool directWriteAndPoolPlanning()
     return ok;
 }
 
+bool compactInstances()
+{
+    bool ok = true;
+    ok &= check(RhineRender::compactInstanceAllowed(true, false),
+                QStringLiteral("无运动消费者时允许紧凑实例"), QStringLiteral("true"),
+                QStringLiteral("false"));
+    ok &= check(!RhineRender::compactInstanceAllowed(true, true),
+                QStringLiteral("有运动消费者时必须用完整实例"), QStringLiteral("false"),
+                QStringLiteral("true"));
+    ok &= check(!RhineRender::compactInstanceAllowed(false, false),
+                QStringLiteral("没请求就不启用"), QStringLiteral("false"), QStringLiteral("true"));
+    ok &= check(RhineRender::instanceStride(true, 144) == 80,
+                QStringLiteral("紧凑步长 80"), QStringLiteral("80"),
+                number(RhineRender::instanceStride(true, 144)));
+    ok &= check(RhineRender::instanceStride(false, 144) == 144,
+                QStringLiteral("完整步长保持 144"), QStringLiteral("144"),
+                number(RhineRender::instanceStride(false, 144)));
+    const double saving = RhineRender::instancePayloadSaving(true, 144);
+    ok &= check(std::abs(saving - 64.0 / 144.0) < 1e-9,
+                QStringLiteral("载荷节省比例 = 64/144"), QStringLiteral("0.4444"),
+                QString::number(saving, 'f', 4));
+    ok &= check(RhineRender::instancePayloadSaving(false, 144) == 0.0,
+                QStringLiteral("不紧凑时节省为 0"), QStringLiteral("0"),
+                number(RhineRender::instancePayloadSaving(false, 144)));
+    return ok;
+}
+
+bool compactConfigLine()
+{
+    bool ok = true;
+    RhineRender::VulkanResourceConfig config;
+    config.host = QStringLiteral("QQuickRhiItem");
+    config.compactInstanceRequested = true;
+    config.compactInstanceEffective = true;
+    const QString line = RhineRender::formatVulkanConfigLine(config);
+    ok &= check(line.contains(QStringLiteral("紧凑实例 开")),
+                QStringLiteral("配置行要写出紧凑实例生效"), QStringLiteral("紧凑实例 开"), line);
+    config.compactInstanceEffective = false;
+    ok &= check(RhineRender::formatVulkanConfigLine(config).contains(QStringLiteral("紧凑实例 请求开→已回退")),
+                QStringLiteral("请求了没生效要标回退"), QStringLiteral("请求开→已回退"),
+                RhineRender::formatVulkanConfigLine(config));
+    config.compactInstanceRequested = false;
+    ok &= check(RhineRender::formatVulkanConfigLine(config).contains(QStringLiteral("紧凑实例 关")),
+                QStringLiteral("没请求时标关"), QStringLiteral("紧凑实例 关"),
+                RhineRender::formatVulkanConfigLine(config));
+    return ok;
+}
+
 bool configLine()
 {
     bool ok = true;
@@ -336,6 +384,8 @@ int main()
     ok &= directWriteCoverage();
     ok &= materialSlotPlanning();
     ok &= directWriteAndPoolPlanning();
+    ok &= compactInstances();
+    ok &= compactConfigLine();
     ok &= configLine();
     std::printf("Vulkan 资源策略: %d 项检查，%d 项失败\n", g_checks, g_failures);
     return ok && g_failures == 0 ? 0 : 1;

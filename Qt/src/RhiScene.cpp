@@ -129,9 +129,10 @@ static QByteArray readOptional(QString root, QString name) {
     QFile f(root + "/" + name);
     return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
 }
-static QShader shader(QString name) {
+static QShader shader(QString name, bool compact = false) {
     name[0] = name[0].toUpper();
-    QFile f(":/optical/optical" + name + ".qsb");
+    QFile f((compact ? QStringLiteral(":/opticalCompact/optical")
+                     : QStringLiteral(":/optical/optical")) + name + ".qsb");
     if (!f.open(QIODevice::ReadOnly)) {
         qFatal("Missing baked shader: %s", qPrintable(name));
     }
@@ -342,6 +343,15 @@ class Renderer {
     quint64 motionByIdHits = 0, motionFallbackHits = 0, motionMisses = 0;
     int motionProbeFrames = 0;
     QRhiTexture *motionVectors = nullptr;
+    /// E05a：`RHINE_VK_COMPACT_INSTANCES=1` 且本帧确实没有运动矢量消费者时才用 80 字节实例。
+    const bool compactInstanceRequested = qEnvironmentVariableIntValue("RHINE_VK_COMPACT_INSTANCES") == 1;
+    bool compactInstances = false;
+
+    /// 与 depthStoreRequired 同一套消费者口径：有 motion／TAA／warp／MetalFX 就不能裁。
+    bool compactInstancesAllowed() const {
+        static const bool warpProbe = qEnvironmentVariableIsSet("RHINE_WARP_PROBE");
+        return compactInstanceRequested && motionVectors == nullptr && !warpProbe;
+    }
     // 重投影插帧探针（RHINE_WARP_PROBE=1）：把当前场景颜色按运动矢量前推到 t 相位。
     // 与 FFX 插值不同，相位 t 可任意取（FFX 硬编码 0.5），且不需要第二趟几何。
     Target warp;
@@ -1156,6 +1166,7 @@ class Renderer {
         // 也少一遍第二附件的写出带宽。是否带第二个颜色附件由 motionVectors 指针表达：
         // 为空时 makeTarget 走单附件，pipeline() 据此选 surfaceNoMrt 变体（GL 只有一个
         // draw buffer，不能在片元着色器里声明 location=1）。
+        compactInstances = compactInstancesAllowed();
         motionVectors = motionTarget
                             ? create(own(rhi->newTexture(QRhiTexture::RGBA16F, size, 1, rtFlags), true))
                             : nullptr;
@@ -1884,6 +1895,8 @@ class Renderer {
         config.poolEffective = instancePoolEnabled && instancePool.buffer;
         config.discardDepthRequested = discardUnusedDepthRequested;
         config.discardDepthEffective = discardUnusedDepth && !sizedDepthStore;
+        config.compactInstanceRequested = compactInstanceRequested;
+        config.compactInstanceEffective = compactInstances;
         config.arenaFallback = arenaFallback;
         config.directWriteFallback = directWriteFallback;
         config.poolFallback = poolFallback;
@@ -1961,18 +1974,21 @@ class Renderer {
     QRhiGraphicsPipeline *pipeline(QString kind, QRhiShaderResourceBindings *srb,
                                    QRhiRenderPassDescriptor *rp, bool back = false, bool doubleSided = false,
                                    bool depthWrite = true, bool blend = false) {
-        auto key = kind + QString("/%1/%2/%3/%4/%5")
+        const bool geo = kind == "surface";
+        // E05a：紧凑实例是另一条顶点接口，必须与普通管线分开缓存，否则会拿到旧布局的管线。
+        const bool compact = geo && compactInstances;
+        auto key = kind + QString("/%1/%2/%3/%4/%5/%6")
                               .arg(quintptr(rp))
                               .arg(back)
                               .arg(doubleSided)
                               .arg(depthWrite)
-                              .arg(blend);
+                              .arg(blend)
+                              .arg(compact);
         if (pipelines.contains(key)) {
             return pipelines[key];
         }
         auto p = own(rhi->newGraphicsPipeline(), true);
         ++pipelinesLive;
-        const bool geo = kind == "surface";
 #ifdef Q_OS_LINUX
         // OpenGL 后端：场景目标只有一个 draw buffer，片元着色器不能声明 location=1 的第二个输出，
         // 否则驱动会丢弃整块 fragment 结果（实测 3D 层全黑）。Vulkan 走 MRT 单趟。
@@ -1981,35 +1997,41 @@ class Renderer {
         const QString fragmentName =
             (geo && !surfaceMrt) ? QStringLiteral("surfaceNoMrt") : kind;
 #endif
-        p->setShaderStages({{QRhiShaderStage::Vertex, shader(geo ? "geometry.vert" : "quad.vert")},
+        p->setShaderStages({{QRhiShaderStage::Vertex,
+                             shader(geo ? "geometry.vert" : "quad.vert", compact)},
 #ifdef Q_OS_LINUX
-                            {QRhiShaderStage::Fragment, shader(fragmentName + ".frag")}});
+                            {QRhiShaderStage::Fragment, shader(fragmentName + ".frag", compact)}});
 #else
                             {QRhiShaderStage::Fragment, shader(kind + ".frag")}});
 #endif
         if (geo) {
             QRhiVertexInputLayout layout;
 #ifdef Q_OS_LINUX
-            layout.setBindings({{32}, {144, QRhiVertexInputBinding::PerInstance}});
+            layout.setBindings({{32}, {compact ? 80 : 144, QRhiVertexInputBinding::PerInstance}});
 #else
             layout.setBindings({{32}, {80, QRhiVertexInputBinding::PerInstance}});
 #endif
-            layout.setAttributes({{0, 0, QRhiVertexInputAttribute::Float3, 0},
-                                  {0, 1, QRhiVertexInputAttribute::Float3, 12},
-                                  {0, 2, QRhiVertexInputAttribute::Float2, 24},
-                                  {1, 3, QRhiVertexInputAttribute::Float4, 0},
-                                  {1, 4, QRhiVertexInputAttribute::Float4, 16},
-                                  {1, 5, QRhiVertexInputAttribute::Float4, 32},
-                                  {1, 6, QRhiVertexInputAttribute::Float4, 48},
+            QList<QRhiVertexInputAttribute> attributes{
+                {0, 0, QRhiVertexInputAttribute::Float3, 0},
+                {0, 1, QRhiVertexInputAttribute::Float3, 12},
+                {0, 2, QRhiVertexInputAttribute::Float2, 24},
+                {1, 3, QRhiVertexInputAttribute::Float4, 0},
+                {1, 4, QRhiVertexInputAttribute::Float4, 16},
+                {1, 5, QRhiVertexInputAttribute::Float4, 32},
+                {1, 6, QRhiVertexInputAttribute::Float4, 48},
+                {1, 7, QRhiVertexInputAttribute::Float4, 64}};
 #ifdef Q_OS_LINUX
-                                  {1, 7, QRhiVertexInputAttribute::Float4, 64},
-                                  {1, 8, QRhiVertexInputAttribute::Float4, 80},
-                                  {1, 9, QRhiVertexInputAttribute::Float4, 96},
-                                  {1, 10, QRhiVertexInputAttribute::Float4, 112},
-                                  {1, 11, QRhiVertexInputAttribute::Float4, 128}});
+            // E05a：紧凑变体只声明到 state（location 7），previousModel 整段没有。
+            if (!compact) {
+                attributes.append({{1, 8, QRhiVertexInputAttribute::Float4, 80},
+                                   {1, 9, QRhiVertexInputAttribute::Float4, 96},
+                                   {1, 10, QRhiVertexInputAttribute::Float4, 112},
+                                   {1, 11, QRhiVertexInputAttribute::Float4, 128}});
+            }
 #else
-                                  {1, 7, QRhiVertexInputAttribute::Float4, 64}});
+            Q_UNUSED(compact);
 #endif
+            layout.setAttributes(attributes.begin(), attributes.end());
             p->setVertexInputLayout(layout);
             p->setDepthTest(true);
             p->setDepthWrite(depthWrite);
@@ -2187,6 +2209,8 @@ class Renderer {
 #ifdef Q_OS_LINUX
             value.previousModel = PackedMatrix();
             bool paired = false;
+            // E05a：紧凑管线没有任何历史消费者，配对（哈希查找 + 整块拷贝）纯属白做。
+            if (!compactInstances) {
             if (byId && i < ids.size()) {
                 // key = drawId<<32 | 实例 id：两个维度压成一把哈希，省掉每组再挂一层 QHash。
                 const auto exact =
@@ -2219,11 +2243,22 @@ class Renderer {
                     ++motionMisses;
                 }
             }
+            }
 #endif
             values.push_back(value);
         }
-        const QByteArray bytes(reinterpret_cast<const char *>(values.data()),
+        QByteArray bytes;
+        if (compactInstances) {
+            // E05a：紧凑管线只读 model+state 这 80 字节，previousModel 不再上传、不再参与复制。
+            constexpr qsizetype compactStride = 80;
+            bytes.resize(qsizetype(values.size()) * compactStride);
+            for (qsizetype index = 0; index < qsizetype(values.size()); ++index) {
+                memcpy(bytes.data() + index * compactStride, &values[std::size_t(index)], compactStride);
+            }
+        } else {
+            bytes = QByteArray(reinterpret_cast<const char *>(values.data()),
                                values.size() * sizeof(Instance));
+        }
         if (instancePoolEnabled) {
             // 池化：CPU 侧只留本帧字节，GPU buffer 由 poolInstances() 统一分配与上传。
             state.bytes = bytes;

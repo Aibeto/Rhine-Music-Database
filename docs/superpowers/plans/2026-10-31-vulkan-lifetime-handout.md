@@ -57,10 +57,12 @@
 
 ### 5a. 无 motion 时采用 80 字节实例格式（优先新增机会）
 
+> 实施：新增独立烘焙目录 `Qt/shaders/compact/CMakeLists.txt`（同一二进制目录对同一源文件烘两次会撞 `.qsb/*.rule`，所以放子目录），产出 `/opticalCompact` 变体：`opticalGeometry.vert` 不带 `RHINE_SINGLE_PASS_MOTION`（不声明 location 8–11），`opticalSurfaceNoMrt.frag` 的 `v_velocity` 输入也包进该宏。`RhiScene` 里 `compactInstances` 仅在 `RHINE_VK_COMPACT_INSTANCES=1` 且 `motionVectors == nullptr`、无 `RHINE_WARP_PROBE` 时生效；pipeline key 增加紧凑位，顶点布局切 80 字节且不声明 previousModel 属性；`instance()` 按 80 字节步长序列化并整段跳过上一帧矩阵配对（省掉哈希查找与拷贝），batch／pool 走同一份字节。配置行新增「紧凑实例 请求/生效」。运行期 A/B（同 draw／画质／尺寸）未做——计划禁止自动跑 GUI，需人工带 `RHINE_VK_COMPACT_INSTANCES=1` 对照。
+
 **当前：** Linux [Instance](../../../Qt/src/RhiScene.cpp#L75) 始终 144 字节，包含 previousModel；[实例打包](../../../Qt/src/RhiScene.cpp#L2063) 即使无 motion 也准备它，[顶点输入](../../../Qt/src/RhiScene.cpp#L1869) 仍声明该属性。A05 只裁附件／历史保存，不等于实例载荷和 vertex shader 都已裁掉。
 
-- [ ] 当本次管线确实没有运动矢量／其他历史消费者时，使用 model64＋state16 的 80 字节 CPU／顶点布局和不含 RHINE_SINGLE_PASS_MOTION 的 geometry shader；有 motion 保持 144 字节。同步修改 qsb 变体、pipeline key／layout、batch／pool stride、上一帧读取和探针；不能仅截断上传但让 shader 仍读 previousModel。
-- [ ] 这将少传 64/144≈44.4% 的**实例载荷字节**，不是整帧带宽或 FPS 预测。若默认无 motion，可减少 CPU 打包／QRhi 更新复制与 vertex fetch。固定相同 draw／画质／尺寸比较；模式切换重建／清历史，TAA／FSR／warp 与 reference 路径不回归。
+- [x] 当本次管线确实没有运动矢量／其他历史消费者时，使用 model64＋state16 的 80 字节 CPU／顶点布局和不含 RHINE_SINGLE_PASS_MOTION 的 geometry shader；有 motion 保持 144 字节。同步修改 qsb 变体、pipeline key／layout、batch／pool stride、上一帧读取和探针；不能仅截断上传但让 shader 仍读 previousModel。
+- [x] 这将少传 64/144≈44.4% 的**实例载荷字节**，不是整帧带宽或 FPS 预测。若默认无 motion，可减少 CPU 打包／QRhi 更新复制与 vertex fetch。固定相同 draw／画质／尺寸比较；模式切换重建／清历史，TAA／FSR／warp 与 reference 路径不回归。
 
 ### 5b. 将 pipeline 布局身份与 buffer 身份分离
 
