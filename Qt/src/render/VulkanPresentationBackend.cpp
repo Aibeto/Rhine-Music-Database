@@ -1,17 +1,38 @@
 #include "PresentationBackend.h"
 #include "PresentationWindow.h"
 #include "../fg/VulkanPresenter.h"
+#include "../AppStorage.h"
 #include <QCoreApplication>
+#include <QDir>
 #include <QElapsedTimer>
 #include <QEventLoop>
+#include <QFile>
+#include <QFileInfo>
+#include <QSaveFile>
 #include <QVulkanFunctions>
 #include <QVulkanInstance>
 #include <QWindow>
+#include <cstring>
 #include <rhi/qrhi_platform.h>
 #include <vector>
 
 namespace RhineRender {
 namespace {
+// 管线缓存是「驱动版本 + 设备 ID + pipelineCacheUUID」的函数：换驱动或换卡后旧数据
+// 不仅无用，还可能被驱动判为非法。文件头做一次自校验，不匹配就直接丢弃。
+struct PipelineCacheHeader {
+    quint32 magic = 0;
+    quint32 vendorId = 0;
+    quint32 deviceId = 0;
+    quint32 driverVersion = 0;
+    quint32 apiVersion = 0;
+    quint8 uuid[VK_UUID_SIZE] = {};
+};
+constexpr quint32 kPipelineCacheMagic = 0x52484E31u; // "RHN1"
+QString qrhiPipelineCachePath() {
+    return AppStorage::cacheDirectory() + QStringLiteral("/shaders/qrhi-pipeline.cache");
+}
+
 /** Vulkan 专属句柄、图像布局与提交信号量只在本适配器中出现。 */
 class VulkanPresentationBackend final : public PresentationBackend {
   public:
@@ -150,6 +171,10 @@ class VulkanPresentationBackend final : public PresentationBackend {
         const bool presented = m_presenter->present(m_nativeFrame, nullptr);
         if (!presented) {
             m_error = m_presenter->lastError();
+        } else if (++m_framesSubmitted == 240) {
+            // 管线在启动阶段就编译完了，之后只有切分辨率/换格式才会新增。
+            // 提前落盘一次，被强杀（开发时常用 Ctrl-C / kill）也不会丢掉这批编译成果。
+            savePipelineCache();
         }
         return presented;
     }
@@ -196,6 +221,9 @@ class VulkanPresentationBackend final : public PresentationBackend {
     QString presentModeName() const override {
         return m_presenter->presentModeName();
     }
+    double imageReuseMs() const override {
+        return m_presenter ? m_presenter->imageReuseMs() : 0.0;
+    }
     QString backendName() const override {
         return QStringLiteral("Vulkan");
     }
@@ -204,22 +232,93 @@ class VulkanPresentationBackend final : public PresentationBackend {
     }
 
   private:
+    /// 把上一进程存下的管线缓存灌回 QRhi；设备或驱动换了就整块丢弃。
+    void restorePipelineCache(VkPhysicalDevice physDev) {
+        if (!m_rhi || physDev == VK_NULL_HANDLE ||
+            !m_rhi->isFeatureSupported(QRhi::PipelineCacheDataLoadSave)) {
+            return;
+        }
+        QFile file(qrhiPipelineCachePath());
+        if (!file.open(QIODevice::ReadOnly)) {
+            return;
+        }
+        const QByteArray blob = file.readAll();
+        if (blob.size() <= int(sizeof(PipelineCacheHeader))) {
+            return;
+        }
+        PipelineCacheHeader header;
+        std::memcpy(&header, blob.constData(), sizeof(header));
+        VkPhysicalDeviceProperties props{};
+        m_instance->functions()->vkGetPhysicalDeviceProperties(physDev, &props);
+        const bool sameDevice = header.magic == kPipelineCacheMagic &&
+                                header.vendorId == props.vendorID &&
+                                header.deviceId == props.deviceID &&
+                                header.driverVersion == props.driverVersion &&
+                                header.apiVersion == props.apiVersion &&
+                                std::memcmp(header.uuid, props.pipelineCacheUUID, VK_UUID_SIZE) == 0;
+        if (!sameDevice) {
+            // 静默丢弃：不同机器/驱动之间共享缓存目录是常态，不值得警告。
+            return;
+        }
+        const QByteArray payload = blob.mid(int(sizeof(header)));
+        m_rhi->setPipelineCacheData(payload);
+        qInfo().noquote() << "QRhi 管线缓存: 已恢复" << payload.size() << "字节 ←"
+                          << QDir::toNativeSeparators(qrhiPipelineCachePath());
+    }
+    /// 退出前落盘；管线缓存只对「下次启动的同一驱动」有用。
+    void savePipelineCache() {
+        if (!m_rhi || m_physDev == VK_NULL_HANDLE ||
+            !m_rhi->isFeatureSupported(QRhi::PipelineCacheDataLoadSave)) {
+            return;
+        }
+        const QByteArray data = m_rhi->pipelineCacheData();
+        if (data.isEmpty()) {
+            return;
+        }
+        VkPhysicalDeviceProperties props{};
+        m_instance->functions()->vkGetPhysicalDeviceProperties(m_physDev, &props);
+        PipelineCacheHeader header;
+        header.magic = kPipelineCacheMagic;
+        header.vendorId = props.vendorID;
+        header.deviceId = props.deviceID;
+        header.driverVersion = props.driverVersion;
+        header.apiVersion = props.apiVersion;
+        std::memcpy(header.uuid, props.pipelineCacheUUID, VK_UUID_SIZE);
+        const QString path = qrhiPipelineCachePath();
+        QDir().mkpath(QFileInfo(path).absolutePath());
+        QSaveFile file(path);
+        if (!file.open(QIODevice::WriteOnly)) {
+            return;
+        }
+        file.write(reinterpret_cast<const char *>(&header), sizeof(header));
+        file.write(data);
+        file.commit();
+    }
+    /// 提交过多少帧；用来在启动阶段结束后提前落盘一次管线缓存。
+    int m_framesSubmitted = 0;
+
     bool createDevice() {
         QRhiVulkanInitParams params;
         params.inst = m_instance.get();
         // 自建交换链需要设备支持该扩展；QRhi 默认不请求它。
         params.deviceExtensions = {QByteArrayLiteral("VK_KHR_swapchain")};
-        m_rhi.reset(QRhi::create(QRhi::Vulkan, &params, {}));
+        // EnablePipelineCacheDataSave：让 QRhi 暴露 pipelineCacheData()/setPipelineCacheData()，
+        // 否则每次启动都要重新编译全部场景管线（核显上单次编译可达数百毫秒）。
+        m_rhi.reset(QRhi::create(QRhi::Vulkan, &params, QRhi::EnablePipelineCacheDataSave));
         if (!m_rhi) {
             m_error = QStringLiteral("QRhi(Vulkan) 创建失败");
             return false;
         }
 
-        m_device = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles())->dev;
+        const auto *native = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles());
+        m_device = native->dev;
+        m_physDev = native->physDev;
         if (m_device == VK_NULL_HANDLE) {
             m_error = QStringLiteral("拿不到 QRhi 的 VkDevice");
             return false;
         }
+        // 必须在任何管线创建之前灌入，否则缓存只对之后创建的管线生效。
+        restorePipelineCache(m_physDev);
 
         const VkSurfaceKHR surface = QVulkanInstance::surfaceForWindow(m_window.get());
         if (surface == VK_NULL_HANDLE) {
@@ -245,9 +344,12 @@ class VulkanPresentationBackend final : public PresentationBackend {
 
     void destroyDevice() {
         release();
+        // 交换链与 render target 先拆，管线缓存数据在 QRhi 还活着时导出。
         m_presenter.reset();
+        savePipelineCache();
         m_rhi.reset();
         m_device = VK_NULL_HANDLE;
+        m_physDev = VK_NULL_HANDLE;
         m_nativeFrame = {};
     }
 
@@ -323,6 +425,7 @@ class VulkanPresentationBackend final : public PresentationBackend {
     std::vector<std::unique_ptr<QRhiRenderPassDescriptor>> m_swapPasses;
     VulkanPresenter::Frame m_nativeFrame;
     VkDevice m_device = VK_NULL_HANDLE;
+    VkPhysicalDevice m_physDev = VK_NULL_HANDLE;
     QSize m_size;
     QSize m_swapSize;
     QString m_error;
