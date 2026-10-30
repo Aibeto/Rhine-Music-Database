@@ -62,6 +62,9 @@ struct Stats {
     /// 真正生效的呈现模式（FIFO / MAILBOX / IMMEDIATE）。帧率上限几乎全由它决定，
     /// 性能面板要显示出来，否则用户没法判断"这次跑得快是因为换对了呈现模式"。
     QString presentMode;
+    /// 同一张交换链图像两次上屏的平均间隔（ms）。与 presentMode 配合判断瓶颈：
+    /// 贴着刷新周期=合成器限速，忽大忽小且远大于刷新周期=渲染/提交跟不上。
+    double imageReuseMs = 0.0;
     QString adapterName;
     QString backendName;
 
