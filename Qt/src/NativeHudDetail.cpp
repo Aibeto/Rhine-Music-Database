@@ -1,4 +1,5 @@
 #include "NativeHud.h"
+#include "CollectionDetailCard.h"
 #include "MusicData.h"
 #include "SongDetailCard.h"
 #include <algorithm>
@@ -340,13 +341,8 @@ void NativeHud::container(double width, double opacity) {
     auto &music = *m_music;
     const auto item = music.current;
     const auto layout = containerLayout(width);
-    const auto left = layout.left;
-    const auto sidebar = layout.sidebar;
-    const auto x = layout.x;
-    const auto usable = layout.width;
-    const auto rowsY = layout.rowsY;
-    const auto rowHeight = layout.rowHeight;
-    const auto rowCount = layout.rowCount;
+    const auto sideWidth = layout.sidebar - 44;
+    const auto coverSize = std::min(250.0, sideWidth - 16);
     const bool albums = item["kind"] == "artist" && artistTab == "albums";
     QJsonArray songs = music.tracks;
     if (albums) {
@@ -370,113 +366,105 @@ void NativeHud::container(double width, double opacity) {
         m_sortField = sortField;
         m_trackOrder = MusicData::sortOrder(songs, sortField);
     }
-    const auto sx = left + 19;
-    const auto sideWidth = sidebar - 38;
-    const auto coverSize = std::min(220.0, sideWidth);
-    trackOffset = std::min(trackOffset, std::max(0, int(songs.size()) - rowCount));
-    save();
-    alpha(opacity);
-    const auto bounds = detailBounds(width);
-    fill(bounds.x(), bounds.y(), bounds.width(), bounds.height(),
-         dark ? QJsonArray{0.08, 0.095, 0.09, 1} : QJsonArray{0.929, 0.922, 0.894, 1});
-    rule(x - 18, 278, 1, 0.12);
-    button("← 返回曲目资料库   ESC", sx, 211, sideWidth, 54, "music:directory", 20, "demibold");
-    QString collection = "PLAYLIST / 歌单";
-    if (item["kind"] == "album") {
-        collection = "ALBUM / 专辑";
-    } else if (item["kind"] == "artist") {
-        collection = "ARTIST / 歌手";
-    }
-    text(collection, sx, 325, 11);
-    image(music.coverImage, sx, 355, coverSize, coverSize);
-    limited(item["title"].toString(), sx, coverSize + 374, 20, sideWidth, "bold");
-    limited(item["artist"].toString(), sx, coverSize + 410, 14, sideWidth);
+    trackOffset = std::min(trackOffset, std::max(0, int(songs.size()) - layout.rowCount));
+    // 控制器只整理真实数据与可用动作，独立卡片组件负责内部排版与绘制。
+    CollectionDetailCard::Model card;
+    card.bounds = detailBounds(width);
+    card.left = layout.left;
+    card.sidebar = layout.sidebar;
+    card.x = layout.x;
+    card.width = layout.width;
+    card.rowsY = layout.rowsY;
+    card.rowHeight = layout.rowHeight;
+    card.rowCount = layout.rowCount;
+    card.dark = dark;
+    card.kind = item["kind"].toString();
+    card.provider = music.providerName();
+    card.title = item["title"].toString();
+    card.artist = item["artist"].toString();
+    card.coverKey = music.coverImage;
+    card.coverSize = coverSize;
     const QHash<QString, QString> prefixes{
         {"qq", "QQ MID / "}, {"kugou", "KUGOU ID / "}, {"netease", "NETEASE ID / "}};
     if (item["virtual"].toBool()) {
-        text(music.providerName() + " / " + item["title"].toString(), sx, coverSize + 449, 11);
+        card.archiveId = music.providerName() + " / " + item["title"].toString();
     } else {
-        text(prefixes.value(music.provider) + item["id"].toString(), sx, coverSize + 449, 11);
+        card.archiveId = prefixes.value(music.provider) + item["id"].toString();
     }
     const auto ids = music.directory ? music.directory->ids.size() : 0;
-    text(QString::number(std::max({item["trackCount"].toInt(), int(ids), int(songs.size())})) +
-             " TRACKS / 曲目",
-         sx, coverSize + 479, 12);
+    card.totalCount = std::max({item["trackCount"].toInt(), int(ids), int(songs.size())});
+    card.loadedCount = songs.size();
     const auto date = item["date"].toString();
-    limited(date.isEmpty() ? "" : "发行日期：" + date, sx, coverSize + 510, 12, sideWidth);
+    card.facts = {{"RELEASE / 发行日期", date.isEmpty() ? QString("暂无") : date},
+                  {"FORMAT / 收录", QString::number(card.totalCount) + " TRACKS / 曲目"}};
     const auto description = item["description"].toString();
-    const auto lines = m_glyphs->wrap(description.isEmpty() ? "暂无简介" : description, sideWidth, 12);
-    for (int index = 0; index < std::min(3, int(lines.size())); ++index) {
-        text(lines.at(index), sx, coverSize + 550 + index * 22, 12);
+    card.quote = description.isEmpty() ? "暂无简介" : description;
+    if (!albums) {
+        card.playAll = {"▶  播放全部", "music:play-loaded"};
+    }
+    if (item["kind"] == "playlist") {
+        card.sort = {"排序方式 ▾", "music:sort-menu"};
+    }
+    if (item["kind"] == "artist") {
+        card.tabs = {{"热门歌曲", "music:artist-tab:songs", artistTab == "songs"},
+                     {"发行专辑", "music:artist-tab:albums", artistTab == "albums"}};
     }
     if (music.canEditPlaylist(item)) {
-        button("修改名称", sx, 866, sideWidth / 2, 30, "music:rename-playlist", 12);
-        button("删除歌单", sx + sideWidth / 2, 866, sideWidth / 2, 30, "music:delete-playlist", 12);
+        card.rename = {"修改名称", "music:rename-playlist"};
+        card.remove = {"删除歌单", "music:delete-playlist"};
     }
     const auto subscribeRoute =
         item["kind"] == "playlist" ? "/playlist/subscribe" : "/" + item["kind"].toString() + "/sub";
-    if (!item["virtual"].toBool() && music.canMutate(subscribeRoute)) {
-        QString label = "收藏 / 取消";
+    if (!item["virtual"].toBool() && !item["special"].toBool() && music.canMutate(subscribeRoute)) {
+        const auto subject = item["kind"] == "artist"     ? QString("歌手")
+                             : item["kind"] == "playlist" ? QString("歌单")
+                                                          : QString("专辑");
+        QString label = "＋ 收藏" + subject;
+        bool subscribed = false;
         if (music.provider == "qq") {
             const auto state = music.subscriptionStates.value(item["key"].toString(), "unknown");
-            label = "收藏 / 核实";
+            label = "＋ 收藏 / 核实";
             if (state == "subscribed") {
-                label = "已收藏 / 取消";
+                label = "✓ 已收藏" + subject;
+                subscribed = true;
             } else if (state == "not-subscribed") {
-                label = "收藏";
+                label = "＋ 收藏" + subject;
+            }
+        } else {
+            // 网络来源的收藏状态与写入按钮共用同一判断，避免显示和实际动作相反。
+            subscribed = music.isSubscribed(item);
+            if (subscribed) {
+                label = "✓ 已收藏" + subject;
             }
         }
-        button(label, sx, 913, sideWidth / 2, 32, "music:subscribe", 12);
+        card.subscribe = {label, "music:subscribe", subscribed};
     }
     if (!music.isLocal() && !item["virtual"].toBool()) {
-        button(music.providerName() + " ↗", sx + sideWidth / 2, 913, sideWidth / 2, 32, "music:source", 12);
+        card.source = {music.providerName() + " ↗", "music:source"};
     }
-    limited(item["title"].toString(), x, 279, 30, usable - 155, "bold");
-    const auto total = music.directory ? music.directory->ids.size() : music.trackIDs.size();
-    text(QString::number(songs.size()) + " / " +
-             QString::number(std::max({item["trackCount"].toInt(), int(total), int(songs.size())})) + " 首",
-         x + usable - 130, 289, 12);
-    if (!albums) {
-        fill(x, 339, 180, 44, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});
-        hit(x, 339, 180, 44, "music:play-loaded", "播放全部");
-        text("▶  播放全部", x + 22, 351, 16, "demibold", 0, {0.96, 0.95, 0.91, 1});
+    if (albums && music.directory && music.directory->albumsMore) {
+        card.more = {music.directory->albumsLoading ? "载入中…" : "更多专辑 ↓", "music:artist-more"};
+    } else if (!albums && songs.size() < card.totalCount) {
+        card.more = {music.directoryLoading ? "载入中…" : "加载更多 ↓", "music:directory-more"};
     }
-    if (item["kind"] == "artist") {
-        button("热门歌曲", x + 210, 345, 110, 32, "music:artist-tab:songs", 13);
-        button("发行专辑", x + 335, 345, 110, 32, "music:artist-tab:albums", 13);
+    if (songs.isEmpty()) {
+        card.emptyMessage =
+            music.directoryLoading || music.detailLoading ? "正在载入曲目…" : "暂无可读取曲目";
     }
-    if (item["kind"] == "playlist") {
-        fill(x + 195, 339, 180, 44, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});
-        hit(x + 195, 339, 180, 44, "music:sort-menu", "排序方式");
-        text("排序方式 ▾", x + 217, 351, 16, "demibold", 0, {0.96, 0.95, 0.91, 1});
+    card.hint = "滚轮浏览曲目 · 点击查看歌曲";
+    if (m_sortRequest) {
+        card.hint = "正在补齐曲目以排序…";
+    } else if (!m_sortNotice.isEmpty()) {
+        card.hint = m_sortNotice;
     }
-    rule(x, 399, usable, 0.4);
-    const auto titleX = x + 49;
-    const auto artistX = x + usable * 0.52;
-    const auto albumX = x + usable * 0.75;
-    const auto timeX = x + usable - 65;
-    const QVector<QPair<QString, double>> columns{{"#", x},
-                                                  {"TITLE / 歌曲", titleX},
-                                                  {"ARTIST / 歌手", artistX},
-                                                  {"ALBUM / 专辑", albumX},
-                                                  {"TIME", timeX}};
-    for (const auto &[label, position] : columns) {
-        text(label, position, 412, 11);
-    }
-    for (int row = 0; row < rowCount && trackOffset + row < songs.size(); ++row) {
+    for (int row = 0; row < layout.rowCount && trackOffset + row < songs.size(); ++row) {
         const auto index = trackOffset + row;
         const auto rawIndex = m_trackOrder.at(index);
         const auto song = songs.at(rawIndex).toObject();
-        const auto yy = rowsY + row * rowHeight;
-        if (music.directory && music.directory->index == rawIndex) {
-            auto color = ink();
-            color[3] = 0.055;
-            fill(x - 8, yy, usable + 16, rowHeight - 2, color);
-        }
-        text(MusicData::pad(index + 1), x, yy + 16, 12);
-        limited(song["title"].toString(), titleX, yy + 12, 18, artistX - titleX - 22, "demibold");
-        limited(song["artist"].toString(), artistX, yy + 16, 12, albumX - artistX - 20);
-        limited(song["album"].toString(), albumX, yy + 16, 12, timeX - albumX - 18);
+        CollectionDetailCard::Row entry;
+        entry.number = MusicData::pad(index + 1);
+        entry.title = song["title"].toString();
+        entry.artist = song["artist"].toString();
         auto stamp = MusicData::time(song);
         if (albums) {
             stamp = song["date"].toString();
@@ -484,41 +472,41 @@ void NativeHud::container(double width, double opacity) {
                 stamp = "专辑";
             }
         }
-        limited(stamp, timeX, yy + 16, 12, 65);
-        rule(x, yy + rowHeight - 1, usable, 0.15);
-        hit(x - 8, yy, usable + 16, rowHeight - 2,
-            (albums ? "music:artist-album:" : "music:track:") + QString::number(rawIndex),
-            song["title"].toString());
+        entry.stamp = stamp;
+        entry.current = (music.directory && music.directory->index == rawIndex) ||
+                        (!music.player.current.isEmpty() &&
+                         PlaybackQueue::identity(song) == PlaybackQueue::identity(music.player.current));
+        entry.action = (albums ? "music:artist-album:" : "music:track:") + QString::number(rawIndex);
+        entry.label = song["title"].toString();
+        card.rows.append(entry);
     }
-    if (songs.isEmpty()) {
-        limited(music.directoryLoading || music.detailLoading ? "正在载入曲目…" : "暂无可读取曲目", titleX,
-                490, 22, usable - 100);
+    if (songs.size() > layout.rowCount) {
+        card.scrollFraction = double(trackOffset) / std::max(1, int(songs.size()) - layout.rowCount);
+        card.scrollThumb = double(layout.rowCount) / songs.size();
     }
-    QString hint = "滚轮浏览曲目 · 点击查看歌曲";
-    if (m_sortRequest) {
-        hint = "正在补齐曲目以排序…";
-    } else if (!m_sortNotice.isEmpty()) {
-        hint = m_sortNotice;
-    }
-    limited(hint, x, 934, 11, usable - 165);
-    if (albums && music.directory && music.directory->albumsMore) {
-        button(music.directory->albumsLoading ? "载入中…" : "更多专辑 ↓", x + usable - 150, 922, 150, 32,
-               "music:artist-more", 12);
-    }
-    if (!albums && songs.size() < total) {
-        button(music.directoryLoading ? "载入中…" : "加载更多 ↓", x + usable - 150, 922, 150, 32,
-               "music:directory-more", 12);
-    }
-    if (songs.size() > rowCount) {
-        const auto height = rowCount * rowHeight - 2;
-        auto color = ink();
-        color[3] = 0.12;
-        fill(x + usable + 14, rowsY, 2, height, color);
-        const auto thumb = std::max(28.0, height * rowCount / songs.size());
-        const auto fraction = double(trackOffset) / std::max(1, int(songs.size()) - rowCount);
-        color[3] = 0.6;
-        fill(x + usable + 14, rowsY + fraction * (height - thumb), 2, thumb, color);
-    }
+    const CollectionDetailCard::Canvas canvas{
+        [this](double x, double y, double width, double height, QJsonArray color) {
+            fill(x, y, width, height, color);
+        },
+        [this](QString value, double x, double y, double size, QString weight, double tracking,
+               QJsonArray color) { text(value, x, y, size, weight, tracking, color); },
+        [this](QString value, double size, double width, QString weight) {
+            return fit(value, size, width, weight);
+        },
+        [this](QString value, double width, double size, QString weight) {
+            return m_glyphs->wrap(value, width, size, weight);
+        },
+        [this](QString value, double size, QString weight) { return m_glyphs->width(value, size, weight); },
+        [this](double x, double y, double width, double height, QString action, QString label) {
+            hit(x, y, width, height, action, label);
+        },
+        [this](QString key, double x, double y, double width, double height) {
+            image(key, x, y, width, height);
+        }};
+    save();
+    alpha(opacity);
+    button("← 返回曲目资料库   ESC", layout.left + 19, 211, sideWidth, 54, "music:directory", 20, "demibold");
+    CollectionDetailCard::paint(card, canvas);
     restore();
 }
 

@@ -170,6 +170,24 @@ test('喜欢歌曲沿用本人喜欢歌单的顺序', async () => {
     );
 });
 
+test('“我喜欢的音乐”歌单保留特殊标记', async () => {
+    const harness = createClientHarness({
+        responses: {
+            '/user/playlist': {
+                code: 200,
+                playlist: [
+                    { id: 7, name: '普通歌单', specialType: 0, creator: { userId: 42 } },
+                    { id: 9, name: '我喜欢的音乐', specialType: 5, creator: { userId: 42 } },
+                ],
+            },
+        },
+    });
+    const api = new API(harness.host);
+    const page = await api.userPlaylists('42');
+    assert.equal(page.items.find((value) => value.id === '7').special, undefined);
+    assert.equal(page.items.find((value) => value.id === '9').special, true);
+});
+
 test('歌词解析偏移、重复副歌与逐词时标', () => {
     // 真实平台形态包含重复副歌、多精度时间、偏移、实体、翻译与间奏。
     const lrc = '[offset:200]\r\n[00:01.5][00:04.500]第一句 &amp; 第二声\r\n[00:03.00]\r\n[00:05]结束';

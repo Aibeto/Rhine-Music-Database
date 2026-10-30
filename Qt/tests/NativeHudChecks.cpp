@@ -11,9 +11,11 @@
 #include <QDebug>
 #include <QGuiApplication>
 #include <QJsonDocument>
+#include <QPainter>
 #include <QSet>
 #include <QTemporaryDir>
 #include <QUrl>
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 
@@ -256,6 +258,159 @@ bool checkSorting(const QString &root, Glyphs &glyphs, const QJsonObject &conten
     }
     return true;
 }
+
+/** 专辑/歌单详情卡改版只调整内部；外框、封面、播放/排序与曲目行仍沿用原坐标。 */
+bool checkCollectionCard(const QString &root, Glyphs &glyphs, const QJsonObject &content) {
+    Host host(root, true);
+    MusicLibrary music(&host, content);
+    music.provider = "netease";
+    music.api.provider = "netease";
+    music.uid = "42";
+    music.current = MusicData::item("album", "165148405", "孤星 OST", "塞壬唱片-MSR");
+    music.current["date"] = "2023-05-09";
+    music.current["trackCount"] = 20;
+    music.current["description"] = "从来没有人质疑日升月落，也没有人质疑万物生长。";
+    QJsonArray songs;
+    for (int index = 1; index <= 20; ++index) {
+        songs.append(song(index));
+    }
+    music.tracks = songs;
+    const QString coverKey = "file:///rhine-offline/collection-cover.png";
+    QImage cover(64, 64, QImage::Format_RGB32);
+    cover.fill(Qt::green);
+    host.fixtureImage(coverKey, cover);
+    music.coverImage = coverKey;
+    HudSceneActions scene;
+    scene.mode = [](QString) {};
+    NativeHud hud(&host, &glyphs, &music, scene);
+    hud.reduced = true;
+    const QJsonObject frame{{"mode", "detail"}, {"detail", 1}};
+    for (const double stageWidth : {1280.0, 1920.0, 2560.0}) {
+        const QRectF expected(40, 260, stageWidth - 80, 696);
+        if (hud.detailBounds(stageWidth) != expected) {
+            qCritical() << "Collection card changed its external geometry" << stageWidth;
+            return false;
+        }
+        const auto layout = hud.containerLayout(stageWidth);
+        const auto sideWidth = layout.sidebar - 44;
+        const auto coverSize = std::min(250.0, sideWidth - 16);
+        const auto artX = layout.left + 22 + (sideWidth - coverSize) / 2;
+        hud.draw(frame, stageWidth, 50);
+        bool artwork = false;
+        bool kicker = false;
+        for (const auto &value : hud.commands) {
+            const auto command = value.toArray();
+            if (command.size() == 6 && command.first() == "image" && command.at(1) == coverKey) {
+                artwork = command.at(2).toDouble() == artX && command.at(3).toDouble() == 352 &&
+                          command.at(4).toDouble() == coverSize && command.at(5).toDouble() == coverSize;
+            }
+            if (command.size() > 2 && command.first() == "text" && command.at(1) == "03 / ALBUM RECORD") {
+                kicker = true;
+            }
+        }
+        const auto play = getHit(hud.hits, "music:play-loaded");
+        const auto firstRow = getHit(hud.hits, "music:track:0");
+        const auto secondRow = getHit(hud.hits, "music:track:1");
+        if (!artwork || !kicker || play.isEmpty() || firstRow.isEmpty() || secondRow.isEmpty()) {
+            qCritical() << "Collection card lost its archive artwork, header or principal actions"
+                        << stageWidth << artwork << kicker;
+            return false;
+        }
+        if (play["x"].toDouble() != layout.x || play["y"].toDouble() != 339 ||
+            play["width"].toDouble() != 180 || play["height"].toDouble() != 44) {
+            qCritical() << "Collection toolbar moved from its fixed layout" << stageWidth;
+            return false;
+        }
+        bool sheetRule = false;
+        for (const auto &value : hud.commands) {
+            const auto command = value.toArray();
+            if (command.size() == 6 && command.first() == "fill" &&
+                command.at(3).toDouble() == expected.y() && command.at(5).toDouble() == 3) {
+                sheetRule = command.at(2).toDouble() == layout.x - 18 &&
+                            command.at(4).toDouble() == layout.width + 18;
+            }
+        }
+        if (!sheetRule) {
+            qCritical() << "Collection card top rule no longer reaches the sheet divider" << stageWidth;
+            return false;
+        }
+        if (firstRow["x"].toDouble() != layout.x - 8 || firstRow["y"].toDouble() != layout.rowsY ||
+            firstRow["width"].toDouble() != layout.width - 6 ||
+            firstRow["height"].toDouble() != layout.rowHeight - 2 ||
+            secondRow["y"].toDouble() - firstRow["y"].toDouble() != layout.rowHeight) {
+            qCritical() << "Collection track rows changed their fixed geometry" << stageWidth;
+            return false;
+        }
+        for (const auto &value : hud.hits) {
+            const auto hit = value.toObject();
+            const auto action = hit["action"].toString();
+            const bool cardAction = action == "music:play-loaded" || action == "music:sort-menu" ||
+                                    action == "music:artist-tab:songs" ||
+                                    action == "music:artist-tab:albums" ||
+                                    action == "music:rename-playlist" || action == "music:delete-playlist" ||
+                                    action == "music:subscribe" || action == "music:source";
+            if (!cardAction) {
+                continue;
+            }
+            const QRectF rectangle(hit["x"].toDouble(), hit["y"].toDouble(), hit["width"].toDouble(),
+                                   hit["height"].toDouble());
+            if (!expected.contains(rectangle)) {
+                qCritical() << "Collection action escaped the card bounds" << stageWidth << action;
+                return false;
+            }
+        }
+    }
+    // 歌单管理入口与收藏/来源按钮保持原有槽位，改版后仍然可点击。
+    music.current = MusicData::item("playlist", "8", "测试歌单", "测试账号");
+    music.current["creatorID"] = "42";
+    hud.draw(frame, 1920, 50);
+    const auto sort = getHit(hud.hits, "music:sort-menu");
+    const auto layout = hud.containerLayout(1920);
+    if (sort["x"].toDouble() != layout.x + 195 || sort["y"].toDouble() != 339 ||
+        sort["width"].toDouble() != 180 || sort["height"].toDouble() != 44) {
+        qCritical() << "Playlist sort no longer aligns with the play-all button";
+        return false;
+    }
+    for (const auto &action :
+         {"music:rename-playlist", "music:delete-playlist", "music:subscribe", "music:source"}) {
+        if (!hasAction(hud.hits, action)) {
+            qCritical() << "Collection card lost a management action" << action;
+            return false;
+        }
+    }
+    // 收藏按钮需读取真实收藏集合，不能在已收藏时仍显示“＋ 收藏”。
+    music.subscriptions.insert(music.current["key"].toString());
+    hud.draw(frame, 1920, 50);
+    bool subscribedLabel = false;
+    for (const auto &value : hud.commands) {
+        const auto command = value.toArray();
+        if (command.size() > 2 && command.first() == "text" && command.at(1) == "✓ 已收藏歌单") {
+            subscribedLabel = true;
+        }
+    }
+    if (!subscribedLabel) {
+        qCritical() << "Collection card did not reflect an existing subscription";
+        return false;
+    }
+    // “我喜欢的音乐”是账号维护的特殊歌单，不提供改名、删除和收藏入口。
+    music.subscriptions.remove(music.current["key"].toString());
+    music.current["special"] = true;
+    hud.draw(frame, 1920, 50);
+    for (const auto &action : {"music:rename-playlist", "music:delete-playlist", "music:subscribe"}) {
+        if (hasAction(hud.hits, action)) {
+            qCritical() << "Liked playlist exposed a management action" << action;
+            return false;
+        }
+    }
+    // 歌手页仍保留歌曲/专辑切换，专辑页不再绘制歌曲控件。
+    music.current = MusicData::item("artist", "7", "测试歌手", "测试歌手");
+    hud.draw(frame, 1920, 50);
+    if (!hasAction(hud.hits, "music:artist-tab:songs") || !hasAction(hud.hits, "music:artist-tab:albums")) {
+        qCritical() << "Artist card lost its songs/albums switch";
+        return false;
+    }
+    return true;
+}
 }
 
 namespace {
@@ -394,6 +549,7 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
     Host host(root, true);
     const auto content = QJsonDocument::fromJson(host.read("slots.json").toUtf8()).object();
     bool ok = checkSorting(root, glyphs, content);
+    ok &= checkCollectionCard(root, glyphs, content);
     ok &= checkPlayerBar(glyphs);
     ok &= checkPlayerInput(root, glyphs, content);
     {

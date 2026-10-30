@@ -40,6 +40,10 @@ bool MusicLibrary::canMutate(const QString &route) const {
 }
 
 bool MusicLibrary::canEditPlaylist(const QJsonObject &value) const {
+    // “我喜欢的音乐”由账号维护，不能改名、删除或按普通歌单处理。
+    if (value["special"].toBool()) {
+        return false;
+    }
     if (!editable() || uid.isEmpty() || value["kind"] != "playlist" || value["creatorID"] != uid) {
         return false;
     }
@@ -270,6 +274,28 @@ void MusicLibrary::like(QJsonObject value) {
            [update, liked](QJsonObject) { update(!liked); });
 }
 
+/** 判断专辑、歌单或歌手是否已收藏；本次会话写入与已载入的收藏列表都算已收藏。 */
+bool MusicLibrary::isSubscribed(const QJsonObject &value) const {
+    const auto key = value["key"].toString();
+    if (key.isEmpty()) {
+        return false;
+    }
+    if (subscriptions.contains(key)) {
+        return true;
+    }
+    const auto kind = value["kind"].toString();
+    if (kind != "playlist" && kind != "album") {
+        return false;
+    }
+    const auto lane = kind == "album" ? 4 : 3;
+    for (const auto &entry : lists[lane]) {
+        if (entry.toObject()["key"] == key) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void MusicLibrary::subscribe(QJsonObject value) {
     if (value.isEmpty()) {
         value = current;
@@ -283,12 +309,14 @@ void MusicLibrary::subscribe(QJsonObject value) {
         changed();
         return;
     }
+    if (value["special"].toBool()) {
+        status = QStringLiteral("“我喜欢的音乐”不支持收藏操作");
+        changed();
+        return;
+    }
     const auto lane = kind == "album" ? 4 : 3;
     const auto key = value["key"].toString();
-    bool subscribed = subscriptions.contains(key);
-    for (const auto &entry : lists[lane]) {
-        subscribed |= entry.toObject()["key"] == key;
-    }
+    const bool subscribed = isSubscribed(value);
     mutate(kind == "playlist" ? "/playlist/subscribe" : "/" + kind + "/sub",
            {{"id", value["id"]}, {"t", subscribed ? 2 : 1}},
            [this, value, kind, lane, key, subscribed](QJsonObject body) {

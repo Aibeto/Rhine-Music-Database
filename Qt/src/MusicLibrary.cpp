@@ -312,6 +312,10 @@ void MusicLibrary::choose(QJsonObject input, bool containerDetails, std::optiona
                 if (!current.value("date").toString().isEmpty()) {
                     value["date"] = current.value("date");
                 }
+                // 详情接口可能不重复返回特殊歌单标记，沿用入口条目的判定结果。
+                if (input.value("special").toBool()) {
+                    value["special"] = true;
+                }
                 details[input.value("key").toString()] = value;
                 for (qsizetype i = 0; i < lists[0].size(); ++i) {
                     if (lists[0].at(i).toObject()["key"] == input.value("key")) {

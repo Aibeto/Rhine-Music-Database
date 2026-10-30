@@ -178,6 +178,7 @@ class MusicLibrary : public QObject {
     QSet<QString> subscriptions;
     QHash<QString, QString> subscriptionStates;
     void loadSubscriptionStatus(const QJsonObject &value);
+    bool isSubscribed(const QJsonObject &value) const;
     std::optional<bool> songLiked(const QJsonObject &value) const;
     QJsonObject capabilities;
     QString vipLevel = "unknown";
