@@ -114,7 +114,7 @@ ctest --test-dir output/qt-build --output-on-failure -R '^qt_(vulkan_resource|re
 | 开关 | 作用 |
 |---|---|
 | `RHINE_VK_UNIFORM_ARENA` | 材质 UBO 动态偏移 arena（E02／E03 的槽回收与写满语义始终生效） |
-| `RHINE_VK_INSTANCE_ARENA` | 实例 buffer 池化（E03 双列表统一规划始终生效） |
+| `RHINE_VK_INSTANCE_ARENA` | 实例 buffer 池化（E03 双列表统一规划始终生效）；**默认开启**，`=0` 可关回逐 draw——非池化路径每帧上传的实例字节会被 Vulkan staging 逐帧累积（实测上传 165 KB/帧 ≈ 在堆 +165 KB/帧），只有 Vulkan 后端启用 |
 | `RHINE_VK_DIRECT_WRITE` | arena 整块直写；映射失败整帧回落 |
 | `RHINE_VK_DISCARD_UNUSED_DEPTH` | 无深度消费者时不保留内容 |
 | `RHINE_VK_COMPACT_INSTANCES` | 80 字节实例 + 无 `RHINE_SINGLE_PASS_MOTION` 着色器 |

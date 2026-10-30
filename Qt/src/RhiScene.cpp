@@ -425,7 +425,12 @@ class Renderer {
     bool discardUnusedDepth = discardUnusedDepthRequested;
     /// 本次 resize 定下的策略；它变了必须重建目标（render pass 的 storeOp 写在描述符里）。
     bool sizedDepthStore = true;
-    const bool instancePoolRequested = qEnvironmentVariableIntValue("RHINE_VK_INSTANCE_ARENA") == 1;
+    /// D03 第二步默认开启：非池化路径每帧要为每个 draw 更新实例 buffer，实测每帧上传
+    /// 165 KB、glibc 在用堆就同步长 165 KB（RHINE_MEMORY_PROBE 数据，OpenGL 后端稳定），
+    /// 池化把上传量压到接近 0 后逐帧增长消失。RHINE_VK_INSTANCE_ARENA=0 可关回逐 draw。
+    const bool instancePoolRequested = qEnvironmentVariableIsSet("RHINE_VK_INSTANCE_ARENA")
+        ? qEnvironmentVariableIntValue("RHINE_VK_INSTANCE_ARENA") != 0
+        : true;
     bool instancePoolEnabled = instancePoolRequested;
     QString poolFallback;
     /// D03 第二步：材质 arena 的整块直写实验（RHINE_VK_DIRECT_WRITE=1）。
@@ -824,6 +829,12 @@ class Renderer {
         return {resolve ? resolve : texture, rt, rp};
     }
     bool ensureInstancePool(quint64 needBytes) {
+        if (instancePoolEnabled && rhi->backend() != QRhi::Vulkan) {
+            // 池化的收益来自 Vulkan 的 staging 行为；其他后端保留原来的逐 draw buffer。
+            instancePoolEnabled = false;
+            poolFallback = QStringLiteral("非 Vulkan 后端");
+            return false;
+        }
         const quint64 bytes = RhineRender::instancePoolBytes(needBytes, instancePool.capacity);
         if (!bytes) {
             instancePoolEnabled = false;
