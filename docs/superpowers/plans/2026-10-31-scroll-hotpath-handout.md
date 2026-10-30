@@ -59,11 +59,19 @@ Files：[NativeCards.h](../../../Qt/src/NativeCards.h)、[NativeCards.cpp](../..
 
 Files：[RhiScene.cpp](../../../Qt/src/RhiScene.cpp#L2499)、[SceneTypes.h](../../../Qt/src/SceneTypes.h)、[VulkanResourcePolicy.h](../../../Qt/src/render/VulkanResourcePolicy.h) 及测试。此项可先独立用于旧 draw 路径，F02 不必全部完成。
 
-- [ ] 用类型化 BatchKey 代替每 draw 多次 QByteArray::number 拼串；完整包含网格／索引资源及代号、范围、side／order、label／cover、材质精确值及实例 layout。分组条件维持原有不透明兼容约束，hash 必须与 equality 一致；不可只按 mesh 或纹理合并，不做浮点近似分组，不改变透明顺序。
+- [x] 用类型化 BatchKey 代替每 draw 多次 QByteArray::number 拼串；完整包含网格／索引资源及代号、范围、side／order、label／cover、材质精确值及实例 layout。分组条件维持原有不透明兼容约束，hash 必须与 equality 一致；不可只按 mesh 或纹理合并，不做浮点近似分组，不改变透明顺序。（`RhineRender::BatchKey`／`BatchSlotKey`／`PoolKey` 进 `VulkanResourcePolicy.h`；`Draw::poolKey` 与 `instancePool.mirror`、`batchInstances` 全改类型化键；`VulkanResourceChecks` 新增 13 项相等／哈希一致性用例）
 - [ ] 分组先记录源范围和数量，再一次规划最终 opaque＋transparent 所需容量；直接把源实例写到最终 CPU staging／pool 范围，不再逐 draw vector→QByteArray→批次 QByteArray→pool 多轮拼接。源快照存活到打包完成；复用有界工作区，不用 raw pointer 指向可扩容容器。相同模型不等于相同 state／历史，未完整证明相同不得跨部件共享。
 - [ ] 保留 E 的每帧统一容量规划、全部 offset／stride 校验、80/144 格式与历史 ID 配对。可以以可信版本或最终字节比较跳过未变切片；版本必须覆盖矩阵、材质状态、排序和落点。相同内容落点变化仍需写入，arena 换代后全部初始化。
 - [ ] 对连续变化切片合并少量 updateDynamicBuffer 区间，合并间隙也须有本帧合法字节；比较额外复制量与命令数，不无条件整池上传。零变化零更新，整帧失败一致回退，不能制造半池新旧或读写重叠。
 - [ ] 差分测试最终实例字节和 draw buffer／offset／count：共享几何但材质不同、纹理切换、opaque／transparent、重排／新增删除、池扩容／回退、motion 切换。新增 RHINE_SCROLL_PACK_ONCE=1；验收看总 CPU／总复制量和帧间隔，不只看 GPU 更新次数。
+
+#### F03a 实施记录（批次键类型化）
+
+- `Qt/src/render/VulkanResourcePolicy.h` 新增 `BatchKey`（vertices／indices／start／count／side／order／label／cover／材质 128 字节／instanceStride，`==` 与 `qHashMulti` 出自同一组字段）、`BatchSlotKey`（同上 + slot）、`PoolKey`（逐 draw 用 drawId，批次用 BatchSlotKey）。
+- `Qt/src/RhiScene.cpp`：`batchDraws()` 的分组从「拼 `baked/...+8 个 number+材质` 字符串」改为 `QHash<BatchKey,int>`，槽位计数改 `QHash<BatchKey,int>`（几何键清空材质）；`Draw::poolKey` 从 `QByteArray` 换成 `PoolKey`，`instancePool.mirror` 与 `batchInstances` 同步类型化；`prepare()` 写 `poolKey.valid/drawId`；`poolInstances()` 按 `valid/batch` 分支查 `batchInstances` 或 `instances`。
+- 语义保持不变：仍只合并"不透明 + 非透射 + depthWrite"的 draw，仍按材质精确字节分组、不改变透明顺序；池化关闭时仍走 `dynamicBuffer` 回退。
+- 用例：`RhineVulkanResourceChecks` 110 项（新增 13 项：相等、哈希一致、材质字节／instanceStride／槽位／身份类型区分）。
+- 本步只做键类型化；F03 余下三条（单次打包、跳过未变切片、合并更新区间）与 `RHINE_SCROLL_PACK_ONCE` 开关留待下一步。
 
 ## F04：可见集合与排序一次计算、一次输出
 

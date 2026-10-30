@@ -421,7 +421,7 @@ class Renderer {
         QRhiBuffer *buffer = nullptr;
         quint64 capacity = 0;
         quint64 cursor = 0;
-        QHash<QByteArray, InstancePoolMirror> mirror;
+        QHash<RhineRender::PoolKey, InstancePoolMirror> mirror;
     };
     InstancePool instancePool;
     /// D04：主目标的深度在没人读时不 store（RHINE_VK_DISCARD_UNUSED_DEPTH=1 才启用）。
@@ -2356,7 +2356,7 @@ class Renderer {
         quint32 materialOffset = 0;
         bool dynamicOffset = false;
         /// D03：实例池里的身份（"d<drawId>" 或批次的 key），池化写用它做内容比对。
-        QByteArray poolKey;
+        RhineRender::PoolKey poolKey;
 #ifdef Q_OS_LINUX
         // arena 内偏移；instances 为 nullptr 时生效（0 也合法，表示 arena 起点）。
         int instanceOffset = 0;
@@ -2488,13 +2488,15 @@ class Renderer {
             result.append({d, vertices, indices, instance(d), label, cover, start, count, drawBindings, material,
                            materialOffset, dynamicOffset});
             if (instancePoolEnabled) {
-                result.last().poolKey = QByteArray("d") + QByteArray::number(d["id"].toInt());
+                result.last().poolKey.valid = true;
+                result.last().poolKey.batch = false;
+                result.last().poolKey.drawId = d["id"].toInt();
             }
         }
         endMaterialArenaWrite();
         return result;
     }
-    QHash<QByteArray, BufferState> batchInstances;
+    QHash<RhineRender::BatchSlotKey, BufferState> batchInstances;
     /**
      * 把同几何、同材质的烘焙背景壳体合并为实例批次。
      * 透明与透射物体保留原排序；每个实例继续使用原来的矩阵、主题和揭示状态。
@@ -2503,9 +2505,10 @@ class Renderer {
         RhineRender::HotPathTimer batchTimer(RhineRender::hotPathWindow().batchNs);
         QList<Draw> result;
         QList<QByteArray> bytes;
-        QList<QByteArray> keys;
-        QHash<QByteArray, int> groups;
-        QHash<QByteArray, int> groupSlots;
+        QList<RhineRender::BatchSlotKey> keys;
+        QList<bool> batched;
+        QHash<RhineRender::BatchKey, int> groups;
+        QHash<RhineRender::BatchKey, int> slotCounters;
         for (const auto &draw : input) {
             const auto &data = draw.data;
             const auto &material = draw.material;
@@ -2514,19 +2517,27 @@ class Renderer {
             if (!eligible) {
                 result.append(draw);
                 bytes.append(QByteArray());
-                keys.append(QByteArray());
+                keys.append(RhineRender::BatchSlotKey{});
+                batched.append(false);
                 continue;
             }
-            auto key = QByteArray("baked/") + QByteArray::number(quintptr(draw.vertices)) + '/' +
-                       QByteArray::number(quintptr(draw.indices)) + '/' + QByteArray::number(draw.start) +
-                       '/' + QByteArray::number(draw.count) + '/' + QByteArray::number(data["side"].toInt()) +
-                       '/' + QByteArray::number(data["order"].toInt()) + '/' +
-                       QByteArray::number(quintptr(draw.label)) + '/' +
-                       QByteArray::number(quintptr(draw.cover)) + ':';
-            const auto bufferKey = key;
-            key.append(reinterpret_cast<const char *>(&material), sizeof(material));
+            // F03：分组键逐字段比较，不再为每个候选 draw 拼一条 QByteArray。
+            RhineRender::BatchKey key;
+            key.vertices = quintptr(draw.vertices);
+            key.indices = quintptr(draw.indices);
+            key.start = quint32(draw.start);
+            key.count = quint32(draw.count);
+            key.side = data["side"].toInt();
+            key.order = data["order"].toInt();
+            key.label = quintptr(draw.label);
+            key.cover = quintptr(draw.cover);
+            key.material = QByteArray(reinterpret_cast<const char *>(&material), sizeof(material));
+            key.instanceStride = compactInstances ? 80 : 144;
+            auto geometryKey = key;
+            geometryKey.material.clear();
             auto group = groups.constFind(key);
             int index;
+            int slot = 0;
             if (group == groups.constEnd()) {
                 index = result.size();
                 groups.insert(key, index);
@@ -2534,11 +2545,13 @@ class Renderer {
                 result.last().data["count"] = 0;
                 bytes.append(QByteArray());
                 // 材质插值每帧变化，但批次缓冲区按几何和槽位复用，不能按材质值反复创建。
-                const int slot = groupSlots[bufferKey]++;
-                keys.append(bufferKey + '/' + QByteArray::number(slot));
+                slot = slotCounters[geometryKey]++;
             } else {
                 index = group.value();
             }
+            keys.append(RhineRender::BatchSlotKey{key.vertices, key.indices, key.start, key.count, key.side,
+                                                  key.order, key.label, key.cover, slot});
+            batched.append(true);
             bytes[index].append(instances.value(data["id"].toInt()).bytes);
             result[index].data["count"] = result[index].data["count"].toInt() + data["count"].toInt();
         }
@@ -2548,17 +2561,19 @@ class Renderer {
             hotPath.batchBytes.fetch_add(quint64(chunk.size()));
         }
         for (int i = 0; i < result.size(); ++i) {
-            if (!keys[i].isEmpty()) {
-                if (instancePoolEnabled) {
-                    auto &state = batchInstances[keys[i]];
-                    state.bytes = bytes[i];
-                    state.used = generation;
-                    result[i].instances = nullptr;
-                    result[i].poolKey = keys[i];
-                } else {
-                    result[i].instances =
-                        dynamicBuffer(batchInstances[keys[i]], bytes[i], QRhiBuffer::VertexBuffer);
-                }
+            if (!batched[i]) {
+                continue;
+            }
+            if (instancePoolEnabled) {
+                auto &state = batchInstances[keys[i]];
+                state.bytes = bytes[i];
+                state.used = generation;
+                result[i].instances = nullptr;
+                result[i].poolKey.valid = true;
+                result[i].poolKey.batch = true;
+                result[i].poolKey.slot = keys[i];
+            } else {
+                result[i].instances = dynamicBuffer(batchInstances[keys[i]], bytes[i], QRhiBuffer::VertexBuffer);
             }
         }
         return result;
@@ -2578,23 +2593,23 @@ class Renderer {
         struct Slice {
             Draw *draw;
             BufferState *state;
-            QByteArray key;
+            RhineRender::PoolKey key;
         };
         QList<Slice> slices;
         quint64 planned = 0;
         const auto collect = [&](QList<Draw> &draws) {
             for (auto &draw : draws) {
-                if (draw.poolKey.isEmpty()) {
+                if (!draw.poolKey.valid) {
                     continue;
                 }
                 BufferState *state = nullptr;
-                if (draw.poolKey.startsWith('b')) {
-                    const auto it = batchInstances.find(draw.poolKey);
+                if (draw.poolKey.batch) {
+                    const auto it = batchInstances.find(draw.poolKey.slot);
                     if (it != batchInstances.end()) {
                         state = &it.value();
                     }
                 } else {
-                    const auto it = instances.find(draw.data["id"].toInt());
+                    const auto it = instances.find(draw.poolKey.drawId);
                     if (it != instances.end()) {
                         state = &it.value();
                     }
@@ -2641,7 +2656,7 @@ class Renderer {
             return;
         }
         quint64 compareBytes = 0, uploadBytes = 0, uploads = 0;
-        QHash<QByteArray, InstancePoolMirror> next;
+        QHash<RhineRender::PoolKey, InstancePoolMirror> next;
         next.reserve(slices.size());
         for (int i = 0; i < slices.size(); ++i) {
             auto &slice = slices[i];

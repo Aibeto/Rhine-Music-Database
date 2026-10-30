@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QtCore/QByteArray>
+#include <QtCore/QHashFunctions>
 #include <QtCore/QtGlobal>
 
 namespace RhineRender {
@@ -240,6 +242,99 @@ inline quint64 pipelineLayoutSignature(bool arenaDynamic, bool compact)
 inline bool pipelineRebuildRequired(quint64 cached, quint64 current)
 {
     return cached != current;
+}
+
+} // namespace RhineRender
+
+namespace RhineRender {
+
+/// F03：烘焙批次的类型化键。
+///
+/// 旧实现每个候选 draw 都拼一条 `"baked/" + 8 个 QByteArray::number + ":" + 128 字节材质`，
+/// 仅为了分组就要做八次数字转字符串与多次 append。这里改成逐字段比较：指针与整数直接比，
+/// 材质仍是精确的 128 字节（不做浮点近似），相等与哈希出自同一组字段。
+struct BatchKey {
+    quintptr vertices = 0;
+    quintptr indices = 0;
+    quint32 start = 0;
+    quint32 count = 0;
+    int side = 0;
+    int order = 0;
+    quintptr label = 0;
+    quintptr cover = 0;
+    /// 材质按字节精确比较；长度固定为 sizeof(Surface)。
+    QByteArray material;
+    /// 实例 stride：紧凑与完整两种布局不能合并到同一批次。
+    quint32 instanceStride = 0;
+
+    bool operator==(const BatchKey &other) const
+    {
+        return vertices == other.vertices && indices == other.indices && start == other.start
+               && count == other.count && side == other.side && order == other.order && label == other.label
+               && cover == other.cover && material == other.material
+               && instanceStride == other.instanceStride;
+    }
+    bool operator!=(const BatchKey &other) const { return !(*this == other); }
+};
+
+inline size_t qHash(const BatchKey &key, size_t seed = 0)
+{
+    return qHashMulti(seed, key.vertices, key.indices, key.start, key.count, key.side, key.order, key.label,
+                      key.cover, qHash(key.material, seed), key.instanceStride);
+}
+
+/// 批次缓冲区身份：同上但不含材质（材质插值每帧变化，缓冲区按几何与槽位复用）。
+struct BatchSlotKey {
+    quintptr vertices = 0;
+    quintptr indices = 0;
+    quint32 start = 0;
+    quint32 count = 0;
+    int side = 0;
+    int order = 0;
+    quintptr label = 0;
+    quintptr cover = 0;
+    int slot = 0;
+
+    bool operator==(const BatchSlotKey &other) const
+    {
+        return vertices == other.vertices && indices == other.indices && start == other.start
+               && count == other.count && side == other.side && order == other.order && label == other.label
+               && cover == other.cover && slot == other.slot;
+    }
+};
+
+inline size_t qHash(const BatchSlotKey &key, size_t seed = 0)
+{
+    return qHashMulti(seed, key.vertices, key.indices, key.start, key.count, key.side, key.order, key.label,
+                      key.cover, key.slot);
+}
+
+} // namespace RhineRender
+
+namespace RhineRender {
+
+/// 实例池身份：逐 draw 用引擎的 draw id，批次用几何+槽位键。
+///
+/// 旧实现把两者压成一条 QByteArray（`"d123"` / `"baked/..." + slot`），池镜像表因此每帧
+/// 都要为每个 draw 拼字符串。类型化之后身份直接比较字段，池镜像与批次缓冲区共用同一套键。
+struct PoolKey {
+    bool valid = false;
+    bool batch = false;
+    int drawId = 0;
+    BatchSlotKey slot;
+
+    bool operator==(const PoolKey &other) const
+    {
+        if (valid != other.valid || batch != other.batch) {
+            return false;
+        }
+        return batch ? slot == other.slot : drawId == other.drawId;
+    }
+};
+
+inline size_t qHash(const PoolKey &key, size_t seed = 0)
+{
+    return key.batch ? qHashMulti(seed, key.batch, key.slot) : qHashMulti(seed, key.batch, key.drawId);
 }
 
 } // namespace RhineRender

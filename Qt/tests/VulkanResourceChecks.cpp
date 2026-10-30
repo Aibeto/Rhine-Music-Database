@@ -25,6 +25,12 @@ bool check(bool result, const QString &what, const QString &expected, const QStr
     return result;
 }
 
+bool check(bool result, const QString &what)
+{
+    return check(result, what, QStringLiteral("真"), QStringLiteral("假"));
+}
+
+
 QString number(quint64 value)
 {
     return QString::number(value);
@@ -397,6 +403,57 @@ bool configLine()
 
 } // namespace
 
+bool batchKeys()
+{
+    bool ok = true;
+    RhineRender::BatchKey one;
+    one.vertices = 100;
+    one.indices = 200;
+    one.start = 3;
+    one.count = 4;
+    one.side = 1;
+    one.order = 2;
+    one.label = 300;
+    one.cover = 400;
+    one.material = QByteArray(128, 'a');
+    auto two = one;
+    ok &= check(one == two, QStringLiteral("同字段的批次键相等"));
+    ok &= check(qHash(one) == qHash(two), QStringLiteral("相等键的哈希一致"));
+    two.material[5] = 'b';
+    ok &= check(one != two, QStringLiteral("材质字节不同即不等"));
+    auto strideSame = one;
+    strideSame.instanceStride = 80;
+    ok &= check(one != strideSame, QStringLiteral("实例 stride 不同即不等"));
+    ok &= check(qHash(one) != qHash(two), QStringLiteral("材质不同哈希也不同"));
+
+    RhineRender::BatchSlotKey slot{100, 200, 3, 4, 1, 2, 300, 400, 7};
+    auto slotCopy = slot;
+    ok &= check(slot == slotCopy, QStringLiteral("同槽位键相等"));
+    auto slotNext = slot;
+    slotNext.slot = 8;
+    ok &= check(slot != slotNext, QStringLiteral("槽位不同即不等"));
+    ok &= check(qHash(slot) != qHash(slotNext), QStringLiteral("槽位不同哈希也不同"));
+
+    RhineRender::PoolKey drawKey;
+    drawKey.valid = true;
+    drawKey.drawId = 42;
+    RhineRender::PoolKey sameDraw = drawKey;
+    ok &= check(drawKey == sameDraw, QStringLiteral("逐 draw 池身份相等"));
+    RhineRender::PoolKey batchKey;
+    batchKey.valid = true;
+    batchKey.batch = true;
+    batchKey.slot = slot;
+    RhineRender::PoolKey batchCopy = batchKey;
+    ok &= check(batchKey == batchCopy, QStringLiteral("批次池身份相等"));
+    ok &= check(!(drawKey == batchKey), QStringLiteral("逐 draw 与批次身份不相等"));
+    auto otherBatch = batchKey;
+    otherBatch.slot.slot = 9;
+    ok &= check(batchKey != otherBatch, QStringLiteral("批次槽位不同即不同"));
+    RhineRender::PoolKey invalid;
+    ok &= check(!(invalid == drawKey), QStringLiteral("无效身份不等于有效身份"));
+    return ok;
+}
+
 int main()
 {
     bool ok = true;
@@ -414,6 +471,7 @@ int main()
     ok &= compactConfigLine();
     ok &= pipelineLayoutIdentity();
     ok &= configLine();
+    ok &= batchKeys();
     std::printf("Vulkan 资源策略: %d 项检查，%d 项失败\n", g_checks, g_failures);
     return ok && g_failures == 0 ? 0 : 1;
 }
