@@ -95,12 +95,27 @@ class VulkanPresentationBackend final : public PresentationBackend {
         return m_instance.get();
     }
     bool resize(QSize size, bool force) override {
+        // 尺寸没变时必须只做判断、不碰 GPU：每重建一次都要 m_rhi->finish()（等设备空闲）
+        // 并重扫全部交换链包装目标，而 VulkanPresenter::resize 内部的"同尺寸就返回"是在
+        // finish() 之后才被调用，省不掉那次硬同步。呈现层在没有尺寸变化时也会一路把尺寸
+        // 同步下来，所以这层去重必须放在 finish() 之前，否则去重形同虚设（A10）。
+        if (!force && m_presenter && !m_swapTargets.empty() && size == m_size &&
+            m_swapSize == m_presenter->extent()) {
+            ++m_resizeSkips;
+            return true;
+        }
         m_rhi->finish();
+        // 只统计重建路径上的等待：release() 里那次 finish 是退出清理，混进来会让
+        // "每重建一次就等一次"的比例失真。
+        ++m_deviceIdleWaits;
         releaseTargets();
         if (!m_presenter->resize(size, force)) {
             m_error = m_presenter->lastError();
             return false;
         }
+        // 记下真正生效的尺寸（presenter 会按 surface 能力裁剪），下一次同尺寸判断才对得上。
+        m_size = m_presenter->extent();
+        ++m_swapchainRecreates;
         return ensureTargets();
     }
     AcquireResult acquire(Frame *frame) override {
@@ -224,6 +239,15 @@ class VulkanPresentationBackend final : public PresentationBackend {
     }
     double imageReuseMs() const override {
         return m_presenter ? m_presenter->imageReuseMs() : 0.0;
+    }
+    quint64 swapchainRecreates() const override {
+        return m_swapchainRecreates;
+    }
+    quint64 deviceIdleWaits() const override {
+        return m_deviceIdleWaits;
+    }
+    quint64 resizeSkips() const override {
+        return m_resizeSkips;
     }
     QString backendName() const override {
         return QStringLiteral("Vulkan");
@@ -349,7 +373,12 @@ class VulkanPresentationBackend final : public PresentationBackend {
             m_error = QStringLiteral("交换链创建失败：%1").arg(m_presenter->lastError());
             return false;
         }
-        return ensureTargets();
+        const bool targetsReady = ensureTargets();
+        // 上面那次赋值是窗口逻辑尺寸，只用于推导 swapchainSize。从这里起 m_size 表示
+        // "已生效的交换链尺寸"（像素），与 resize() 的入参同一口径——高 DPI 下逻辑像素
+        // 和物理像素永远不相等，混用会让同尺寸判断永远失败、每帧都重建。
+        m_size = m_presenter->extent();
+        return targetsReady;
     }
 
     void destroyDevice() {
@@ -438,6 +467,9 @@ class VulkanPresentationBackend final : public PresentationBackend {
     VkPhysicalDevice m_physDev = VK_NULL_HANDLE;
     QSize m_size;
     QSize m_swapSize;
+    quint64 m_swapchainRecreates = 0;
+    quint64 m_deviceIdleWaits = 0;
+    quint64 m_resizeSkips = 0;
     QString m_error;
 };
 } // namespace
