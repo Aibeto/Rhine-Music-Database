@@ -1,4 +1,5 @@
 #include <QtGlobal>
+#include <QLibraryInfo>
 #include "RhiScene.h"
 #ifdef Q_OS_DARWIN
 #include "render/MetalFxBackend.h"
@@ -9,6 +10,7 @@
 #include "render/MotionPass.h"
 #include "render/RenderPolicy.h"
 #include "render/ScenePostProcess.h"
+#include "render/VulkanResourceProbe.h"
 #ifdef Q_OS_LINUX
 #include "fg/FgFrameTap.h"
 #endif
@@ -275,6 +277,11 @@ class Renderer {
 #endif
     int sampleCount = 1;
     QString sizedAaMode;
+    /// D01：资源账本。只在 RHINE_VK_RESOURCE_PROBE=1 时计数与打印，默认零成本。
+    RhineRender::VulkanResourceWindow vkWindow;
+    bool vkProbe = qEnvironmentVariableIntValue("RHINE_VK_RESOURCE_PROBE") == 1;
+    int vkFrames = 0;
+    quint64 vkCreatesMark = 0;
     // A05：运动矢量附件当前是否真的分配了。它是目标形状的一部分，必须和尺寸/采样数/
     // AA 模式一起参与 resize() 的早退比较，否则切换 AA 模式后会沿用旧目标。
     bool motionTarget = false;
@@ -518,6 +525,31 @@ class Renderer {
 #endif
         updates = rhi->nextResourceUpdateBatch();
         glyphs = std::make_unique<Glyphs>(root);
+        vkCreatesMark = bindingCreations;
+        if (vkProbe) {
+            // D01：先把"跑的是哪个后端、谁在画、时间戳到底可不可用"写进日志。没有这段，
+            // 后面所有计数都可能被读到别的后端或别的 Qt 库上。
+            const auto info = rhi->driverInfo();
+            // QRhiDriverInfo 只有设备名／id，驱动版本与 Vulkan API 版本它不暴露——那两项
+            // 只能在用户手工 capture（vulkaninfo / 验证层）里核对，这里不伪造。
+            qInfo().noquote()
+                << "资源账本: backend" << rhi->backendName() << "| Qt" << qVersion()
+                << "| 库路径" << QLibraryInfo::path(QLibraryInfo::LibrariesPath) << "| 宿主"
+                << (qEnvironmentVariableIsSet("RHINE_FG_LAYER") ? "FG 覆盖层(自建 presenter)"
+                                                                : "QQuickWindow/QQuickRhiItem")
+                << "| GPU" << QString::fromUtf8(info.deviceName) << "| vendor" << info.vendorId
+                << "| device" << info.deviceId << "| 类型"
+                << (info.deviceType == QRhiDriverInfo::IntegratedDevice   ? "核显"
+                    : info.deviceType == QRhiDriverInfo::DiscreteDevice   ? "独显"
+                    : info.deviceType == QRhiDriverInfo::VirtualDevice    ? "虚拟"
+                    : info.deviceType == QRhiDriverInfo::CpuDevice        ? "CPU"
+                                                                          : "未知")
+                << "| timestamps" << (rhi->isFeatureSupported(QRhi::Timestamps) ? "可用" : "不可用")
+                << "| 请求时间戳"
+                << (RhineRender::timestampsRequested() ? "是" : "否") << "| ubufAlignment"
+                << rhi->ubufAlignment() << "| maxUbufRange"
+                << rhi->resourceLimit(QRhi::MaxUniformBufferRange);
+        }
         globalBuffer =
             create(own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(Globals))));
         for (auto pair :
@@ -1457,6 +1489,41 @@ class Renderer {
         }
         return total;
     }
+    /** D01：稳态存量。遍历现存的 buffer 容器而不是靠"创建减回收"推算——回收路径有好几条，
+     *  漏算一条就会把容量永久记高。 */
+    RhineRender::VulkanResourceLive vulkanLive() const {
+        RhineRender::VulkanResourceLive live;
+        auto add = [&](const BufferState &state) {
+            if (!state.buffer) {
+                return;
+            }
+            ++live.dynamicBuffers;
+            live.capacityBytes += quint64(state.buffer->size());
+            live.usedBytes += quint64(state.bytes.size());
+        };
+        for (const auto &state : materials) {
+            add(state.uniform);
+        }
+        for (const auto &state : instances) {
+            add(state);
+        }
+        for (const auto &state : batchInstances) {
+            add(state);
+        }
+        if (globalBuffer) {
+            ++live.dynamicBuffers;
+            live.capacityBytes += quint64(globalBuffer->size());
+            live.usedBytes += sizeof(Globals);
+        }
+        quint64 srb = pipelineLayouts.size() + postBindings.size();
+        for (const auto &state : materials) {
+            if (state.bindings) {
+                ++srb;
+            }
+        }
+        live.shaderResourceBindings = srb;
+        return live;
+    }
     QRhiShaderResourceBindings *bindings(std::vector<QRhiShaderResourceBinding> list,
                                          bool temporary = false) {
         ++bindingCreations;
@@ -1580,6 +1647,9 @@ class Renderer {
             retire(state.buffer);
             const int capacity = qMax(256, int(bytes.size()) * 2);
             state.buffer = create(own(rhi->newBuffer(QRhiBuffer::Dynamic, usage, capacity)));
+            if (vkProbe) {
+                ++vkWindow.dynamicBufferCreates;
+            }
             state.bytes.clear();
         }
         if (state.bytes != bytes) {
@@ -1598,6 +1668,10 @@ class Renderer {
             if (last > first) {
                 updates->updateDynamicBuffer(state.buffer, int(first), int(last - first),
                                              bytes.constData() + first);
+                if (vkProbe) {
+                    ++vkWindow.dynamicBufferUpdates;
+                    vkWindow.dynamicBufferBytes += quint64(last - first);
+                }
             }
             state.bytes = bytes;
         }
@@ -1956,6 +2030,11 @@ class Renderer {
                 cb->draw(draw.count, data["count"].toInt(), draw.start);
             }
             ++drawCalls;
+        }
+        if (vkProbe) {
+            vkWindow.srbBinds += quint64(bindingsBinds);
+            vkWindow.srbReuseSkips += quint64(items.size() - bindingsBinds);
+            vkWindow.pipelineBinds += quint64(pipelineBinds);
         }
         // 排障：状态重绑次数（RHINE_DRAW_PROBE=1，每 120 帧一次）。去重路径现在全平台生效，
         // 探针也就跟着全平台可用；它只在环境变量打开时才做计数，默认零成本。
@@ -2367,6 +2446,11 @@ class Renderer {
         cb->resourceUpdate(updates);
         updates = nullptr;
         const auto background = vector(frame["background"]);
+        if (vkProbe) {
+            ++vkWindow.passes;
+            // D04 之前主目标始终保留深度内容；这里如实记，D04 落地后按目标策略分流。
+            ++vkWindow.depthStorePasses;
+        }
         cb->beginPass(color.rt, QColor::fromRgbF(background.x(), background.y(), background.z()), {1, 0});
 #ifdef Q_OS_LINUX
         const double dbgBuildMs = double(dbgClock.nsecsElapsed()) / 1e6;
@@ -2404,6 +2488,16 @@ class Renderer {
         }
 #endif
         cb->endPass();
+        if (vkProbe) {
+            vkWindow.srbCreates = bindingCreations - vkCreatesMark;
+            vkCreatesMark = bindingCreations;
+            if (++vkFrames >= 120) {
+                const auto live = vulkanLive();
+                qInfo().noquote() << RhineRender::formatVulkanResourceLine(vkWindow, live, vkFrames);
+                vkWindow.clear();
+                vkFrames = 0;
+            }
+        }
 #ifdef Q_OS_LINUX
         // 运动矢量已随主渲染输出（MRT），这里只发布输入并保存上一帧状态。
         publishMotionInputs(frame);
