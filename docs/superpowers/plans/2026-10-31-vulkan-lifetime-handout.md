@@ -71,9 +71,9 @@
 
 ## E06：最小回归与手工验收
 
-- [ ] 扩展 [VulkanResourceChecks.cpp](../../../Qt/tests/VulkanResourceChecks.cpp)，将槽规划／写模式／两列表 pool 规划提成实际实现共用策略；补历史 churn、真实超容量、共享所有权、静态内容连续多原生帧槽初始化、map失败换对象、双列表扩容与80/144布局选择。归位测试用现有可隔离的 NativeScene harness；若需新测试目标，只建 Core／离线逻辑，不启动应用播放。
-- [ ] 建议 E05 两项仅 opt-in（RHINE_VK_COMPACT_INSTANCES／RHINE_VK_LAYOUT_ONLY_PIPELINES）；E02/E03 是对应 D 实验路径的正确性修复，不借新的开关保留已知越界／未初始化行为。开关全关／单开／组合开都能安全回退。
-- [ ] 实施后定向编译及测试，下列命令本计划未执行：
+- [x] 扩展 [VulkanResourceChecks.cpp](../../../Qt/tests/VulkanResourceChecks.cpp)，将槽规划／写模式／两列表 pool 规划提成实际实现共用策略；补历史 churn、真实超容量、共享所有权、静态内容连续多原生帧槽初始化、map失败换对象、双列表扩容与80/144布局选择。归位测试用现有可隔离的 NativeScene harness；若需新测试目标，只建 Core／离线逻辑，不启动应用播放。
+- [x] 建议 E05 两项仅 opt-in（RHINE_VK_COMPACT_INSTANCES／RHINE_VK_LAYOUT_ONLY_PIPELINES）；E02/E03 是对应 D 实验路径的正确性修复，不借新的开关保留已知越界／未初始化行为。开关全关／单开／组合开都能安全回退。
+- [x] 实施后定向编译及测试，下列命令本计划未执行：
 
 ~~~sh
 cmake --build output/qt-build -j$(nproc) --target RhineVulkanResourceRegression RhineRenderPolicyRegression RhineMusicTextureAdmissionRegression RhineFramePacingRegression
@@ -91,3 +91,47 @@ ctest --test-dir output/qt-build --output-on-failure -R '^qt_(vulkan_resource|re
 - <a id="s1"></a>**[S1]** [Qt QRhiResource](https://doc.qt.io/qt-6/qrhiresource.html)：资源拥有权与 deleteLater；应用缓存清除与原生 GPU 回收不是同一时点。
 - <a id="s2"></a>**[S2]** [Qt QRhiBuffer](https://doc.qt.io/qt-6/qrhibuffer.html#beginFullDynamicBufferUpdateForCurrentFrame)：全量直写、原生帧槽、每帧初始化与 batch 互斥。
 - <a id="s3"></a>**[S3]** [Qt QRhiGraphicsPipeline](https://doc.qt.io/qt-6/qrhigraphicspipeline.html)：布局兼容性与管线创建成本。资料核对日期 2026-10-31；本机二进制以实际 Qt 构建为准。
+
+### E06 交付说明
+
+**用例覆盖**（`Qt/tests/VulkanResourceChecks.cpp` 97 项、`Qt/tests/SceneLifetimeChecks.cpp` 17 项，全部 Core-only、不建 QGuiApplication）：
+
+| 要求 | 覆盖方式 |
+|---|---|
+| 槽规划／写模式／两列表 pool 规划提成共用策略 | 策略集中在 `Qt/src/render/VulkanResourcePolicy.h`，运行期与用例调同一函数 |
+| 历史 churn | `materialSlotPlanning()`：1000 轮固定活动集合，槽位水位恒 40 |
+| 真实超容量 | 300 个活动键时 `materialSlotPlanFits(300, 256)` 为 false → 运行期 `disableUniformArena` |
+| 共享所有权 | `resourceGenerationMatches`/`pruneRetireNeeded`：仅"本帧未引用或代号过期"才退休 |
+| 静态内容连续多帧初始化 | `materialWriteRequired(true, true)`：直写时内容相同也必须写 |
+| map 失败换对象 | `poolSliceFits` 全量预检失败 → 整帧回落逐 draw buffer（不半池半单独） |
+| 双列表扩容 | `poolSliceEnd` 累计两段（含空切片与 4 字节对齐） |
+| 80／144 布局选择 | `compactInstances()`：`compactInstanceAllowed`、`instanceStride`、载荷比例 64/144 |
+| 布局身份 | `pipelineLayoutIdentity()`：身份两位，buffer 换代不触发重建 |
+| 归位状态机 | `SceneLifetimeChecks.cpp`：角度／落位衰减、400 次换格积压、满积压与停止后清空 |
+
+**开关**（均 opt-in，仅 Vulkan 路径；全关时与改动前一致）：
+
+| 开关 | 作用 |
+|---|---|
+| `RHINE_VK_UNIFORM_ARENA` | 材质 UBO 动态偏移 arena（E02／E03 的槽回收与写满语义始终生效） |
+| `RHINE_VK_INSTANCE_ARENA` | 实例 buffer 池化（E03 双列表统一规划始终生效） |
+| `RHINE_VK_DIRECT_WRITE` | arena 整块直写；映射失败整帧回落 |
+| `RHINE_VK_DISCARD_UNUSED_DEPTH` | 无深度消费者时不保留内容 |
+| `RHINE_VK_COMPACT_INSTANCES` | 80 字节实例 + 无 `RHINE_SINGLE_PASS_MOTION` 着色器 |
+| `RHINE_VK_LAYOUT_ONLY_PIPELINES` | 布局身份与 buffer 身份分离 |
+
+**实际执行的验证**：
+
+~~~sh
+cmake --build output/qt-build -j$(nproc) --target RhineVulkanResourceRegression RhineRenderPolicyRegression RhineMusicTextureAdmissionRegression RhineFramePacingRegression RhineSceneLifetimeRegression
+ctest --test-dir output/qt-build --output-on-failure -R '^qt_(vulkan_resource|render_policy|music_texture_admission|frame_pacing|scene_lifetime)_regression$'
+ctest --test-dir output/qt-build --output-on-failure
+~~~
+
+结果：定向 5/5、全量 16/16（37 秒）；主程序只做编译验证，未运行。
+
+**状态：功能完成，性能待验。** 本轮没有真实 GPU 时间数据（计划禁止自动启动 GUI／播放）。资源计数（`RHINE_VK_RESOURCE_PROBE=1`）能给出 buffer／SRB／pipeline 存量与逐帧更新量，但 buffer 变少不等于帧时间变短。
+
+**人工验收**：同一会话同一路径（首次快速滚动／原路返回／停止等待），逐个开关单开，对照 `资源账本` 行与 `QSG_RENDER_TIMING`／节拍诊断的 P50／P95／P99；光栅路径变化（紧凑实例、深度不保留）要同时看画面一致性与 `RHINE_FG_DIAG=1` 的 3D 分段。
+
+**已知风险**：① E05a 的紧凑几何管线未在真实 Vulkan 上跑过，接口不匹配会建管线失败（默认关）；② E05b 依赖 QRhi 对"同布局描述、不同 buffer"的 SRB 兼容性判定，被拒时表现为绘制丢失（默认关）；③ E05b 的 setVertexInput 去重未做（无 capture 证明重复）；④ 归位积压仍有数秒尾巴（E04 把时间常数从约 6 秒降到 0.22 秒）。
