@@ -198,6 +198,47 @@ bool directWriteCoverage()
     return ok;
 }
 
+bool materialSlotPlanning()
+{
+    bool ok = true;
+    // 固定 40 个活动键、每轮整批换人：上一轮槽位全部可回收，水位不应上涨。
+    quint32 highWater = 40;
+    bool bounded = true;
+    for (int round = 0; round < 1000; ++round) {
+        const auto plan = RhineRender::planMaterialSlots(40, 0, highWater, highWater);
+        bounded &= plan.fresh == 0 && plan.needSlots == 40;
+        highWater = plan.needSlots;
+    }
+    ok &= check(bounded, QStringLiteral("1000 轮固定活动集合的 churn 不得抬高槽位水位"),
+                QStringLiteral("needSlots 恒 40"), number(highWater));
+    ok &= check(RhineRender::materialSlotPlanFits(40, 256),
+                QStringLiteral("40 槽在 256 上限内"), QStringLiteral("true"), QStringLiteral("false"));
+
+    // 半新半旧：30 个仍在映射，10 个空闲槽正好接住 10 个新键，不需要扩容。
+    const auto reuse = RhineRender::planMaterialSlots(40, 30, 10, 40);
+    ok &= check(reuse.reused == 10 && reuse.fresh == 0 && reuse.needSlots == 40,
+                QStringLiteral("空闲槽优先复用且不计入扩容"), QStringLiteral("reused=10 fresh=0 need=40"),
+                QStringLiteral("reused=%1 fresh=%2 need=%3")
+                    .arg(reuse.reused)
+                    .arg(reuse.fresh)
+                    .arg(reuse.needSlots));
+
+    // 全新 40 个键、没有任何空闲槽：只能把水位抬到 80。
+    const auto grow = RhineRender::planMaterialSlots(40, 0, 0, 40);
+    ok &= check(grow.fresh == 40 && grow.needSlots == 80,
+                QStringLiteral("没有空闲槽时才扩容"), QStringLiteral("fresh=40 need=80"),
+                QStringLiteral("fresh=%1 need=%2").arg(grow.fresh).arg(grow.needSlots));
+
+    // 超出上限的真实活动集合：必须判定为不适合 arena，而不是悄悄越界。
+    const auto over = RhineRender::planMaterialSlots(300, 0, 0, 0);
+    ok &= check(!RhineRender::materialSlotPlanFits(over.needSlots, 256),
+                QStringLiteral("超过 256 槽的活动集合必须回退"), QStringLiteral("false"),
+                QStringLiteral("true"));
+    ok &= check(over.needSlots == 300, QStringLiteral("回退前先把真实需求算出来"),
+                QStringLiteral("300"), number(over.needSlots));
+    return ok;
+}
+
 bool configLine()
 {
     bool ok = true;
@@ -245,6 +286,7 @@ int main()
     ok &= sharedCacheLifetime();
     ok &= depthConsumers();
     ok &= directWriteCoverage();
+    ok &= materialSlotPlanning();
     ok &= configLine();
     std::printf("Vulkan 资源策略: %d 项检查，%d 项失败\n", g_checks, g_failures);
     return ok && g_failures == 0 ? 0 : 1;

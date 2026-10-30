@@ -372,6 +372,9 @@ class Renderer {
         QHash<quint32, QByteArray> committed;
     };
     MaterialArena materialArena;
+    /// E02：本帧回收出来的槽位。优先复用它们，`used` 只在没有空闲槽时才前进，
+    /// 历史键因此不会把 256 个槽位永久吃光。
+    QList<quint32> freeSlots;
     /// D02 开关：RHINE_VK_UNIFORM_ARENA=1 才走 arena；任何一步不满足就永久退回逐材质 buffer。
     /// E01：请求值与生效值分开存——回退是永久的，日志只写"开了"会把回退读成还在走 arena。
     const bool uniformArenaRequested = qEnvironmentVariableIntValue("RHINE_VK_UNIFORM_ARENA") == 1;
@@ -860,8 +863,7 @@ class Renderer {
         }
         materialBindings.clear();
         // 已经按动态偏移建过布局；不整批重建，后续静态 SRB 会和布局不兼容。
-        pipelines.clear();
-        pipelineLayouts.clear();
+        clearPipelines();
         qInfo().noquote() << "Vulkan arena: 关闭（" << reason << "），回退逐材质 uniform buffer";
     }
     /// 把 arena 撑到至少 needSlots 个槽位；返回 false 表示这一档不可用（调用方回退）。
@@ -912,24 +914,64 @@ class Renderer {
         // 新 buffer 内容是未定义的：所有槽位必须重写一遍。
         materialArena.committed.clear();
         // 布局 SRB 里写死了 arena 指针，buffer 一换就得重建；pipeline 绑着布局，一并清掉。
-        pipelines.clear();
-        pipelineLayouts.clear();
+        clearPipelines();
         return true;
     }
-    /// 材质键 → 槽位。分配出去的槽位不再回收，因此不会出现"别人还在用"的悬空偏移。
+    /**
+     * E02：按本帧真正要用的材质键规划槽位。
+     *
+     * 旧实现按 `used + draws.size()` 预留：同一个键会被重复计数，历史键又永不释放，
+     * 于是每滚一轮都把水位往上推，迟早撞到 256 槽上限并永久关掉 arena（优化静默消失）。
+     * 现在先回收本帧不再出现的键（槽位进 freeSlots、committed 失效），再只为真正新增的
+     * 键扩容量；`used` 只在空闲槽耗尽时前进。
+     */
+    bool planMaterialArena(const QSet<RhineRender::MaterialSlotKey> &active) {
+        if (!uniformArena) {
+            return false;
+        }
+        for (auto it = materialArena.offsets.begin(); it != materialArena.offsets.end();) {
+            if (active.contains(it.key())) {
+                ++it;
+                continue;
+            }
+            freeSlots.append(it.value());
+            // 槽位要给别人用了：旧内容不再代表任何键，直写与差分都必须重写。
+            materialArena.committed.remove(it.value());
+            it = materialArena.offsets.erase(it);
+        }
+        if (freeSlots.size() > 1) {
+            std::sort(freeSlots.begin(), freeSlots.end());
+            freeSlots.erase(std::unique(freeSlots.begin(), freeSlots.end()), freeSlots.end());
+        }
+        const auto plan = RhineRender::planMaterialSlots(
+            quint32(active.size()), quint32(materialArena.offsets.size()), quint32(freeSlots.size()),
+            materialArena.used);
+        if (!RhineRender::materialSlotPlanFits(plan.needSlots, 256)) {
+            freeSlots.clear();
+            disableUniformArena("材质槽位超过 256");
+            return false;
+        }
+        return ensureMaterialArena(plan.needSlots);
+    }
+    /// 材质键 → 槽位：优先复用本帧回收的空闲槽，槽位不再随历史增长。
     quint32 materialSlot(const RhineRender::MaterialSlotKey &key, bool *ok) {
         const auto it = materialArena.offsets.constFind(key);
         if (it != materialArena.offsets.constEnd()) {
             *ok = true;
             return it.value();
         }
-        if (!materialArena.buffer && !ensureMaterialArena(1)) {
-            *ok = false;
-            return 0;
+        quint32 slot = 0;
+        if (!freeSlots.isEmpty()) {
+            slot = freeSlots.takeFirst();
+        } else {
+            if (!materialArena.buffer && !ensureMaterialArena(1)) {
+                *ok = false;
+                return 0;
+            }
+            slot = materialArena.used;
+            materialArena.used = slot + 1;
         }
-        const quint32 slot = materialArena.used;
         materialArena.offsets.insert(key, slot);
-        materialArena.used = slot + 1;
         *ok = true;
         return slot;
     }
@@ -1101,8 +1143,7 @@ class Renderer {
         size = nextSize;
         invalidateBindings();
         clearPostBindings();
-        pipelines.clear();
-        pipelineLayouts.clear();
+        clearPipelines();
         sized.clear();
         auto rtFlags = QRhiTexture::RenderTarget;
         depth = create(own(rhi->newTexture(QRhiTexture::D32F, size, sampleCount, rtFlags), true));
@@ -1336,6 +1377,40 @@ class Renderer {
         if (it != resources.end()) {
             it->release()->deleteLater();
             resources.erase(it);
+        }
+    }
+    /**
+     * E02：pipeline／布局是 `own(..., resize=true)` 建出来的，归 sized 持有。
+     * 只清哈希等于把对象留在 sized 里，直到下次 resize 才一起销毁——arena 换 buffer
+     * 这类"每滚一轮可能发生一次"的路径上，这就是纯增长。这里把它们从 sized 摘出来
+     * 交给 Qt 延迟释放（不 deviceWaitIdle，不影响正在提交的帧）。
+     */
+    void retireSized(QRhiResource *resource) {
+        if (!resource) {
+            return;
+        }
+        auto it =
+            std::find_if(sized.begin(), sized.end(), [&](auto &v) { return v.get() == resource; });
+        if (it != sized.end()) {
+            it->release()->deleteLater();
+            sized.erase(it);
+        }
+    }
+    /// 布局 SRB 里写死了 arena buffer 指针，pipeline 又绑着布局：两者必须成对回收。
+    void clearPipelines() {
+        for (auto *pipeline : std::as_const(pipelines)) {
+            retireSized(pipeline);
+        }
+        pipelines.clear();
+        for (auto *layout : std::as_const(pipelineLayouts)) {
+            retireSized(layout);
+        }
+        pipelineLayouts.clear();
+        if (pipelinesLive > 0) {
+            pipelinesLive = 0;
+        }
+        if (layoutsLive > 0) {
+            layoutsLive = 0;
         }
     }
     /**
@@ -2181,10 +2256,19 @@ class Renderer {
         QList<Draw> result;
         result.reserve(draws.size());
         const auto stages = QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage;
-        // D02：先把槽位一次撑够（本帧最多新增 draws.size() 个材质键），循环里就不会中途重建
+        // E02：先按"本帧真正要用的键"规划（回收 + 只为新增扩容量），循环里就不会中途重建
         // arena——重建会清掉 pipeline 布局，同帧前后两半就会用上不兼容的绑定形态。
         if (uniformArena) {
-            ensureMaterialArena(materialArena.used + quint32(draws.size()));
+            QSet<RhineRender::MaterialSlotKey> active;
+            active.reserve(draws.size());
+            for (const auto &d : draws) {
+                if (d["count"].toInt() <= 0) {
+                    continue;
+                }
+                active.insert(RhineRender::MaterialSlotKey{d["id"].toInt(), d["mesh"].toInt(),
+                                                           d["name"].toString()});
+            }
+            planMaterialArena(active);
         }
         // 这两项只与当前曲目有关，和具体 draw 无关：循环外算一次。
         const auto selectedKey = musicItem["key"].toString("empty");

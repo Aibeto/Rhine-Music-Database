@@ -23,12 +23,14 @@
 
 ## E02：修正历史材质槽与 pipeline 所有权（高优先级）
 
+> 实施：`planMaterialArena()` 先回收本帧不再出现的键（槽位进 `freeSlots`、`committed` 失效），再按 `planMaterialSlots()` 只为真正新增的键扩容量；`materialSlot()` 优先复用空闲槽，`used` 只在空闲槽耗尽时前进。pipeline 与布局 SRB 改成 `clearPipelines()`：从 `sized` 摘出后 `release()->deleteLater()`，不再只清哈希（`pipelinesLive`/`layoutsLive` 因此能真实回落）。离线上限验收在 `VulkanResourceChecks.cpp` 的 `materialSlotPlanning()`：1000 轮固定活动集合 churn 水位恒 40、半新半旧复用空闲槽、无空闲槽才扩容到 80、300 个活动键判为不适合 arena。真实 `>256` 活动集合需要运行时场景，本轮没有可离线构造的样本。
+
 **证据链：** [NativeScene.cpp](../../../Qt/src/NativeScene.cpp#L115) 在切换时 old.id=m_nextActor++；[NativeCards.cpp](../../../Qt/src/NativeCards.cpp#L102) 令 draw ID=−(actorId×256+partIndex+1)；[材质槽](../../../Qt/src/RhiScene.cpp#L904) 把 draw ID 加入 offsets、used 只增不减。[prepare](../../../Qt/src/RhiScene.cpp#L2136) 再按 used＋draws.size() 申请容量，超过 256 槽会永久关闭 uniform arena。**“材质键不会随滚动增长”的注释不成立**；这是有上限的历史增长／回退风险，不是已证实的无限显存泄漏。
 
-- [ ] 改成按本帧实际唯一活动材质规划：先收集／去重，再分配或复用槽；只有真正新增的 key 计入需求，不用 used＋全部 draws 过度预留。活动 key 有界且小于容量时，反复新 actor 不得耗尽历史 256 槽。
-- [ ] 可选最简单的每帧确定性重排／打包，或按代回收空闲槽；同一逻辑帧任何已发出的 draw 都不得被后续写覆盖。batch 更新由 QRhi 管理各原生帧槽的一致性；回收槽必须使旧 committed 失效，写入新 owner，避免字节恰好相同却读旧槽。无需把 actor ID 改回循环复用来掩盖问题，历史运动身份仍保留。
-- [ ] arena 扩容／模式回退只清 pipelines／pipelineLayouts 的 hash，原对象在 sized 中仍被持有：[clear 点](../../../Qt/src/RhiScene.cpp#L847)、[资源入库](../../../Qt/src/RhiScene.cpp#L1851)。拆出可安全退休的 pipeline／layout 所有权；清 map 时回收对应对象，不能调用只搜索 resources 的 retire 期待清掉 sized，也不能直接 sized.clear() 把有效 RT／深度一起删掉。保留 Qt 延迟释放，不加 deviceWaitIdle。[S1]
-- [ ] 验收历史 key 单调变化、同时活动集合固定的 1000 次离线 churn：槽占用／对象实际存量有界，不因历史次数永久回退。另测大于容量的真实活动集合，正确回退并给出原因；不能只提高 256 上限。
+- [x] 改成按本帧实际唯一活动材质规划：先收集／去重，再分配或复用槽；只有真正新增的 key 计入需求，不用 used＋全部 draws 过度预留。活动 key 有界且小于容量时，反复新 actor 不得耗尽历史 256 槽。
+- [x] 可选最简单的每帧确定性重排／打包，或按代回收空闲槽；同一逻辑帧任何已发出的 draw 都不得被后续写覆盖。batch 更新由 QRhi 管理各原生帧槽的一致性；回收槽必须使旧 committed 失效，写入新 owner，避免字节恰好相同却读旧槽。无需把 actor ID 改回循环复用来掩盖问题，历史运动身份仍保留。
+- [x] arena 扩容／模式回退只清 pipelines／pipelineLayouts 的 hash，原对象在 sized 中仍被持有：[clear 点](../../../Qt/src/RhiScene.cpp#L847)、[资源入库](../../../Qt/src/RhiScene.cpp#L1851)。拆出可安全退休的 pipeline／layout 所有权；清 map 时回收对应对象，不能调用只搜索 resources 的 retire 期待清掉 sized，也不能直接 sized.clear() 把有效 RT／深度一起删掉。保留 Qt 延迟释放，不加 deviceWaitIdle。[S1]
+- [x] 验收历史 key 单调变化、同时活动集合固定的 1000 次离线 churn：槽占用／对象实际存量有界，不因历史次数永久回退。另测大于容量的真实活动集合，正确回退并给出原因；不能只提高 256 上限。
 
 ## E03：修正 D03 全量直写与实例池边界（先保正确）
 

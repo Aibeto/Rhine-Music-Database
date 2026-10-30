@@ -143,4 +143,62 @@ inline bool directWriteCoversAllSlots(quint32 writtenSlots, quint32 usedSlots)
     return writtenSlots >= usedSlots;
 }
 
+
+/**
+ * E02：材质槽的按帧规划。
+ *
+ * 输入是"本帧真正要用的键数""回收后仍映射着的键数""可复用的空闲槽数"和"历史最高水位"。
+ * 输出只包含真正需要新增的槽数：旧实现用 `used + draws.size()` 预留，会把同一个材质键
+ * 重复计数，还会把已经不再出现的键永久算进需求，最后撞上 256 槽上限。
+ */
+struct MaterialSlotPlan {
+    quint32 active = 0;
+    quint32 reused = 0;
+    quint32 fresh = 0;
+    quint32 needSlots = 0;
+};
+
+inline MaterialSlotPlan planMaterialSlots(quint32 activeKeys, quint32 stillMapped, quint32 freeSlots,
+                                          quint32 highWater)
+{
+    MaterialSlotPlan plan;
+    plan.active = activeKeys;
+    const quint32 wantFresh = activeKeys > stillMapped ? activeKeys - stillMapped : 0;
+    plan.reused = wantFresh < freeSlots ? wantFresh : freeSlots;
+    plan.fresh = wantFresh - plan.reused;
+    plan.needSlots = highWater + plan.fresh;
+    return plan;
+}
+
+/// 规划出来的槽位需求是否还在允许的槽位上限内（超了就该回退，而不是继续加容量）。
+inline bool materialSlotPlanFits(quint32 needSlots, quint32 maxSlots)
+{
+    return needSlots <= maxSlots;
+}
+
+/**
+ * E03：这一次写是否必须落地。
+ *
+ * 整块直写映射的是"当前原生帧"的缓冲副本，内容与上一帧相同也必须写满本帧引用到的槽位；
+ * 只有走 updateDynamicBuffer 的 batch 路径才允许按内容去重。
+ */
+inline bool materialWriteRequired(bool mappedDirectWrite, bool contentEqual)
+{
+    return mappedDirectWrite || !contentEqual;
+}
+
+/// E03：把一段实例字节按 alignment 落到 cursor 之后的末尾（用于两段列表一起规划容量）。
+inline quint64 poolSliceEnd(quint64 cursor, quint64 bytes, quint64 alignment = 4)
+{
+    const quint64 step = alignment ? alignment : 1;
+    const quint64 offset = (cursor + step - 1) / step * step;
+    return offset + bytes;
+}
+
+/// E03：切片是否完全落在容量内（溢出安全：先比 offset 再比剩余空间）。
+inline bool poolSliceFits(quint64 offset, quint64 bytes, quint64 capacity)
+{
+    return offset <= capacity && bytes <= capacity - offset;
+}
+
 } // namespace RhineRender
