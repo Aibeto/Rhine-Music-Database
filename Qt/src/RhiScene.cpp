@@ -1242,7 +1242,12 @@ class Renderer {
         }
         retireCoverRevision(key, revision, previous);
     }
-    void updateMusic(const QJsonObject &value, QImage image) {
+    /**
+     * B02：admitted=false 表示这一首只是"快速路过"，还不值得为它创建冷纹理。
+     * 身份、列表顺序、选中态照常更新（画面不能停在上一首），但标签绘制/缩放/mip 上传、
+     * 封面合成与预处理全部跳过，绘制侧回落到中性占位——绝不借用上一首的纹理。
+     */
+    void updateMusic(const QJsonObject &value, QImage image, bool admitted) {
         const auto key = value["key"].toString("empty");
         const auto labelRevision = value["title"].toString() + "|" + value["artist"].toString() + "|" +
                                    value["kind"].toString() + "|" + value["id"].toString();
@@ -1250,7 +1255,9 @@ class Renderer {
         musicItem = value;
         textureOrder.removeAll(key);
         textureOrder << key;
-        if (!labels.contains(key) || labelRevisions.value(key) != labelRevision) {
+        // 单帧离屏参考渲染必须当帧出图，是唯一可以绕过准入的门槛例外。
+        const bool allowResources = admitted || forceSynchronousCover;
+        if (allowResources && (!labels.contains(key) || labelRevisions.value(key) != labelRevision)) {
             if (const auto previous = labels.value(key)) {
                 invalidateBindings(previous);
             }
@@ -1274,7 +1281,7 @@ class Renderer {
             !covers.contains(key) || (!image.isNull() && coverRevisions.value(key) != coverRevision);
         // 已经为这个 revision 登记过意图（在途/排队/等预算）就什么都不做。
         // 若每帧重新发起，上一张结果会被判成过期并被丢掉，封面永远上不了屏。
-        if (coverChanging && coverWanted.value(key, qint64(-1)) != coverRevision) {
+        if (coverChanging && allowResources && coverWanted.value(key, qint64(-1)) != coverRevision) {
             // 先登记"这个 key 想要哪个 revision"：异步结果回来时靠它判断还有人要不要，
             // 也是整条链唯一一处声明意图的地方。旧封面此刻不退休——换绑时由
             // bindCoverTexture 一并处理，这样等待期间画面仍是上一张封面而不是占位灰块。
@@ -1659,8 +1666,8 @@ class Renderer {
             const auto mb = dynamicBuffer(
                 state.uniform, QByteArray(reinterpret_cast<const char *>(&material), sizeof(material)),
                 QRhiBuffer::UniformBuffer);
-            const auto key =
-                d["musicSelected"].toBool() ? musicItem["key"].toString() : d["musicKey"].toString();
+            const auto selectedKey = musicItem["key"].toString("empty");
+            const auto key = d["musicSelected"].toBool() ? selectedKey : d["musicKey"].toString();
             QRhiTexture *label = white;
             if (mesh == -5) {
                 label = decorationHigh ? decorationTextureHigh : decorationTextureLow;
@@ -1669,13 +1676,19 @@ class Renderer {
             } else if (mesh == -7) {
                 label = letteringTextureSpine;
             } else if (d["label"].toBool()) {
-                label = labels.value(key, labelTexture ? labelTexture : white);
+                // B02：只有当前曲目可以回落到 labelTexture；归位卡片缺标签就用白色占位，
+                // 不许借别人的文字——否则快速滚动时上一首的标题会跟着卡片飞。
+                label = key == selectedKey ? labels.value(key, labelTexture ? labelTexture : white)
+                                           : labels.value(key, white);
             }
             // 着色器只有盘面读取封面，只有标签读取文字；其他表面绑定稳定的占位纹理。
             // 查看封面页的绘制来自装配体，key 不是曲目 key，直接查表会落回占位图，
             // 表现成"封面没贴上去、只看到烘焙壳体"。查不到时用当前曲目的封面。
-            const auto currentCover = covers.value(musicItem["key"].toString("empty"), placeholderCover);
-            const auto cover = mesh == -2 ? covers.value(key, currentCover) : placeholderCover;
+            const auto currentCover = covers.value(selectedKey, placeholderCover);
+            // 查看封面页的绘制来自装配体，key 不是曲目 key（空），仍回落当前曲目封面；
+            // 归位卡片则不许借：不是当前曲目就绑定占位纹理。
+            const auto coverFallback = key.isEmpty() || key == selectedKey ? currentCover : placeholderCover;
+            const auto cover = mesh == -2 ? covers.value(key, coverFallback) : placeholderCover;
             // 缓存命中仍可能换曲，同一个 draw 的绑定必须跟随实际纹理指针。
             if (state.label != label || state.cover != cover) {
                 retire(state.bindings);
@@ -2085,23 +2098,26 @@ class Renderer {
 #endif
         updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
         ++generation;
-        // 帧号与成品回收入口：两者都必须在 updateMusic 之前，本帧就绪的封面才能当帧换绑，
-        // 否则每次切歌都要白等一帧（首次可见延迟直接翻倍）。
+        // 帧号先递增：后续统计靠它算帧差。
         ++frameIndex;
-        drainCoverPrep();
         // 每帧重置 arena：实例数据按帧重建，偏移从 0 开始。
         activeTextureKeys.clear();
-        activeTextureKeys.insert(item["key"].toString("empty"));
+        const auto currentMusicKey = item["key"].toString("empty");
+        activeTextureKeys.insert(currentMusicKey);
         for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
             activeTextureKeys.insert(it.key());
         }
-        // 恢复图形设备时先还原仍可见的旧唱片，最后绑定当前曲目。
+        // B02：先更新身份与纹理选择，再消费在途结果。顺序反了的话，本帧会先绑上一张
+        // 即将被撤销的封面，下一帧再换回去——肉眼就是闪一下。
+        // 恢复图形设备时只还原"已准入且确实缺纹理"的旧唱片：路过的条目永远不补资源。
         for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
-            if (it.key() != item["key"].toString("empty") && !labels.contains(it.key())) {
-                updateMusic(it->item, it->cover);
+            if (it.key() != currentMusicKey && it->admitted && !labels.contains(it.key()) &&
+                !it->item.isEmpty()) {
+                updateMusic(it->item, it->cover, true);
             }
         }
-        updateMusic(item, cover);
+        updateMusic(item, cover, musicTextures.value(currentMusicKey).admitted);
+        drainCoverPrep();
 #ifdef Q_OS_LINUX
         const double dbgTexMs = double(dbgPre.nsecsElapsed()) / 1e6;
         dbgPre.restart();
