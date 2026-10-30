@@ -380,6 +380,28 @@ class Renderer {
         quint64 used = 0;
     };
     QHash<QRhiTexture *, QHash<QRhiTexture *, MaterialBindingEntry>> materialBindings;
+    /**
+     * D03：实例 VertexBuffer 池。
+     *
+     * 逐 draw／逐批次各建一个 Dynamic VertexBuffer 时，一帧几十个小 buffer，每个都要一次
+     * updateDynamicBuffer；这里把它们放进同一张大 buffer，draw 只记 arena + 字节偏移。
+     * 上传仍走 updateDynamicBuffer（差分路径保留），偏移按 4 字节对齐。
+     */
+    struct InstancePoolMirror {
+        quint64 offset = 0;
+        QByteArray bytes;
+    };
+    struct InstancePool {
+        QRhiBuffer *buffer = nullptr;
+        quint64 capacity = 0;
+        quint64 cursor = 0;
+        QHash<QByteArray, InstancePoolMirror> mirror;
+    };
+    InstancePool instancePool;
+    bool instancePoolEnabled = qEnvironmentVariableIntValue("RHINE_VK_INSTANCE_ARENA") == 1;
+    /// D03 第二步：材质 arena 的整块直写实验（RHINE_VK_DIRECT_WRITE=1）。
+    bool directWrite = qEnvironmentVariableIntValue("RHINE_VK_DIRECT_WRITE") == 1;
+    uchar *materialArenaMap = nullptr;
     QHash<QString, QRhiShaderResourceBindings *> postBindings;
     QHash<QString, QString> labelRevisions;
     QHash<QString, qint64> coverRevisions;
@@ -760,11 +782,51 @@ class Renderer {
         create(rt);
         return {resolve ? resolve : texture, rt, rp};
     }
+    bool ensureInstancePool(quint64 needBytes) {
+        const quint64 bytes = RhineRender::instancePoolBytes(needBytes, instancePool.capacity);
+        if (!bytes) {
+            instancePoolEnabled = false;
+            qInfo().noquote() << "Vulkan 实例池: 单帧实例字节超过上限，回退逐 draw buffer";
+            return false;
+        }
+        if (instancePool.buffer && bytes == instancePool.capacity) {
+            return true;
+        }
+        retire(instancePool.buffer);
+        instancePool.buffer = create(
+            own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::VertexBuffer, int(bytes))));
+        if (vkProbe) {
+            ++vkWindow.dynamicBufferCreates;
+        }
+        instancePool.capacity = bytes;
+        instancePool.mirror.clear();
+        return true;
+    }
+    /// 直写模式：整块映射，本帧所有材质槽位必须写满（不能因为"内容没变"跳过）。
+    void beginMaterialArenaWrite() {
+        if (!directWrite || !materialArena.buffer || materialArenaMap) {
+            return;
+        }
+        materialArenaMap = reinterpret_cast<uchar *>(
+            materialArena.buffer->beginFullDynamicBufferUpdateForCurrentFrame());
+        if (!materialArenaMap) {
+            directWrite = false;
+            qInfo().noquote() << "Vulkan arena: 后端不支持整块直写，回退 updateDynamicBuffer";
+        }
+    }
+    void endMaterialArenaWrite() {
+        if (!materialArenaMap) {
+            return;
+        }
+        materialArena.buffer->endFullDynamicBufferUpdateForCurrentFrame();
+        materialArenaMap = nullptr;
+    }
     void disableUniformArena(const char *reason) {
         if (!uniformArena) {
             return;
         }
         uniformArena = false;
+        endMaterialArenaWrite();
         for (auto &byCover : materialBindings) {
             for (auto &entry : byCover) {
                 retire(entry.bindings);
@@ -803,6 +865,8 @@ class Renderer {
             disableUniformArena("arena 容量超过 1 MiB");
             return false;
         }
+        // 正在整块直写的 buffer 不能悄悄换掉：先收尾，本帧剩下的写回落到 updateDynamicBuffer。
+        endMaterialArenaWrite();
         retire(materialArena.buffer);
         for (auto &byCover : materialBindings) {
             for (auto &entry : byCover) {
@@ -850,8 +914,13 @@ class Renderer {
         if (it != materialArena.committed.constEnd() && it.value() == bytes) {
             return;
         }
-        updates->updateDynamicBuffer(materialArena.buffer, int(slot * materialArena.stride),
-                                     int(sizeof(Surface)), bytes.constData());
+        if (materialArenaMap) {
+            // 直写：不比对内容，整块映射里按槽位写满——跳过会留下上一帧槽位的残值。
+            memcpy(materialArenaMap + quint64(slot) * materialArena.stride, bytes.constData(), sizeof(Surface));
+        } else {
+            updates->updateDynamicBuffer(materialArena.buffer, int(slot * materialArena.stride),
+                                         int(sizeof(Surface)), bytes.constData());
+        }
         materialArena.committed.insert(slot, bytes);
         if (vkProbe) {
             ++vkWindow.dynamicBufferUpdates;
@@ -1714,6 +1783,11 @@ class Renderer {
         for (const auto &state : batchInstances) {
             add(state);
         }
+        if (instancePool.buffer) {
+            ++live.dynamicBuffers;
+            live.capacityBytes += instancePool.capacity;
+            live.usedBytes += instancePool.cursor;
+        }
         if (globalBuffer) {
             ++live.dynamicBuffers;
             live.capacityBytes += quint64(globalBuffer->size());
@@ -2007,6 +2081,12 @@ class Renderer {
         }
         const QByteArray bytes(reinterpret_cast<const char *>(values.data()),
                                values.size() * sizeof(Instance));
+        if (instancePoolEnabled) {
+            // 池化：CPU 侧只留本帧字节，GPU buffer 由 poolInstances() 统一分配与上传。
+            state.bytes = bytes;
+            state.used = generation;
+            return nullptr;
+        }
         return dynamicBuffer(state, bytes, QRhiBuffer::VertexBuffer);
     }
     struct Draw {
@@ -2023,6 +2103,8 @@ class Renderer {
         /// D02：材质 UBO arena 内的槽位字节偏移；dynamicOffset 为真时随 SRB 一起提交。
         quint32 materialOffset = 0;
         bool dynamicOffset = false;
+        /// D03：实例池里的身份（"d<drawId>" 或批次的 key），池化写用它做内容比对。
+        QByteArray poolKey;
 #ifdef Q_OS_LINUX
         // arena 内偏移；instances 为 nullptr 时生效（0 也合法，表示 arena 起点）。
         int instanceOffset = 0;
@@ -2141,6 +2223,9 @@ class Renderer {
             }
             result.append({d, vertices, indices, instance(d), label, cover, start, count, drawBindings, material,
                            materialOffset, dynamicOffset});
+            if (instancePoolEnabled) {
+                result.last().poolKey = QByteArray("d") + QByteArray::number(d["id"].toInt());
+            }
         }
         return result;
     }
@@ -2193,11 +2278,91 @@ class Renderer {
         }
         for (int i = 0; i < result.size(); ++i) {
             if (!keys[i].isEmpty()) {
-                result[i].instances =
-                    dynamicBuffer(batchInstances[keys[i]], bytes[i], QRhiBuffer::VertexBuffer);
+                if (instancePoolEnabled) {
+                    auto &state = batchInstances[keys[i]];
+                    state.bytes = bytes[i];
+                    state.used = generation;
+                    result[i].instances = nullptr;
+                    result[i].poolKey = keys[i];
+                } else {
+                    result[i].instances =
+                        dynamicBuffer(batchInstances[keys[i]], bytes[i], QRhiBuffer::VertexBuffer);
+                }
             }
         }
         return result;
+    }
+    /**
+     * 把本帧最终列表里的实例字节搬进池。
+     *
+     * 只在内容或落点变化时上传：内容相同但偏移变了也必须重写，否则"顺序变了、单块没变"
+     * 的帧会让 draw 读到上一位的数据。池建不出来时退回逐 draw buffer，不留空绑定。
+     */
+    void poolInstances(QList<Draw> &draws) {
+        if (!instancePoolEnabled || draws.isEmpty()) {
+            return;
+        }
+        struct Slice {
+            Draw *draw;
+            BufferState *state;
+            QByteArray key;
+        };
+        QList<Slice> slices;
+        quint64 total = 0;
+        for (auto &draw : draws) {
+            if (draw.poolKey.isEmpty()) {
+                continue;
+            }
+            BufferState *state = nullptr;
+            if (draw.poolKey.startsWith('b')) {
+                const auto it = batchInstances.find(draw.poolKey);
+                if (it != batchInstances.end()) {
+                    state = &it.value();
+                }
+            } else {
+                const auto it = instances.find(draw.data["id"].toInt());
+                if (it != instances.end()) {
+                    state = &it.value();
+                }
+            }
+            if (!state || state->bytes.isEmpty()) {
+                continue;
+            }
+            slices.append({&draw, state, draw.poolKey});
+            total += quint64(state->bytes.size());
+        }
+        if (slices.isEmpty()) {
+            return;
+        }
+        if (!ensureInstancePool(total)) {
+            for (auto &slice : slices) {
+                slice.draw->instances = dynamicBuffer(*slice.state, slice.state->bytes, QRhiBuffer::VertexBuffer);
+                slice.draw->instanceOffset = 0;
+            }
+            return;
+        }
+        quint64 cursor = instancePool.cursor;
+        QHash<QByteArray, InstancePoolMirror> next;
+        for (auto &slice : slices) {
+            const quint64 offset = (cursor + 3) / 4 * 4;
+            cursor = offset + quint64(slice.state->bytes.size());
+            const auto previous = instancePool.mirror.constFind(slice.key);
+            const bool same = previous != instancePool.mirror.constEnd() && previous->bytes == slice.state->bytes;
+            const quint64 previousOffset = previous != instancePool.mirror.constEnd() ? previous->offset : ~quint64(0);
+            if (RhineRender::poolWriteNeeded(same, offset, previousOffset)) {
+                updates->updateDynamicBuffer(instancePool.buffer, int(offset), int(slice.state->bytes.size()),
+                                             slice.state->bytes.constData());
+                if (vkProbe) {
+                    ++vkWindow.dynamicBufferUpdates;
+                    vkWindow.dynamicBufferBytes += quint64(slice.state->bytes.size());
+                }
+            }
+            next.insert(slice.key, InstancePoolMirror{offset, slice.state->bytes});
+            slice.draw->instances = instancePool.buffer;
+            slice.draw->instanceOffset = int(offset);
+        }
+        instancePool.mirror = next;
+        instancePool.cursor = cursor;
     }
     void geometry(QRhiCommandBuffer *cb, const QList<Draw> &draws) {
         // 所有后端共用同一条「先去重再提交」的路径：先把每个 draw 的 pipeline 算出来
@@ -2272,7 +2437,8 @@ class Renderer {
                 boundOffset = draw.materialOffset;
             }
             // 实例数据来自 arena 时用 offset 寻址；否则回落到 draw 自带的 buffer。
-            const QRhiCommandBuffer::VertexInput inputs[] = {{draw.vertices, 0}, {draw.instances, 0}};
+            const QRhiCommandBuffer::VertexInput inputs[] = {{draw.vertices, 0},
+                                                             {draw.instances, quint32(draw.instanceOffset)}};
             cb->setVertexInput(0, 2, inputs, draw.indices, 0, QRhiCommandBuffer::IndexUInt32);
             if (draw.indices) {
                 cb->drawIndexed(draw.count, data["count"].toInt(), draw.start);
@@ -2586,8 +2752,11 @@ class Renderer {
         const int dbgParts = int(draws.size());
         const int dbgReturning = int(frame["returningMusicKeys"].toArray().size());
 #endif
+        // D03：直写映射必须在任何材质写入之前开始，并在录制任何 pass 之前结束。
+        beginMaterialArenaWrite();
         // 保留可见与归位唱片资源，复用材质绑定和实例缓冲。
         auto data = prepare(draws, mode == "detail" || mode == "boot");
+        endMaterialArenaWrite();
 #ifdef Q_OS_LINUX
         const double dbgListMs = double(dbgPre.nsecsElapsed()) / 1e6;
         int dbgInstances = 0;
@@ -2691,6 +2860,10 @@ class Renderer {
                 ++it;
             }
         }
+        // D03：两个列表的实例字节统一搬进池；游标每帧归零，偏移不与上一帧复用。
+        instancePool.cursor = 0;
+        poolInstances(opaque);
+        poolInstances(transparent);
 #ifdef Q_OS_LINUX
         const QRhiBuffer *arenaBuffer = nullptr;
 #endif

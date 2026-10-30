@@ -36,12 +36,14 @@
 
 ## D03：实例 buffer 池化与全量直写，分两步 A/B
 
-位置：[instance／dynamicBuffer](../../../Qt/src/RhiScene.cpp#L1578)、[batchInstances](../../../Qt/src/RhiScene.cpp#L1834)、[geometry](../../../Qt/src/RhiScene.cpp#L1950)。D02 不作为必需前置；先做可独立验证的资源池化，再试直写。[S1](#ref-s1)[S2](#ref-s2)
+位置：[instance／dynamicBuffer](../../../Qt/src/RhiScene.cpp#L1578)、[batchInstances](../../../Qt/src/RhiScene.cpp#L1834)、[geometry](../../../Qt/src/RhiScene.cpp#L1950)。D02 不作为必需前置；先做可独立验证的资源池化，再试直写。
 
-- [ ] 第一步：对最终不透明／透明列表的实例字节分配少量 Dynamic VertexBuffer arena，记录 buffer＋byteOffset＋实例数；所有消费者实际使用 offset，不只填字段。保持实例 stride、当前／上一帧矩阵、顺序与 batch 去重，检查溢出与边界；motion／独立速度通道和诊断读取也须正确，不能只修主 geometry。
-- [ ] 保留现有 batch 更新，比较有效字节／容量、更新命令、CPU 与资源数。容量分档增长、有界回收，禁止同一帧多次覆盖已被前面 draw 读取的区域；不以 pooling 名义改变 draw 顺序或材质。
-- [ ] 第二步：先在中大型动态 UBO 上试 beginFullDynamicBufferUpdateForCurrentFrame／endFullDynamicBufferUpdateForCurrentFrame；每个被使用的录制帧均写全当帧读取范围，在任何依赖 pass 前结束。实例 VertexBuffer 直写另作 Qt 6.12 Vulkan 实现核实后的可选实验，不假定所有后端均支持相同行为。
-- [ ] 同一 buffer 对象不混用直写和 ResourceUpdateBatch／读回；静止时也不能因 CPU 字节没变跳过直写，否则下一个 QRhi 帧槽可能读旧值。Qt 管理 map／flush／帧槽，不能用应用帧号模拟槽或自行销毁 Qt 内部 VkBuffer。
+实施：`RHINE_VK_INSTANCE_ARENA=1` 把逐 draw／逐批次 Dynamic VertexBuffer 收进一张池（`poolInstances()`，偏移 4 字节对齐、内容或落点变化才上传、失败退回落单 buffer）；`RHINE_VK_DIRECT_WRITE=1` 对材质 arena 试整块直写（`beginMaterialArenaWrite()`，本帧写满每个槽位、录制前结束、映射失败即回退）。实例 VertexBuffer 的整块直写按计划留给 Qt 6.12 Vulkan 实现核实，本轮不做。运行时差分与连续多帧相同内容的用例在 D06 的策略测试里覆盖。[S1](#ref-s1)[S2](#ref-s2)
+
+- [x] 第一步：对最终不透明／透明列表的实例字节分配少量 Dynamic VertexBuffer arena，记录 buffer＋byteOffset＋实例数；所有消费者实际使用 offset，不只填字段。保持实例 stride、当前／上一帧矩阵、顺序与 batch 去重，检查溢出与边界；motion／独立速度通道和诊断读取也须正确，不能只修主 geometry。
+- [x] 保留现有 batch 更新，比较有效字节／容量、更新命令、CPU 与资源数。容量分档增长、有界回收，禁止同一帧多次覆盖已被前面 draw 读取的区域；不以 pooling 名义改变 draw 顺序或材质。
+- [x] 第二步：先在中大型动态 UBO 上试 beginFullDynamicBufferUpdateForCurrentFrame／endFullDynamicBufferUpdateForCurrentFrame；每个被使用的录制帧均写全当帧读取范围，在任何依赖 pass 前结束。实例 VertexBuffer 直写另作 Qt 6.12 Vulkan 实现核实后的可选实验，不假定所有后端均支持相同行为。
+- [x] 同一 buffer 对象不混用直写和 ResourceUpdateBatch／读回；静止时也不能因 CPU 字节没变跳过直写，否则下一个 QRhi 帧槽可能读旧值。Qt 管理 map／flush／帧槽，不能用应用帧号模拟槽或自行销毁 Qt 内部 VkBuffer。
 - [ ] 映射失败／模式切换以新 buffer 和正确重绑回退到 batch 路径，绝不在原对象上临时混两种更新模型。新增测试覆盖连续多帧相同内容、第三帧后再变化、扩容／空列表／隐藏恢复；全量多写和 flush 成本可能抵消收益，需保留差分路径作对照。
 
 ## D04：无后续深度消费者时不 store 深度（低复杂度候选）

@@ -58,4 +58,35 @@ inline quint64 arenaCapacityFor(quint32 stride, quint32 needSlots, quint64 maxBy
     return bytes;
 }
 
+
+/// 实例池的容量规划：现有容量够用就原样返回，不够就按需翻倍（至少 4 MiB），
+/// 超过 maxBytes 返回 0 表示这一档不可用（调用方回退到逐 draw buffer）。
+inline quint64 instancePoolBytes(quint64 needBytes, quint64 currentBytes, quint64 maxBytes = 64ull << 20)
+{
+    const quint64 floorBytes = 4ull << 20;
+    if (needBytes > maxBytes) {
+        return 0;
+    }
+    if (currentBytes >= needBytes && currentBytes > 0) {
+        return currentBytes;
+    }
+    quint64 bytes = currentBytes > 0 ? currentBytes : floorBytes;
+    while (bytes < needBytes && bytes < maxBytes) {
+        bytes *= 2;
+    }
+    if (bytes < needBytes || bytes > maxBytes) {
+        return 0;
+    }
+    return bytes;
+}
+
+/**
+ * 池化写是否需要真正上传：内容没变且落点没变才可跳过。
+ * 只比内容不比起始偏移会让"顺序变了但单块内容相同"的帧读到上一位的数据。
+ */
+inline bool poolWriteNeeded(bool contentEqual, quint64 offset, quint64 previousOffset)
+{
+    return !contentEqual || offset != previousOffset;
+}
+
 } // namespace RhineRender
