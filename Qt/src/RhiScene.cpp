@@ -11,6 +11,7 @@
 #include "render/RenderPolicy.h"
 #include "render/ScenePostProcess.h"
 #include "render/VulkanResourceProbe.h"
+#include "render/VulkanResourcePolicy.h"
 #ifdef Q_OS_LINUX
 #include "fg/FgFrameTap.h"
 #endif
@@ -350,6 +351,35 @@ class Renderer {
 #endif
     // C02：键用整数 id/mesh 加短名字，去掉每帧每 draw 的临时字符串分配与长串哈希。
     QHash<RhineRender::MaterialSlotKey, MaterialState> materials;
+    /**
+     * D02：材质 UBO arena。
+     *
+     * 每个材质在 arena 里占一个固定槽位（步长 = 对齐后的一个 Surface），draw 用动态偏移
+     * 指到自己的槽位，SRB 因此可以按"标签/封面纹理组合"复用：原来每个材质一份 SRB 加一份
+     * buffer，一帧几十个；现在只剩真正用到的纹理组合数。
+     *
+     * 边界：槽位只增不减（材质键 = drawId+mesh+名字，数量由场景决定，不随曲目增长），
+     * 分配出去的偏移不会回收给别的材质——一个 draw 的淘汰因此不会让别人悬空。
+     */
+    struct MaterialArena {
+        QRhiBuffer *buffer = nullptr;
+        quint32 stride = 0;
+        quint32 capacity = 0;
+        quint32 used = 0;
+        quint64 generation = 0;
+        quint64 maxRange = 0;
+        QHash<RhineRender::MaterialSlotKey, quint32> offsets;
+        QHash<quint32, QByteArray> committed;
+    };
+    MaterialArena materialArena;
+    /// D02 开关：RHINE_VK_UNIFORM_ARENA=1 才走 arena；任何一步不满足就永久退回逐材质 buffer。
+    bool uniformArena = qEnvironmentVariableIntValue("RHINE_VK_UNIFORM_ARENA") == 1;
+    struct MaterialBindingEntry {
+        QRhiShaderResourceBindings *bindings = nullptr;
+        quint64 arena = 0;
+        quint64 used = 0;
+    };
+    QHash<QRhiTexture *, QHash<QRhiTexture *, MaterialBindingEntry>> materialBindings;
     QHash<QString, QRhiShaderResourceBindings *> postBindings;
     QHash<QString, QString> labelRevisions;
     QHash<QString, qint64> coverRevisions;
@@ -730,6 +760,172 @@ class Renderer {
         create(rt);
         return {resolve ? resolve : texture, rt, rp};
     }
+    void disableUniformArena(const char *reason) {
+        if (!uniformArena) {
+            return;
+        }
+        uniformArena = false;
+        for (auto &byCover : materialBindings) {
+            for (auto &entry : byCover) {
+                retire(entry.bindings);
+            }
+        }
+        materialBindings.clear();
+        // 已经按动态偏移建过布局；不整批重建，后续静态 SRB 会和布局不兼容。
+        pipelines.clear();
+        pipelineLayouts.clear();
+        qInfo().noquote() << "Vulkan arena: 关闭（" << reason << "），回退逐材质 uniform buffer";
+    }
+    /// 把 arena 撑到至少 needSlots 个槽位；返回 false 表示这一档不可用（调用方回退）。
+    bool ensureMaterialArena(quint32 needSlots) {
+        const quint32 alignment = quint32(qMax(1, rhi->ubufAlignment()));
+        const quint32 stride = RhineRender::arenaStride(quint32(sizeof(Surface)), alignment);
+        const quint64 maxRange = quint64(rhi->resourceLimit(QRhi::MaxUniformBufferRange));
+        if (!stride || !RhineRender::dynamicOffsetFits(0, sizeof(Surface), stride, maxRange, stride)) {
+            disableUniformArena("单槽位超出一次绑定上限");
+            return false;
+        }
+        const quint32 slotsNow =
+            materialArena.buffer ? quint32(materialArena.capacity / materialArena.stride) : 0;
+        if (materialArena.buffer && materialArena.stride == stride && slotsNow >= needSlots) {
+            return true;
+        }
+        quint32 slotCount = slotsNow ? slotsNow : 64;
+        while (slotCount < needSlots && slotCount < 256) {
+            slotCount *= 2;
+        }
+        if (slotCount < needSlots) {
+            disableUniformArena("材质槽位超过 256");
+            return false;
+        }
+        const quint64 capacity = RhineRender::arenaCapacityFor(stride, slotCount, 1ull << 20);
+        if (!capacity) {
+            disableUniformArena("arena 容量超过 1 MiB");
+            return false;
+        }
+        retire(materialArena.buffer);
+        for (auto &byCover : materialBindings) {
+            for (auto &entry : byCover) {
+                retire(entry.bindings);
+            }
+        }
+        materialBindings.clear();
+        materialArena.buffer = create(
+            own(rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, int(capacity))));
+        if (vkProbe) {
+            ++vkWindow.dynamicBufferCreates;
+        }
+        materialArena.stride = stride;
+        materialArena.capacity = quint32(capacity);
+        materialArena.maxRange = maxRange;
+        materialArena.generation += 1;
+        // 新 buffer 内容是未定义的：所有槽位必须重写一遍。
+        materialArena.committed.clear();
+        // 布局 SRB 里写死了 arena 指针，buffer 一换就得重建；pipeline 绑着布局，一并清掉。
+        pipelines.clear();
+        pipelineLayouts.clear();
+        return true;
+    }
+    /// 材质键 → 槽位。分配出去的槽位不再回收，因此不会出现"别人还在用"的悬空偏移。
+    quint32 materialSlot(const RhineRender::MaterialSlotKey &key, bool *ok) {
+        const auto it = materialArena.offsets.constFind(key);
+        if (it != materialArena.offsets.constEnd()) {
+            *ok = true;
+            return it.value();
+        }
+        if (!materialArena.buffer && !ensureMaterialArena(1)) {
+            *ok = false;
+            return 0;
+        }
+        const quint32 slot = materialArena.used;
+        materialArena.offsets.insert(key, slot);
+        materialArena.used = slot + 1;
+        *ok = true;
+        return slot;
+    }
+    /// 内容变了才写 GPU：绝大多数帧材质的插值确实在变，但同一帧内重复材质不必重复写。
+    void writeMaterial(quint32 slot, const Surface &material) {
+        const QByteArray bytes(reinterpret_cast<const char *>(&material), sizeof(material));
+        const auto it = materialArena.committed.constFind(slot);
+        if (it != materialArena.committed.constEnd() && it.value() == bytes) {
+            return;
+        }
+        updates->updateDynamicBuffer(materialArena.buffer, int(slot * materialArena.stride),
+                                     int(sizeof(Surface)), bytes.constData());
+        materialArena.committed.insert(slot, bytes);
+        if (vkProbe) {
+            ++vkWindow.dynamicBufferUpdates;
+            vkWindow.dynamicBufferBytes += quint64(sizeof(Surface));
+        }
+    }
+    /// 按纹理组合复用 SRB：动态偏移让同一个 SRB 服务任意槽位。
+    QRhiShaderResourceBindings *materialBindingsFor(QRhiTexture *label, QRhiTexture *cover) {
+        auto &byCover = materialBindings[label];
+        auto it = byCover.find(cover);
+        if (it != byCover.end()) {
+            if (it->arena == materialArena.generation) {
+                it->used = generation;
+                return it->bindings;
+            }
+            retire(it->bindings);
+            byCover.erase(it);
+        }
+        const auto stages = QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage;
+        auto *created = bindings(
+            {QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer),
+             QRhiShaderResourceBinding::uniformBufferWithDynamicOffset(1, stages, materialArena.buffer,
+                                                                      int(sizeof(Surface))),
+             QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
+                                                       surfaceAtlas, mipSampler),
+             QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
+                                                       lightAtlas, volume),
+             QRhiShaderResourceBinding::sampledTexture(4, QRhiShaderResourceBinding::FragmentStage, label,
+                                                       mipSampler),
+             QRhiShaderResourceBinding::sampledTexture(5, QRhiShaderResourceBinding::FragmentStage, cover,
+                                                       mipSampler),
+             QRhiShaderResourceBinding::sampledTexture(6, QRhiShaderResourceBinding::FragmentStage,
+                                                       normalAtlas, linear)},
+            false);
+        byCover.insert(cover, MaterialBindingEntry{created, materialArena.generation, generation});
+        return created;
+    }
+    struct ArenaBinding {
+        QRhiShaderResourceBindings *bindings = nullptr;
+        quint32 offset = 0;
+    };
+    ArenaBinding arenaMaterial(const RhineRender::MaterialSlotKey &key, const Surface &material,
+                               QRhiTexture *label, QRhiTexture *cover) {
+        bool ok = false;
+        const quint32 slot = materialSlot(key, &ok);
+        if (!ok) {
+            return {};
+        }
+        writeMaterial(slot, material);
+        const quint32 offset = slot * materialArena.stride;
+        if (!RhineRender::dynamicOffsetFits(offset, sizeof(Surface), materialArena.capacity,
+                                            materialArena.maxRange, materialArena.stride)) {
+            return {};
+        }
+        return ArenaBinding{materialBindingsFor(label, cover), offset};
+    }
+    /// 一帧结束：这一帧没被任何 draw 用到的 SRB 组合退休（纹理换掉后它们就再也不该活着）。
+    void pruneMaterialBindings() {
+        for (auto it = materialBindings.begin(); it != materialBindings.end();) {
+            for (auto inner = it.value().begin(); inner != it.value().end();) {
+                if (inner->used != generation || inner->arena != materialArena.generation) {
+                    retire(inner->bindings);
+                    inner = it.value().erase(inner);
+                } else {
+                    ++inner;
+                }
+            }
+            if (it.value().isEmpty()) {
+                it = materialBindings.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     void invalidateBindings(QRhiTexture *texture = nullptr) {
         for (auto &state : materials) {
             // 换曲只影响采样该纹理的材质；窗口尺寸变化才需要整批重新绑定。
@@ -738,6 +934,14 @@ class Renderer {
             }
             retire(state.bindings);
             state.bindings = nullptr;
+        }
+        if (!texture) {
+            for (auto &byCover : materialBindings) {
+                for (auto &entry : byCover) {
+                    retire(entry.bindings);
+                }
+            }
+            materialBindings.clear();
         }
     }
     void clearPostBindings() {
@@ -1515,7 +1719,15 @@ class Renderer {
             live.capacityBytes += quint64(globalBuffer->size());
             live.usedBytes += sizeof(Globals);
         }
+        if (materialArena.buffer) {
+            ++live.dynamicBuffers;
+            live.capacityBytes += quint64(materialArena.capacity);
+            live.usedBytes += quint64(materialArena.used) * quint64(materialArena.stride);
+        }
         quint64 srb = pipelineLayouts.size() + postBindings.size();
+        for (const auto &byCover : materialBindings) {
+            srb += quint64(byCover.size());
+        }
         for (const auto &state : materials) {
             if (state.bindings) {
                 ++srb;
@@ -1617,7 +1829,12 @@ class Renderer {
             std::vector<QRhiShaderResourceBinding> values = {
                 QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer)};
             if (geo) {
-                values.push_back(QRhiShaderResourceBinding::uniformBuffer(1, stages, globalBuffer));
+                if (uniformArena && materialArena.buffer) {
+                    values.push_back(QRhiShaderResourceBinding::uniformBufferWithDynamicOffset(
+                        1, stages, materialArena.buffer, int(sizeof(Surface))));
+                } else {
+                    values.push_back(QRhiShaderResourceBinding::uniformBuffer(1, stages, globalBuffer));
+                }
                 values.push_back(QRhiShaderResourceBinding::sampledTexture(
                     2, QRhiShaderResourceBinding::FragmentStage, surfaceAtlas, mipSampler));
                 values.push_back(QRhiShaderResourceBinding::sampledTexture(
@@ -1803,6 +2020,9 @@ class Renderer {
         /// C02：prepare() 已经算过一次材质；批处理、几何提交与诊断都复用它，
         /// 避免同一帧对同一个 draw 反复读二十来个 JSON 字段。
         Surface material;
+        /// D02：材质 UBO arena 内的槽位字节偏移；dynamicOffset 为真时随 SRB 一起提交。
+        quint32 materialOffset = 0;
+        bool dynamicOffset = false;
 #ifdef Q_OS_LINUX
         // arena 内偏移；instances 为 nullptr 时生效（0 也合法，表示 arena 起点）。
         int instanceOffset = 0;
@@ -1812,6 +2032,11 @@ class Renderer {
         QList<Draw> result;
         result.reserve(draws.size());
         const auto stages = QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage;
+        // D02：先把槽位一次撑够（本帧最多新增 draws.size() 个材质键），循环里就不会中途重建
+        // arena——重建会清掉 pipeline 布局，同帧前后两半就会用上不兼容的绑定形态。
+        if (uniformArena) {
+            ensureMaterialArena(materialArena.used + quint32(draws.size()));
+        }
         // 这两项只与当前曲目有关，和具体 draw 无关：循环外算一次。
         const auto selectedKey = musicItem["key"].toString("empty");
         const auto currentCover = covers.value(selectedKey, placeholderCover);
@@ -1856,9 +2081,6 @@ class Renderer {
             auto &state = materials[resourceKey];
             state.used = generation;
             const auto material = surface(d);
-            const auto mb = dynamicBuffer(
-                state.uniform, QByteArray(reinterpret_cast<const char *>(&material), sizeof(material)),
-                QRhiBuffer::UniformBuffer);
             const auto key = d["musicSelected"].toBool() ? selectedKey : d["musicKey"].toString();
             QRhiTexture *label = white;
             if (mesh == -5) {
@@ -1878,30 +2100,47 @@ class Renderer {
             // 归位卡片则不许借：不是当前曲目就绑定占位纹理。
             const auto coverFallback = key.isEmpty() || key == selectedKey ? currentCover : placeholderCover;
             const auto cover = mesh == -2 ? covers.value(key, coverFallback) : placeholderCover;
-            // 缓存命中仍可能换曲，同一个 draw 的绑定必须跟随实际纹理指针。
-            if (state.label != label || state.cover != cover) {
-                retire(state.bindings);
-                state.bindings = nullptr;
-                state.label = label;
-                state.cover = cover;
+            QRhiShaderResourceBindings *drawBindings = nullptr;
+            quint32 materialOffset = 0;
+            bool dynamicOffset = false;
+            if (uniformArena) {
+                const auto arenaBinding = arenaMaterial(resourceKey, material, label, cover);
+                drawBindings = arenaBinding.bindings;
+                materialOffset = arenaBinding.offset;
+                dynamicOffset = drawBindings != nullptr;
             }
-            if (!state.bindings) {
-                state.bindings = bindings(
-                    {QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer),
-                     QRhiShaderResourceBinding::uniformBuffer(1, stages, mb),
-                     QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
-                                                               surfaceAtlas, mipSampler),
-                     QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
-                                                               lightAtlas, volume),
-                     QRhiShaderResourceBinding::sampledTexture(4, QRhiShaderResourceBinding::FragmentStage,
-                                                               label, mipSampler),
-                     QRhiShaderResourceBinding::sampledTexture(5, QRhiShaderResourceBinding::FragmentStage,
-                                                               cover, mipSampler),
-                     QRhiShaderResourceBinding::sampledTexture(6, QRhiShaderResourceBinding::FragmentStage,
-                                                               normalAtlas, linear)},
-                    false);
+            if (!drawBindings) {
+                // 退路：每个材质一份 uniform buffer + 一份 SRB（D02 之前的形态）。
+                const auto mb = dynamicBuffer(
+                    state.uniform, QByteArray(reinterpret_cast<const char *>(&material), sizeof(material)),
+                    QRhiBuffer::UniformBuffer);
+                // 缓存命中仍可能换曲，同一个 draw 的绑定必须跟随实际纹理指针。
+                if (state.label != label || state.cover != cover) {
+                    retire(state.bindings);
+                    state.bindings = nullptr;
+                    state.label = label;
+                    state.cover = cover;
+                }
+                if (!state.bindings) {
+                    state.bindings = bindings(
+                        {QRhiShaderResourceBinding::uniformBuffer(0, stages, globalBuffer),
+                         QRhiShaderResourceBinding::uniformBuffer(1, stages, mb),
+                         QRhiShaderResourceBinding::sampledTexture(2, QRhiShaderResourceBinding::FragmentStage,
+                                                                   surfaceAtlas, mipSampler),
+                         QRhiShaderResourceBinding::sampledTexture(3, QRhiShaderResourceBinding::FragmentStage,
+                                                                   lightAtlas, volume),
+                         QRhiShaderResourceBinding::sampledTexture(4, QRhiShaderResourceBinding::FragmentStage,
+                                                                   label, mipSampler),
+                         QRhiShaderResourceBinding::sampledTexture(5, QRhiShaderResourceBinding::FragmentStage,
+                                                                   cover, mipSampler),
+                         QRhiShaderResourceBinding::sampledTexture(6, QRhiShaderResourceBinding::FragmentStage,
+                                                                   normalAtlas, linear)},
+                        false);
+                }
+                drawBindings = state.bindings;
             }
-            result.append({d, vertices, indices, instance(d), label, cover, start, count, state.bindings, material});
+            result.append({d, vertices, indices, instance(d), label, cover, start, count, drawBindings, material,
+                           materialOffset, dynamicOffset});
         }
         return result;
     }
@@ -1998,6 +2237,9 @@ class Renderer {
         bool viewportSet = false;
         QRhiGraphicsPipeline *boundPass = nullptr;
         QRhiShaderResourceBindings *boundBindings = nullptr;
+        // D02：动态偏移本身也是状态的一部分，只比 SRB 指针会把两个材质混成一个。
+        quint32 boundOffset = 0;
+        bool boundDynamic = false;
         int pipelineBinds = 0, bindingsBinds = 0, viewportSets = 0;
         for (const auto &item : items) {
             const auto &draw = *item.draw;
@@ -2016,10 +2258,18 @@ class Renderer {
                 ++viewportSets;
                 viewportSet = true;
             }
-            if (draw.bindings != boundBindings) {
-                cb->setShaderResources(draw.bindings);
+            if (draw.bindings != boundBindings || draw.dynamicOffset != boundDynamic ||
+                (draw.dynamicOffset && draw.materialOffset != boundOffset)) {
+                if (draw.dynamicOffset) {
+                    const QRhiCommandBuffer::DynamicOffset offset{1, draw.materialOffset};
+                    cb->setShaderResources(draw.bindings, 1, &offset);
+                } else {
+                    cb->setShaderResources(draw.bindings);
+                }
                 ++bindingsBinds;
                 boundBindings = draw.bindings;
+                boundDynamic = draw.dynamicOffset;
+                boundOffset = draw.materialOffset;
             }
             // 实例数据来自 arena 时用 offset 寻址；否则回落到 draw 自带的 buffer。
             const QRhiCommandBuffer::VertexInput inputs[] = {{draw.vertices, 0}, {draw.instances, 0}};
@@ -2374,6 +2624,7 @@ class Renderer {
                 ++it;
             }
         }
+        pruneMaterialBindings();
         for (auto it = instances.begin(); it != instances.end();) {
             if (it->used != generation) {
                 retire(it->buffer);

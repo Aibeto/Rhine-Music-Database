@@ -23,14 +23,16 @@
 
 ## D02：材质 UBO 合并＋动态偏移＋按纹理组合复用 SRB（优先）
 
-位置：[prepare／SRB](../../../Qt/src/RhiScene.cpp#L1780)、[geometry](../../../Qt/src/RhiScene.cpp#L1926)、[pipeline](../../../Qt/src/RhiScene.cpp#L1467)。先保留 batch 更新模式，只改变资源组织，以便独立验收。[S3](#ref-s3)
+位置：[prepare／SRB](../../../Qt/src/RhiScene.cpp#L1780)、[geometry](../../../Qt/src/RhiScene.cpp#L1926)、[pipeline](../../../Qt/src/RhiScene.cpp#L1467)。先保留 batch 更新模式，只改变资源组织，以便独立验收。
 
-- [ ] 将本帧 Surface 打包进少量 Dynamic uniform arena，绑定 1 改用 uniformBufferWithDynamicOffset；offset 按 rhi->ubufAlignment()／ubufAligned()，不硬编码 256。每次绑定的 range 为 Surface 大小，而不是整张 arena；检查绑定 range ≤ MaxUniformBufferRange、offset＋range ≤ buffer 容量及整数溢出；MaxUniformBufferRange 限制单次暴露范围，不是整个 arena 总大小。仅资源／offset 表示超限时分块／回退。
-- [ ] 共用同 arena、global UBO、图集、label／cover 和 sampler 的 draw 复用 SRB；缓存 key 包含完整资源身份／代号、布局及 arena 代号，不含本次材质 offset。不要跨不同纹理组合错误合并，也不要跨设备复用；限制缓存规模、失效后安全退休。
-- [ ] 改成共享后同步调整所有权：当前材质淘汰循环与纹理失效路径会直接 retire(state.bindings／state.uniform.buffer)，不能原样用于共享 SRB／arena。材质槽只持共享句柄，缓存／arena 统一回收；一个 draw 淘汰不得使其他 draw 悬空，used 保活、纹理释放和设备销毁均覆盖。
-- [ ] draw 保存 materialOffset；绑定去重改成“SRB＋动态偏移＋当前布局状态”一起判断。SRB 指针相同但 offset 不同仍必须 setShaderResources；管线／布局切换时按兼容性正确重绑，不沿用旧去重假设。
-- [ ] 核对 pipeline key／pipelineLayouts 对静态 UBO 与动态 UBO 的原生布局区分；改模式时重建对应布局／管线，不能只换 SRB。arena 扩容时重绑所有引用，新旧资源存活遵循 QRhi；先规划本帧容量，避免录制后再改已用字节。
-- [ ] 保留稳定材质少更新的优势；不要因为共用一个 buffer 每 draw 重写同一位置。验收看原生 buffer／descriptor 数、更新与绑定成本及帧间隔；动态 offset 本身也可能有 CPU 成本，无收益就回退。
+实施：`Qt/src/render/VulkanResourcePolicy.h`（纯算术）、`RhiScene.cpp` 的 `MaterialArena`／`materialBindingsFor()`／`arenaMaterial()`；默认关闭，`RHINE_VK_UNIFORM_ARENA=1` 才启用，任何一步不满足就永久退回逐材质 buffer。[S3](#ref-s3)
+
+- [x] 将本帧 Surface 打包进少量 Dynamic uniform arena，绑定 1 改用 uniformBufferWithDynamicOffset；offset 按 rhi->ubufAlignment()／ubufAligned()，不硬编码 256。每次绑定的 range 为 Surface 大小，而不是整张 arena；检查绑定 range ≤ MaxUniformBufferRange、offset＋range ≤ buffer 容量及整数溢出；MaxUniformBufferRange 限制单次暴露范围，不是整个 arena 总大小。仅资源／offset 表示超限时分块／回退。
+- [x] 共用同 arena、global UBO、图集、label／cover 和 sampler 的 draw 复用 SRB；缓存 key 包含完整资源身份／代号、布局及 arena 代号，不含本次材质 offset。不要跨不同纹理组合错误合并，也不要跨设备复用；限制缓存规模、失效后安全退休。
+- [x] 改成共享后同步调整所有权：当前材质淘汰循环与纹理失效路径会直接 retire(state.bindings／state.uniform.buffer)，不能原样用于共享 SRB／arena。材质槽只持共享句柄，缓存／arena 统一回收；一个 draw 淘汰不得使其他 draw 悬空，used 保活、纹理释放和设备销毁均覆盖。
+- [x] draw 保存 materialOffset；绑定去重改成“SRB＋动态偏移＋当前布局状态”一起判断。SRB 指针相同但 offset 不同仍必须 setShaderResources；管线／布局切换时按兼容性正确重绑，不沿用旧去重假设。
+- [x] 核对 pipeline key／pipelineLayouts 对静态 UBO 与动态 UBO 的原生布局区分；改模式时重建对应布局／管线，不能只换 SRB。arena 扩容时重绑所有引用，新旧资源存活遵循 QRhi；先规划本帧容量，避免录制后再改已用字节。
+- [x] 保留稳定材质少更新的优势；不要因为共用一个 buffer 每 draw 重写同一位置。验收看原生 buffer／descriptor 数、更新与绑定成本及帧间隔；动态 offset 本身也可能有 CPU 成本，无收益就回退。
 
 ## D03：实例 buffer 池化与全量直写，分两步 A/B
 
