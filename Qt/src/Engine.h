@@ -124,7 +124,10 @@ class Engine : public QObject {
     // FSR 重置（画质切换、设备重建、分辨率变化）时调用：抖动归零、相位回到 0，
     // 并让下一帧携带 temporalReset 键，渲染器据此丢弃上一帧运动矢量历史。
     Q_INVOKABLE void resetTemporalState();
+    /// 唤醒来源只影响诊断计数，不改变行为。
+    enum class WakeSource { Input, Host, Media, Other };
     void wake(bool input = true);
+    void wake(WakeSource source);
     void start();
     /// A03：内容版本。呈现层用它代替"按信号重复置脏"——版本前进一次只重渲一层，
     /// 重复推同一个值只在两个整数上比较一次。主线程写、渲染线程读，用 relaxed 原子
@@ -139,6 +142,12 @@ class Engine : public QObject {
     /// 回到主线程调用这里。这类变化在场景帧字段里看不出来，notifySceneRenderers 的
     /// 自然触发点（帧签名比较）捕捉不到，只能由发现者自己上报一次。
     Q_INVOKABLE void requestSceneContent();
+    /// C01：渲染线程在 synchronize() 里量到的"自定义快照同步"耗时。它不是 Qt Quick 的
+    /// sync 总时长，只是我们自己那一段，单独记才能分清钱花在哪。
+    void recordSceneSync(double ms) {
+        m_syncMicros.store(quint64(ms * 1000.0 + 0.5), std::memory_order_relaxed);
+        m_syncSamples.fetch_add(1, std::memory_order_relaxed);
+    }
     void recordRender(quint64 resources, quint64 bindings = 0, quint64 textureBytes = 0,
                       quint64 coverUploads = 0, quint64 drawCalls = 0, double gpuTimeMs = 0,
                       RhineRender::GpuTimingStatus gpuTiming =
@@ -155,6 +164,8 @@ class Engine : public QObject {
         // 数值保留原有语义：0 不当作一次测量，避免用 0 覆盖掉上一个可信样本。
         if (gpuTimeMs > 0) {
             m_gpuTimeMicros.store(quint64(gpuTimeMs * 1000.0 + 0.5), std::memory_order_relaxed);
+            // C01：数值与样本数分开记——0 不是一次测量，窗口均值要用样本数做分母。
+            ++m_gpuSamples;
         }
         // A11：整帧资源账本必须在这里聚合。performance() 只看得到"最近一次快照"，
         // 既无法判断峰值出现在哪一帧，也无法把"本帧新增绑定/上传"与累计值分开；
@@ -183,6 +194,13 @@ class Engine : public QObject {
   private:
     void notifySceneRenderers(bool visualChanged);
     quint64 m_geometryRevision = 0;
+    /// C01：按来源分开计数，避免把"输入唤醒"和"Host 失效唤醒"混成一个数字。
+    quint64 m_wakesInput = 0, m_wakesHost = 0, m_wakesMedia = 0, m_wakesOther = 0;
+    /// C01：requestSceneContent 与 stableFrames 复位的次数／原因。
+    quint64 m_sceneRequests = 0;
+    quint64 m_stableResetInput = 0, m_stableResetScene = 0;
+    /// C01：GPU 样本数（数值为 0 的成功采样不计数）。
+    quint64 m_gpuSamples = 0;
     /// 探针：唤醒次数与"场景真的变了"的拍数。空闲仍空转时，这两条决定往哪查。
     quint64 m_wakes = 0;
     quint64 m_changedSteps = 0;
@@ -197,6 +215,8 @@ class Engine : public QObject {
     std::atomic<quint64> m_gpuTimeMicros{0};
     // 存 int 而不是枚举：原子量只要一个字的读写，转回枚举时不必担心填充或对齐差异。
     std::atomic<int> m_gpuTiming{int(RhineRender::GpuTimingStatus::Unsupported)};
+    std::atomic<quint64> m_syncMicros{0};
+    std::atomic<quint64> m_syncSamples{0};
 
     // ---- A11 整帧资源账本 ----
     // 口径（不要混用）：

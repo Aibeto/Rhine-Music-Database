@@ -59,7 +59,7 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
     app->initialize();
     connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit, this,
             [this] { app->saveSession(); });
-    connect(&host, &Host::invalidated, this, [this] { wake(false); });
+    connect(&host, &Host::invalidated, this, [this] { wake(WakeSource::Host); });
     connect(&host, &Host::mediaChanged, this, &Engine::pollMedia, Qt::QueuedConnection);
     connect(&host, &Host::mediaAction, this, [this](QString value) {
         app->mediaAction(value);
@@ -83,30 +83,49 @@ Engine::Engine(QString path, bool offline, QObject *parent, PlaybackConnection *
         auto *diag = new QTimer(this);
         diag->setInterval(1000);
         connect(diag, &QTimer::timeout, this, [this] {
+            // C01：同一个窗口里同时给三种"帧"计数，均值一律用总量除以对应次数：
+            //   tick   —— 引擎定时器回调次数（含被合并掉的空转）
+            //   step   —— 真正跑完的完整 step 次数
+            //   render —— 渲染线程上报的实际呈现/绘制次数
             static quint64 lastSteps = 0, lastScene = 0, lastHud = 0, lastRender = 0, lastWakes = 0,
-                           lastChanged = 0;
+                           lastRequests = 0, lastChanged = 0, lastResetInput = 0, lastResetScene = 0,
+                           lastGpuSamples = 0;
             const quint64 render = m_renderFrames.load(std::memory_order_relaxed);
             const quint64 gpuMicros = m_gpuTimeMicros.load(std::memory_order_relaxed);
             const double avgGap = m_paceTicks > 1 ? double(m_paceGapSum) / (m_paceTicks - 1) / 1e6 : 0;
             const double avgStep = m_paceTicks > 0 ? double(m_paceStepSum) / m_paceTicks / 1e6 : 0;
-            qInfo("节拍诊断: tick/s=%llu sceneUpd/s=%llu hudUpd/s=%llu render/s=%llu wake/s=%llu "
-                  "changed/s=%llu gpu=%.2fms(%s) "
+            qInfo("节拍诊断: tick/s=%llu step/s=%llu sceneUpd/s=%llu hudUpd/s=%llu "
+                  "render/s=%llu changed/s=%llu "
+                  "wake/s=%llu(输入 %llu/Host %llu/媒体 %llu/其他 %llu) req/s=%llu "
+                  "gpu=%.2fms(最近已完成帧,%s,n=%llu) sync场=%.2fms(n=%llu) "
                   "interval=%dms timerActive=%d sleeping=%d sceneSleeping=%d rotating=%d "
-                  "hudAnimating=%d pendingAnim=%d stableFrames=%d | "
+                  "hudAnimating=%d pendingAnim=%d stableFrames=%d "
+                  "stableReset/s=%llu(输入 %llu/场景 %llu) | "
                   "间隔均=%.2fms 最大=%.2fms step均=%.2fms 最大=%.2fms",
-                  qulonglong(m_steps) - lastSteps, qulonglong(m_sceneUpdates) - lastScene,
-                  qulonglong(m_hudUpdates) - lastHud, qulonglong(render) - lastRender,
-                  qulonglong(m_wakes) - lastWakes, qulonglong(m_changedSteps) - lastChanged,
-                  gpuMicros / 1000.0,
+                  qulonglong(m_steps) - lastSteps, qulonglong(m_sceneUpdates) - lastScene, qulonglong(m_hudUpdates) - lastHud,
+                  qulonglong(render) - lastRender, qulonglong(m_changedSteps) - lastChanged,
+                  qulonglong(m_wakes) - lastWakes, qulonglong(m_wakesInput), qulonglong(m_wakesHost),
+                  qulonglong(m_wakesMedia), qulonglong(m_wakesOther),
+                  qulonglong(m_sceneRequests) - lastRequests, gpuMicros / 1000.0,
                   RhineRender::gpuTimingStatusName(RhineRender::GpuTimingStatus(
-                      m_gpuTiming.load(std::memory_order_relaxed))), timer.interval(),
-                  int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping), int(m_discRotating),
-                  int(app->hud.animating(m_animationTime)),
-                  int(m_frame.value("pendingAnimations").toBool()), m_stableFrames, avgGap, double(m_paceGapMax) / 1e6, avgStep,
-                  double(m_paceStepMax) / 1e6);
+                      m_gpuTiming.load(std::memory_order_relaxed))),
+                  qulonglong(m_gpuSamples) - lastGpuSamples,
+                  m_syncMicros.load(std::memory_order_relaxed) / 1000.0,
+                  qulonglong(m_syncSamples.load(std::memory_order_relaxed)), timer.interval(), int(timer.isActive()), int(m_sleeping), int(m_sceneSleeping),
+                  int(m_discRotating), int(app->hud.animating(m_animationTime)),
+                  int(m_frame.value("pendingAnimations").toBool()), m_stableFrames,
+                  qulonglong(m_stableResetInput) + qulonglong(m_stableResetScene) - lastResetInput -
+                      lastResetScene,
+                  qulonglong(m_stableResetInput) - lastResetInput,
+                  qulonglong(m_stableResetScene) - lastResetScene, avgGap,
+                  double(m_paceGapMax) / 1e6, avgStep, double(m_paceStepMax) / 1e6);
             lastSteps = qulonglong(m_steps);
             lastWakes = m_wakes;
             lastChanged = m_changedSteps;
+            lastRequests = m_sceneRequests;
+            lastGpuSamples = m_gpuSamples;
+            lastResetInput = m_stableResetInput;
+            lastResetScene = m_stableResetScene;
             lastScene = qulonglong(m_sceneUpdates);
             lastHud = qulonglong(m_hudUpdates);
             lastRender = render;
@@ -368,19 +387,44 @@ void Engine::notifySceneRenderers(bool visualChanged) {
 
 /** A03：渲染线程上报"新资源已就位"。语义与一次真实的视觉变化相同，只是触发者不是帧字段。 */
 void Engine::requestSceneContent() {
+    ++m_sceneRequests;
     notifySceneRenderers(true);
 }
 void Engine::wake(bool input) {
+    wake(input ? WakeSource::Input : WakeSource::Other);
+}
+void Engine::wake(WakeSource source) {
+    switch (source) {
+    case WakeSource::Input:
+        ++m_wakesInput;
+        break;
+    case WakeSource::Host:
+        ++m_wakesHost;
+        break;
+    case WakeSource::Media:
+        ++m_wakesMedia;
+        break;
+    case WakeSource::Other:
+        ++m_wakesOther;
+        break;
+    }
     ++m_wakes;
+    const bool input = source == WakeSource::Input;
     const bool wasSleeping = m_sleeping;
     const auto now = clock.elapsed();
     if (input) {
         m_lastInput = now;
         m_sceneSleeping = false;
+        if (m_stableFrames != 0) {
+            ++m_stableResetInput;
+        }
         m_stableFrames = 0;
         scene.energyIdle(false);
     } else if (scene.changed()) {
         m_sceneSleeping = false;
+        if (m_stableFrames != 0) {
+            ++m_stableResetScene;
+        }
         m_stableFrames = 0;
     }
     m_sleeping = !m_visible;

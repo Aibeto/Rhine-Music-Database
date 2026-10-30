@@ -2231,14 +2231,27 @@ class Renderer {
         const auto mode = frame["mode"].toString();
         detailMode = mode == "detail" || mode == "boot" || frame["viewer"].toBool();
         auto draws = musicDraws(frame);
+#ifdef Q_OS_LINUX
+        // C01：把"改写 draw 对象（musicDraws）"和"装配成 Draw（prepare）"分开计时。
+        // 混在一起时无法判断返回路径变慢是 draw 数变多，还是单项成本变高。
+        const double dbgMusicMs = double(dbgPre.nsecsElapsed()) / 1e6;
+        dbgPre.restart();
+        const int dbgParts = int(draws.size());
+        const int dbgReturning = int(frame["returningMusicKeys"].toArray().size());
+#endif
         // 保留可见与归位唱片资源，复用材质绑定和实例缓冲。
         auto data = prepare(draws, mode == "detail" || mode == "boot");
 #ifdef Q_OS_LINUX
         const double dbgListMs = double(dbgPre.nsecsElapsed()) / 1e6;
+        int dbgInstances = 0;
+        for (const auto &entry : data) {
+            dbgInstances += entry.data["count"].toInt();
+        }
         // 排障计时：把"构建 draw 列表"与"命令录制"分开量，只统计不改行为。
         static QElapsedTimer dbgClock;
         static double dbgBuild = 0, dbgRecord = 0;
-        static double dbgPostSum = 0, dbgTexSum = 0, dbgListSum = 0;
+        static double dbgPostSum = 0, dbgTexSum = 0, dbgListSum = 0, dbgMusicSum = 0;
+        static double dbgMusicMax = 0;
         // 峰值比均值更能说明卡顿：20 帧均值会把一次 30 ms 的上传摊成 1.5 ms。
         static double dbgTexMax = 0, dbgListMax = 0, dbgBuildMax = 0, dbgRecordMax = 0;
         static int dbgFrames = 0;
@@ -2348,6 +2361,8 @@ class Renderer {
         dbgPostSum += dbgPostMs;
         dbgTexSum += dbgTexMs;
         dbgListSum += dbgListMs;
+        dbgMusicSum += dbgMusicMs;
+        dbgMusicMax = std::max(dbgMusicMax, dbgMusicMs);
         dbgBuild += dbgBuildMs;
         dbgRecord += double(dbgRecordClock.nsecsElapsed()) / 1e6;
         dbgTexMax = std::max(dbgTexMax, dbgTexMs);
@@ -2355,14 +2370,18 @@ class Renderer {
         dbgBuildMax = std::max(dbgBuildMax, dbgBuildMs);
         dbgRecordMax = std::max(dbgRecordMax, double(dbgRecordClock.nsecsElapsed()) / 1e6);
         if (++dbgFrames >= 20 && qEnvironmentVariableIsSet("RHINE_FG_DIAG")) {
-            qWarning("3D内部: 后处理 %.1f  纹理 %.1f/峰%.1f  draw列表 %.1f/峰%.1f  构建 %.1f/峰%.1f  "
-                     "录制 %.1f/峰%.1f ms | draws %lld (%d 帧均值)",
-                     dbgPostSum / dbgFrames, dbgTexSum / dbgFrames, dbgTexMax, dbgListSum / dbgFrames,
-                     dbgListMax, dbgBuild / dbgFrames, dbgBuildMax, dbgRecord / dbgFrames, dbgRecordMax,
-                     qlonglong(draws.size()), dbgFrames);
+            // C01：同一窗口、总量除以次数；draws/实例/归位卡片一并记账，用来区分
+            // "返回滚动 draw 变多"和"每个 draw 变贵"。
+            qWarning("3D内部(%d 帧): 后处理 %.1f  纹理 %.1f/峰%.1f  draw改写 %.1f/峰%.1f  "
+                     "装配 %.1f/峰%.1f  构建 %.1f/峰%.1f  录制 %.1f/峰%.1f ms | "
+                     "draws %d 部件 %d 实例 %d 归位 %d",
+                     dbgFrames, dbgPostSum / dbgFrames, dbgTexSum / dbgFrames, dbgTexMax,
+                     dbgMusicSum / dbgFrames, dbgMusicMax, dbgListSum / dbgFrames, dbgListMax,
+                     dbgBuild / dbgFrames, dbgBuildMax, dbgRecord / dbgFrames, dbgRecordMax,
+                     int(draws.size()), dbgParts, dbgInstances, dbgReturning);
             dbgBuild = dbgRecord = 0;
-            dbgPostSum = dbgTexSum = dbgListSum = 0;
-            dbgTexMax = dbgListMax = dbgBuildMax = dbgRecordMax = 0;
+            dbgPostSum = dbgTexSum = dbgListSum = dbgMusicSum = 0;
+            dbgTexMax = dbgListMax = dbgBuildMax = dbgRecordMax = dbgMusicMax = 0;
             dbgFrames = 0;
         }
 #endif
@@ -2434,6 +2453,10 @@ class ItemRenderer : public QQuickRhiItemRenderer {
     Engine::MusicTextures musicTextures;
     QImage cover;
     QString root;
+    /// C03：上一次同步用的内容版本。只有内容版本真的前进时才重新取帧／缓冲区／纹理，
+    /// 免得为了 HUD 变化重画一层时把同一份场景快照再拷一遍。
+    quint64 cachedRevision = 0;
+    bool cachedLighting = false;
 
   public:
     ~ItemRenderer() override {
@@ -2442,6 +2465,10 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         }
     }
     void synchronize(QQuickRhiItem *value) override {
+#ifdef Q_OS_LINUX
+        QElapsedTimer syncTimer;
+        syncTimer.start();
+#endif
         auto scene = static_cast<RhiScene *>(value);
         auto engine = scene->engine();
         backend = engine;
@@ -2455,14 +2482,23 @@ class ItemRenderer : public QQuickRhiItemRenderer {
                 capabilityEngine = engine;
             }
 #endif
-            frame = engine->frame();
-            frame["opticalLightEnabled"] = scene->lightingEnabled();
-            frame["geometryRevision"] = double(engine->geometryRevision());
-            buffers = engine->drawBuffers();
+            const quint64 revision = engine->sceneRevision();
+            const bool lighting = scene->lightingEnabled();
+            if (revision != cachedRevision || lighting != cachedLighting) {
+                frame = engine->frame();
+                frame["opticalLightEnabled"] = lighting;
+                frame["geometryRevision"] = double(engine->geometryRevision());
+                buffers = engine->drawBuffers();
+                item = engine->current();
+                cover = engine->cover();
+                root = engine->root();
+                cachedRevision = revision;
+                cachedLighting = lighting;
+            }
             musicTextures = engine->musicTextures();
-            item = engine->current();
-            cover = engine->cover();
-            root = engine->root();
+            // C04：这一份快照已经被取走。只写原子序号，队列回调在主线程恢复节拍。
+            // C01：自定义同步耗时（复制帧／缓冲区／纹理快照）单独上报。
+            engine->recordSceneSync(double(syncTimer.nsecsElapsed()) / 1e6);
         }
     }
     void initialize(QRhiCommandBuffer *) override {
