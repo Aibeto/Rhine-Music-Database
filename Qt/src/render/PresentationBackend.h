@@ -48,6 +48,19 @@ class PresentationBackend {
     virtual double imageReuseMs() const {
         return 0.0;
     }
+    /// 交换链真正重建过多少次。
+    virtual quint64 swapchainRecreates() const {
+        return 0;
+    }
+    /// 重建时为等 GPU 退出旧交换链而做过多少次设备空闲等待（vkDeviceWaitIdle / QRhi::finish）。
+    virtual quint64 deviceIdleWaits() const {
+        return 0;
+    }
+    /// 尺寸没变、因此跳过重建的 resize 次数。
+    /// 与上面两个数一起看才能证明"去重生效"：跳过数应当远多于重建数，而等待数不该随帧数上涨。
+    virtual quint64 resizeSkips() const {
+        return 0;
+    }
     virtual QString backendName() const = 0;
     virtual QString lastError() const = 0;
 };

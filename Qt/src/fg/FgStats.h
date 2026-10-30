@@ -38,6 +38,21 @@ struct Stats {
     double prepareMs = 0.0;
     double dispatchMs = 0.0;
     double compositeMs = 0.0;
+    /// 一次 presentOne 的全程（beginFrame 之前 → present 之后），含离屏帧收尾的隐式等待。
+    /// 以前这里另有一个"上屏"耗时：它在 endFrame 之后重新起表，实际只量到记账语句自己，
+    /// 恒≈0；而真正能回答"这一帧到底多久"的只有全程计时，所以合并成一个数。
+    double frameMs = 0.0;
+    /// 每成功上屏一帧 +1。只靠帧率无法把一次卡顿/重建对上具体帧，这个 id 是 CSV 里
+    /// 把 fg_frame_ms 与 fg_swapchain_recreates 关联起来的锚点。
+    quint64 frameId = 0;
+    /// 交换链真正重建 / 重建时等待设备空闲 / 尺寸没变被跳过的次数。
+    /// 三个数一起看才能证明"resize 去重"生效：跳过数应该远多于重建数（A10）。
+    quint64 swapchainRecreates = 0;
+    quint64 deviceIdleWaits = 0;
+    quint64 resizeSkips = 0;
+    /// 已弃用，呈现层不再写它（量的是 endFrame 之后那几条记账语句，恒≈0）。
+    /// 字段暂时保留是因为 Qt/tests/FgCapabilityChecks.cpp 直接给它赋值；删掉会连带
+    /// 打断不在本次改动范围内的 RhineFgCapabilityRegression，等测试那行清掉后可移除。
     double presentMs = 0.0;
     /// QRhi 的离屏帧边界：这两处会隐式等 GPU 完成，之前的计时刚好把它们漏掉了，
     /// 于是出现"各项耗时都 <1ms、帧间隔却 30ms+"的怪现象。

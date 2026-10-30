@@ -443,6 +443,15 @@ void PresentationShell::syncSizes() {
     // 就是"UI 少了一整块"；同时 fit() 不再截断，文字也变长。
     // Engine::resize() 对相同尺寸会早退，所以这里每帧调用没有额外开销。
     m_backend->resize(m_size.width(), m_size.height());
+    // GPU 侧的尺寸确认（只确认、不重建）：m_needRecreate 为真时下一步会走
+    // recreateSwapchain()，只有那里才允许真正重建——它会作废跨尺寸的插值历史并强制
+    // 重画一帧，抢在这里重建就会拿到按旧尺寸插出来的帧（画面闪一下）。所以这里只在
+    // "没有待重建"且 presenter 的交换链尺寸已等于目标尺寸时把请求推下去；后端在这种
+    // 情况下只做尺寸比较（A10 的 resizeSkips），一次 finish 都不会发生。
+    // 这一句同时是"去重生效"在 CSV 里的证据：跳过数应随帧数增长，设备等待数不增长。
+    if (m_presenter && !m_needRecreate && m_presenter->extent() == pixelSize()) {
+        m_presenter->resize(pixelSize(), false);
+    }
 }
 
 const RhineFg::FrameInputs &PresentationShell::currentFrameInputs() const {
@@ -602,6 +611,11 @@ void PresentationShell::publishStats(bool interpolatedThisStep) {
 #endif
     m_stats.displaySize = m_presenter ? m_presenter->extent() : QSize();
     m_stats.imageReuseMs = m_presenter ? m_presenter->imageReuseMs() : 0.0;
+    // 交换链重建/设备等待/尺寸去重是计数器，每帧都要带上：只靠帧率看不出
+    // "这一帧慢是因为又等了 GPU 空闲"，而那正是 A10 要证明的事。
+    m_stats.swapchainRecreates = m_presenter ? m_presenter->swapchainRecreates() : 0;
+    m_stats.deviceIdleWaits = m_presenter ? m_presenter->deviceIdleWaits() : 0;
+    m_stats.resizeSkips = m_presenter ? m_presenter->resizeSkips() : 0;
     ++m_stats.serial;
     RhineFg::publish(m_stats);
 }
@@ -662,6 +676,7 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
 
     QRhiCommandBuffer *cb = nullptr;
     m_probe.restart();
+    m_frameProbe.restart();
     const QRhi::FrameOpResult begun = m_presenter->beginFrame(frame, &cb);
     m_stats.beginMs = blend(m_stats.beginMs, tookMs());
     if (begun != QRhi::FrameOpSuccess) {
@@ -690,10 +705,15 @@ bool PresentationShell::presentOne(const RhineRender::PresentationBackend::Frame
     if (interpolatedOut) {
         *interpolatedOut = interpolated;
     }
-    // 呈现间隔与分项耗时都按"真的上屏了"来记，失败的那次不计入，免得把
+    // 呈现间隔与整帧耗时都按"真的上屏了"来记，失败的那次不计入，免得把
     // 交换链重建的停顿算成 FG 的成本。
     if (presented) {
-        m_stats.presentMs = blend(m_stats.presentMs, tookMs());
+        // 整帧 = 从 beginFrame 之前到 endFrame 返回之后。以前这里记的是"上屏耗时"，
+        // 但它在 endFrame 之后重新起表，只有几条记账语句那么长（恒≈0），
+        // 白白占掉一列指标；换成全程耗时后，"帧间隔 30ms 但分项都是 1ms"这类
+        // 缺口才有唯一可对的数（A01 的计时去重）。
+        m_stats.frameMs = blend(m_stats.frameMs, m_frameProbe.nsecsElapsed() / 1e6);
+        ++m_stats.frameId;
         if (m_presentClock.isValid()) {
             recordGap(double(m_presentClock.nsecsElapsed()) / 1e6);
         }
@@ -932,20 +952,23 @@ void PresentationShell::reportStats() {
         << (inputs.motionVectors ? "ok" : "null") << "render" << inputs.renderSize << "display"
         << inputs.displaySize << "gapP50" << QString::number(m_stats.gapP50Ms, 'f', 1)
         << "ms/frame"
-        // 分项：取图 / 场景 / 合成 / 上屏（上屏在 FIFO 下会阻塞到刷新点，
-        // 它就是"为什么每帧都掉到 20ms 档"的直接证据，必须一起打出来）
+        // 分项：取图 / 场景 / 合成 / 整帧。原来的"上屏"耗时在 endFrame 之后重新起表，
+        // 只量到几条记账语句（恒≈0），已经删掉；能回答"这一帧到底多久"的是整帧。
         << "取图" << QString::number(m_stats.acquireMs, 'f', 2) << "场景"
         << QString::number(m_stats.sceneMs, 'f', 2)
         // 光流+深度重建（prepare）与插值本身（dispatch）必须分开看：
         // 两者的优化手段完全不同，混在一起就不知道该调哪个。
         << "光流" << QString::number(m_stats.prepareMs, 'f', 2) << "插值"
         << QString::number(m_stats.dispatchMs, 'f', 2) << "合成"
-        << QString::number(m_stats.compositeMs, 'f', 2) << "上屏"
-        << QString::number(m_stats.presentMs, 'f', 2) << "复用"
+        << QString::number(m_stats.compositeMs, 'f', 2) << "整帧"
+        << QString::number(m_stats.frameMs, 'f', 2) << "复用"
         << QString::number(m_stats.imageReuseMs, 'f', 1) << "起始"
         << QString::number(m_stats.beginMs, 'f', 2)
         << "收尾" << QString::number(m_stats.endMs, 'f', 2) << "空档"
         << QString::number(m_stats.idleGapMs, 'f', 2) << "跳过" << m_skippedSteps
+        // 重建 / 设备等待 / 尺寸去重：A10 的现场证据，一行看得出有没有白等 GPU。
+        << "重建" << m_stats.swapchainRecreates << "等待" << m_stats.deviceIdleWaits << "尺寸跳过"
+        << m_stats.resizeSkips
         << (m_frameClock.isValid() ? m_frameClock.restart() / double(m_presentedFrames - m_statsBase) : 0.0);
     m_statsBase = m_presentedFrames;
 }

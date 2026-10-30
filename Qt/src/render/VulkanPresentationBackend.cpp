@@ -1,5 +1,6 @@
 #include "PresentationBackend.h"
 #include "PresentationWindow.h"
+#include "RenderPolicy.h"
 #include "../fg/VulkanPresenter.h"
 #include "../AppStorage.h"
 #include <QCoreApplication>
@@ -304,10 +305,19 @@ class VulkanPresentationBackend final : public PresentationBackend {
         params.deviceExtensions = {QByteArrayLiteral("VK_KHR_swapchain")};
         // EnablePipelineCacheDataSave：让 QRhi 暴露 pipelineCacheData()/setPipelineCacheData()，
         // 否则每次启动都要重新编译全部场景管线（核显上单次编译可达数百毫秒）。
-        m_rhi.reset(QRhi::create(QRhi::Vulkan, &params, QRhi::EnablePipelineCacheDataSave));
+        // EnableTimestamps：不请求的话 isFeatureSupported(QRhi::Timestamps) 直接是 false，
+        // 渲染器只能在"设备不支持"和"没开"之间瞎猜，面板永远给不出可信的 GPU 耗时（A01）。
+        m_rhi.reset(QRhi::create(QRhi::Vulkan, &params,
+                                 QRhi::EnablePipelineCacheDataSave | QRhi::EnableTimestamps));
         if (!m_rhi) {
             m_error = QStringLiteral("QRhi(Vulkan) 创建失败");
             return false;
+        }
+        // 登记"时间戳已经请求过"。离屏层通过 QQuickGraphicsDevice::fromRhi 共用这台
+        // 设备，所以这一处登记同时覆盖 FG 路径；漏登记会让 classifyGpuTiming() 把
+        // "已请求但本帧没样本"误判成"没请求"，把配置缺口说成驱动延迟。
+        if (m_rhi->isFeatureSupported(QRhi::Timestamps)) {
+            RhineRender::requestTimestamps();
         }
 
         const auto *native = static_cast<const QRhiVulkanNativeHandles *>(m_rhi->nativeHandles());

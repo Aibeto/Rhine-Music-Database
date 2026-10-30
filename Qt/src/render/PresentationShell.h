@@ -198,6 +198,9 @@ class PresentationShell : public QObject {
     // 复用同一个计时器串行测量，避免每帧构造 QElapsedTimer；
     // 面板要的是分项趋势，不是单帧精度，所以一律走滑动平均。
     QElapsedTimer m_probe;
+    // 整帧计时：presentOne 里三段耗时会各自 restart m_probe，只有单独的计时器
+    // 才能给出"这一帧从开始到上屏一共多久"（含 begin/end 离屏帧的隐式等待）。
+    QElapsedTimer m_frameProbe;
     RhineFg::Stats m_stats;
     // 呈现间隔环形缓冲：FG 路径不经过 QQuickWindow，拿不到 frameSwapped 事件，
     // 所以分位与卡顿计数自己算。600 个样本在 60Hz 下约 10 秒。

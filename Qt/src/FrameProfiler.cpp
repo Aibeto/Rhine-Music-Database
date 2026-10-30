@@ -66,9 +66,12 @@ FrameProfiler::FrameProfiler(Engine *engine, const QString &path, QObject *paren
     });
     if (!path.isEmpty()) {
         if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            // 新列一律追加在末尾：旧分析脚本按列号读前 14 列，插在中间会让历史数据整体错位。
             stream << "timestamp_ms,step_cpu_ms,scene_native_ms,scene_metadata_ms,scene_buffers_ms,"
                       "latest_present_gap_ms,latest_sync_cpu_ms,latest_submit_cpu_ms,presents,draws,"
-                      "returning_cards,culled_cards,shadow_only_cards,latest_gpu_draw_calls\n";
+                      "returning_cards,culled_cards,shadow_only_cards,latest_gpu_draw_calls,"
+                      "gpu_timing_status,render_frames,fg_frame_id,fg_frame_ms,fg_swapchain_recreates,"
+                      "fg_device_idle_waits,fg_resize_skips\n";
         } else {
             qWarning() << "Cannot open frame profile:" << file.errorString();
         }
@@ -167,6 +170,10 @@ void FrameProfiler::collectStep() {
     }
     // GUI 和渲染线程采样不同步，最近一次呈现间隔不是 GPU 耗时。
     const auto frame = m_engine->frame();
+    // performance() 只取一次：同一行里要读多个键，分开调用会跨帧、互相矛盾。
+    const QVariantMap performance = m_engine->performance();
+    // 帧号与整帧耗时只有呈现层知道（Engine 只记渲染帧数），所以单独取一份。
+    const RhineFg::Stats fg = RhineFg::stats();
     stream << epochMs + clock.elapsed() << ',' << timings.engineMs << ',' << timings.simulateMs << ','
            << timings.metadataMs << ',' << timings.buffersMs << ','
            << presentGapNs.load(std::memory_order_relaxed) / 1000000. << ','
@@ -175,7 +182,13 @@ void FrameProfiler::collectStep() {
            << presents.load(std::memory_order_relaxed) << ',' << frame["draws"].toArray().size() << ','
            << frame["returningCards"].toInt() << ',' << frame["culledCards"].toInt() << ','
            << frame["shadowCards"].toInt() << ','
-           << m_engine->performance().value("gpuDrawCalls").toULongLong() << '\n';
+           << performance.value("gpuDrawCalls").toULongLong() << ','
+           // "没测到"和"没请求"必须能分开：只写一个空的 gpu 时间，事后没法判断
+           // 是驱动不给样本还是我们没开时间戳（A01 的验收就靠这一列）。
+           << performance.value("gpuTimingStatus").toString() << ','
+           << performance.value("renderFrames").toULongLong() << ',' << fg.frameId << ','
+           << fg.frameMs << ',' << fg.swapchainRecreates << ',' << fg.deviceIdleWaits << ','
+           << fg.resizeSkips << '\n';
 }
 
 FrameProfiler::~FrameProfiler() {
@@ -309,6 +322,8 @@ void FrameProfiler::sample() {
     m_metrics.insert("latestSyncCpuMs", syncNs.load(std::memory_order_relaxed) / 1000000.);
     m_metrics.insert("latestSubmitCpuMs", submitNs.load(std::memory_order_relaxed) / 1000000.);
     m_metrics.insert("gpuTimeMs", resources.value("gpuTimeMs"));
+    // 状态与数值分开透传：面板要在"没有样本"时说明是没样本、没请求还是设备不支持。
+    m_metrics.insert("gpuTimingStatus", resources.value("gpuTimingStatus"));
     {
         QMutexLocker lock(&m_gapMutex);
         m_metrics.insert("gpuAdapter", m_adapterName);
@@ -337,7 +352,13 @@ void FrameProfiler::sample() {
     m_metrics.insert("fgPrepareMs", fg.prepareMs);
     m_metrics.insert("fgDispatchMs", fg.dispatchMs);
     m_metrics.insert("fgCompositeMs", fg.compositeMs);
-    m_metrics.insert("fgPresentMs", fg.presentMs);
+    // 整帧耗时取代原来的"上屏"耗时：后者在 endFrame 之后重新起表，只量到记账语句，
+    // 恒≈0 却占着一列指标，会让人误以为上屏不要钱。
+    m_metrics.insert("fgFrameMs", fg.frameMs);
+    m_metrics.insert("fgFrameId", fg.frameId);
+    m_metrics.insert("fgSwapchainRecreates", fg.swapchainRecreates);
+    m_metrics.insert("fgDeviceIdleWaits", fg.deviceIdleWaits);
+    m_metrics.insert("fgResizeSkips", fg.resizeSkips);
     m_metrics.insert("fgSwapchainImages", fg.swapchainImages);
     m_metrics.insert("fgSwapchainFormat", fg.swapchainFormat);
     // 呈现模式决定帧率上限：FG 层自己建的交换链知道确切值；走默认路径时交换链归 Qt，
@@ -497,13 +518,19 @@ void FrameProfiler::formatMetrics() {
             + QStringLiteral("每帧耗时      取图 %1 · 场景 %2 · 光流+重建 %3 · 插值 %4 ms\n")
                   .arg(millis("fgAcquireMs"), millis("fgSceneMs"), millis("fgPrepareMs"),
                        millis("fgDispatchMs"))
-            + QStringLiteral("              合成 / 上屏  %1 / %2 ms\n")
-                  .arg(millis("fgCompositeMs"), millis("fgPresentMs"))
-            + QStringLiteral("交换链        %1 张 · %2 · %3 → %4 · 呈现 %5\n深度 / 运动矢量  %6 / %7\n\n")
+            + QStringLiteral("              合成 %1 ms · 整帧 %2 ms\n")
+                  .arg(millis("fgCompositeMs"), millis("fgFrameMs"))
+            + QStringLiteral("交换链        %1 张 · %2 · %3 → %4 · 呈现 %5\n")
                   .arg(number("fgSwapchainImages", 0), m_metrics.value("fgSwapchainFormat").toString(),
                        sizeText("fgRenderSize"), sizeText("fgDisplaySize"),
-                       m_metrics.value("fgPresentMode").toString(), ready("fgDepthReady"),
-                       ready("fgMotionVectorsReady"));
+                       m_metrics.value("fgPresentMode").toString())
+            // 重建/等待/去重三个数要一起看才算证据：跳过数随帧数增长、等待数不增长，
+            // 才说明同尺寸的尺寸同步没有再去等 GPU 空闲（A10）。
+            + QStringLiteral("重建 / 设备等待 / 尺寸去重  %1 / %2 / %3 次\n")
+                  .arg(number("fgSwapchainRecreates", 0), number("fgDeviceIdleWaits", 0),
+                       number("fgResizeSkips", 0))
+            + QStringLiteral("深度 / 运动矢量  %1 / %2\n\n")
+                  .arg(ready("fgDepthReady"), ready("fgMotionVectorsReady"));
     }
     m_details = fgDetails + QStringLiteral("场景提交      %1 FPS\nQt 帧间隔 P50 / P95  %2 / %3 ms\n"
                        "P99 / 峰值    %4 / %5 ms\n>33 / 50 / 100 ms   %6 / %7 / %8\n"
@@ -517,6 +544,23 @@ void FrameProfiler::formatMetrics() {
             .arg(cpu < 0 ? QStringLiteral("不可用") : number("mainProcessCpuOneCorePercent"), memory,
                  number("gpuDrawCalls", 0), number("gpuResources", 0))
             .arg(QString::number(m_metrics.value("gpuMusicTextureBytes").toDouble() / 1048576., 'f', 1));
+    // GPU 计时状态必须显式写出来：状态不是 ok 时数值列是空的（或上一个可信样本），
+    // 只显示数字会让读者把"没测到"当成"GPU 不花时间"——A01 要修的就是这个坑。
+    const QString gpuTiming = m_metrics.value("gpuTimingStatus").toString();
+    QString gpuTimingText;
+    if (gpuTiming == QLatin1String("ok")) {
+        gpuTimingText = QStringLiteral("%1 ms").arg(number("gpuTimeMs", 2));
+    } else if (gpuTiming == QLatin1String("disabled")) {
+        gpuTimingText = QStringLiteral("未启用 · 后端支持时间戳，但创建 QRhi / 图形配置时没请求");
+    } else if (gpuTiming == QLatin1String("noSample")) {
+        gpuTimingText = QStringLiteral("无样本 · 已请求时间戳，这一帧还没有已完成的查询结果");
+    } else if (gpuTiming == QLatin1String("unsupported")) {
+        gpuTimingText = QStringLiteral("不支持 · 当前图形后端没有时间戳查询能力");
+    } else {
+        gpuTimingText = QStringLiteral("未知（%1）")
+                            .arg(gpuTiming.isEmpty() ? QStringLiteral("没有状态字段") : gpuTiming);
+    }
+    m_details += QStringLiteral("\n\nGPU 时间  %1").arg(gpuTimingText);
     const auto audio = m_metrics.value("audio").toMap();
     m_details += QStringLiteral("\n\n音频状态 / 错误码  %1 / %2\n进度 / 时长  %3 / %4 ms\n"
                                 "缓冲  %5% · 解码缓冲  %6\n解码格式  %7 Hz / %8 声道\n"

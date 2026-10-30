@@ -620,6 +620,16 @@ if(MSVC)
 endif()
 add_test(NAME qt_fg_capability_regression COMMAND RhineFgCapabilityRegression)
 
+# 渲染策略里能离线判定的那一半（GPU 计时四态、时间戳登记、AA 模式是否需要运动矢量）是 header-only 纯逻辑，
+# 不碰 QRhi/窗口，所以三平台都编、都跑：真值表写错不会崩，只会让面板把"没请求"说成"没样本"，只有用例拦得住。
+qt_add_executable(RhineRenderPolicyRegression Qt/tests/RenderChecks.cpp)
+target_include_directories(RhineRenderPolicyRegression PRIVATE Qt/src)
+target_link_libraries(RhineRenderPolicyRegression PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(RhineRenderPolicyRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_render_policy_regression COMMAND RhineRenderPolicyRegression)
+
 # Linux 显卡选择里能离线验证的部分：PCI 地址解析、序号 → 环境变量的映射、序号失效时的回退。 写错的后果是"选错卡"或"配置失效后仍注入变量"，只能靠用例拦。三平台都编， sysfs
 # 相关用例在源码里按平台裁剪。
 qt_add_executable(RhineGpuChoiceRegression Qt/tests/LinuxGpuChecks.cpp Qt/src/LinuxGraphics.cpp

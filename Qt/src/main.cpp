@@ -7,6 +7,7 @@
 #include "fg/FgConfig.h"
 #endif
 #include "render/PresentationShell.h"
+#include "render/RenderPolicy.h"
 #include "FrameProfiler.h"
 #include "GraphicsBackend.h"
 #include "Hud.h"
@@ -684,6 +685,9 @@ int main(int argc, char **argv) {
     // 让 Qt Quick 的 RHI 开启时间戳查询；渲染器在每帧结束时读取
     // lastCompletedGpuTime() 并发布到性能面板。后端不支持时该值保持为空。
     graphics.setTimestamps(true);
+    // 登记"已经请求过时间戳"：渲染器据此把"支持但没请求"和"请求了但没样本"分开报。
+    // 这里和 VulkanPresentationBackend 各登记一次，因为存在只走其中一条路径的启动方式。
+    RhineRender::requestTimestamps();
     window->setGraphicsConfiguration(graphics);
 #ifdef Q_OS_WIN
     taskbar.bindWindow(window);

@@ -4,6 +4,7 @@
 #include "render/MetalFxBackend.h"
 #endif
 #include "render/MotionPass.h"
+#include "render/RenderPolicy.h"
 #include "render/ScenePostProcess.h"
 #ifdef Q_OS_LINUX
 #include "fg/FgFrameTap.h"
@@ -1840,11 +1841,17 @@ class ItemRenderer : public QQuickRhiItemRenderer {
             bindings += renderer->postProcess->bindingCreations - previousPostBindings;
             draws += renderer->postProcess->drawCalls - previousPostDraws;
 #endif
-            const double gpuTimeMs = rhi()->isFeatureSupported(QRhi::Timestamps)
-                ? cb->lastCompletedGpuTime() * 1000.0
-                : 0.0;
+            // GPU 耗时和"这个耗时可不可信"必须一起上报：只报数值时，0 既可能是设备
+            // 不支持、也可能是创建 QRhi 时没请求时间戳、还可能是这一帧查询结果没回来，
+            // 三种情况的排查方向完全不同（A01）。
+            const bool gpuTimingSupported = rhi()->isFeatureSupported(QRhi::Timestamps);
+            const double gpuTimeMs =
+                gpuTimingSupported ? cb->lastCompletedGpuTime() * 1000.0 : 0.0;
             backend->recordRender(resources, bindings, renderer->musicTextureBytes(),
-                                  renderer->coverUploads - previousUploads, draws, gpuTimeMs);
+                                  renderer->coverUploads - previousUploads, draws, gpuTimeMs,
+                                  RhineRender::classifyGpuTiming(gpuTimingSupported,
+                                                                 RhineRender::timestampsRequested(),
+                                                                 gpuTimeMs > 0));
             if (gpuTimeMs > 0 && qEnvironmentVariableIsSet("RHINE_DEBUG_GPU")) {
                 static bool reported = false;
                 if (!reported) {

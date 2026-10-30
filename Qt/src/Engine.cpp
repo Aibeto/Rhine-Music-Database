@@ -220,6 +220,11 @@ QVariantMap Engine::performance() const {
     if (gpuMicros) {
         result.insert("gpuTimeMs", gpuMicros / 1000.0);
     }
+    // 状态无条件发布：没有样本时它正是唯一能说明"为什么没有"的信息，而 gpuTimeMs 的
+    // 缺省只表示"这次没测到"。两者语义不同，不能让前者被后者吞掉（A01）。
+    result.insert("gpuTimingStatus",
+                  QString::fromLatin1(RhineRender::gpuTimingStatusName(RhineRender::GpuTimingStatus(
+                      m_gpuTiming.load(std::memory_order_relaxed)))));
     return result;
 }
 /** 仅在画面变化时通知唯一场景，静止时保留按需休眠。 */

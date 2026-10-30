@@ -2,6 +2,7 @@
 #include "Glyphs.h"
 #include "Host.h"
 #include "NativeApplication.h"
+#include "render/RenderPolicy.h"
 #ifdef Q_OS_DARWIN
 #include "render/RenderConfiguration.h"
 #include "fg/FgFrameTap.h"
@@ -111,13 +112,19 @@ class Engine : public QObject {
     void wake(bool input = true);
     void start();
     void recordRender(quint64 resources, quint64 bindings = 0, quint64 textureBytes = 0,
-                      quint64 coverUploads = 0, quint64 drawCalls = 0, double gpuTimeMs = 0) {
+                      quint64 coverUploads = 0, quint64 drawCalls = 0, double gpuTimeMs = 0,
+                      RhineRender::GpuTimingStatus gpuTiming =
+                          RhineRender::GpuTimingStatus::Unsupported) {
         m_renderFrames.fetch_add(1, std::memory_order_relaxed);
         m_gpuResources.store(resources, std::memory_order_relaxed);
         m_bindingCreations.fetch_add(bindings, std::memory_order_relaxed);
         m_musicTextureBytes.store(textureBytes, std::memory_order_relaxed);
         m_coverUploads.fetch_add(coverUploads, std::memory_order_relaxed);
         m_lastDrawCalls.store(drawCalls, std::memory_order_relaxed);
+        // 状态与数值必须分开传：同一个 0 ms 可能是"没请求""没样本"或"真的很快"，
+        // 只靠数值无法区分，而面板与 CSV 的诊断结论完全取决于这个区分（A01）。
+        m_gpuTiming.store(int(gpuTiming), std::memory_order_relaxed);
+        // 数值保留原有语义：0 不当作一次测量，避免用 0 覆盖掉上一个可信样本。
         if (gpuTimeMs > 0) {
             m_gpuTimeMicros.store(quint64(gpuTimeMs * 1000.0 + 0.5), std::memory_order_relaxed);
         }
@@ -150,6 +157,8 @@ class Engine : public QObject {
     std::atomic<quint64> m_coverUploads{0};
     std::atomic<quint64> m_lastDrawCalls{0};
     std::atomic<quint64> m_gpuTimeMicros{0};
+    // 存 int 而不是枚举：原子量只要一个字的读写，转回枚举时不必担心填充或对齐差异。
+    std::atomic<int> m_gpuTiming{int(RhineRender::GpuTimingStatus::Unsupported)};
     MusicTextures m_musicTextures;
     Glyphs m_glyphs;
     QTimer timer, mediaTimer;
