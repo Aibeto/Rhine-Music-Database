@@ -386,7 +386,18 @@ class Renderer {
     quint64 droppedQueue = 0;       // 探针：队列溢出丢弃数
     quint64 deferredFrames = 0;     // 探针：本周期内因预算顺延过上传的帧数
     QVector<int> firstVisibleFrames;
-    quint64 cancelledDemands = 0;   // 探针：逻辑取消的需求数（撤意图/切歌/淘汰）
+    // B01/B04：准入、取消与标签成本的观测。默认只累积；RHINE_TEXTURE_PROBE=1 时随下面
+    // 那一行一起打印，不加开关也不改变行为。
+    quint64 texturesCreated = 0;     // 新建的封面纹理张数（含同步兜底）
+    quint64 uploadedBytes = 0;      // 本周期真实上传的字节数
+    quint64 cancelledDemands = 0;   // 逻辑取消的需求数（撤意图/切歌/淘汰）
+    quint64 gatedUpdates = 0;       // 因未准入而跳过资源创建的更新次数
+    quint64 labelGenerations = 0;   // 标签生成次数
+    qint64 labelNanos = 0;          // 标签绘制+缩放+上传累计 CPU 时间
+    QHash<QString, qint64> admittedFrame;  // key → 首次以"已准入"出现的帧号（等换绑）
+    QVector<int> rebindLatency;     // 准入→封面换绑的帧差样本（上限 COVER_LATENCY_SAMPLES）
+    int admittedKeysThisFrame = 0;  // 本帧快照里已准入的 key 数
+    int gatedKeysThisFrame = 0;     // 本帧快照里未准入的 key 数
     int probeFrames = 0;
     bool coverProbe = qEnvironmentVariableIntValue("RHINE_TEXTURE_PROBE") == 1;
     QSize size;
@@ -1001,6 +1012,14 @@ class Renderer {
         covers[key] = next;
         coverRevisions[key] = revision;
         coverWanted.remove(key);
+        // B04：焦点稳定（准入）到封面真正换绑的帧差。样本窗口很小，只用于探针。
+        if (const auto admittedAt = admittedFrame.constFind(key); admittedAt != admittedFrame.constEnd()) {
+            rebindLatency.append(frameIndex - *admittedAt);
+            while (rebindLatency.size() > COVER_LATENCY_SAMPLES) {
+                rebindLatency.removeFirst();
+            }
+            admittedFrame.erase(admittedAt);
+        }
         if (previous && previous != next) {
             retireCoverRevision(key, previousRevision, previous);
         }
@@ -1047,6 +1066,8 @@ class Renderer {
         uploadMipped(cover, pixels);
         coverTextures[coverRevision] = cover;
         ++coverUploads;
+        ++texturesCreated;
+        uploadedBytes += qint64(coverSize) * coverSize * 4 * 4 / 3;  // 含 mip 链
         bindCoverTexture(key, coverRevision);
     }
     /**
@@ -1118,6 +1139,8 @@ class Renderer {
             const auto cover = uploadCoverTexture(result);
             coverTextures[result.revision] = cover;
             ++coverUploads;
+            ++texturesCreated;
+            uploadedBytes += result.bytes;
             // 同一个 revision 可能同时被多首同专辑曲目等着，一次全部换绑。
             for (const auto &key : coverWanted.keys()) {
                 if (coverWanted.value(key) == result.revision) {
@@ -1209,6 +1232,13 @@ class Renderer {
         }
         const auto average =
             firstVisibleFrames.isEmpty() ? 0. : double(total) / firstVisibleFrames.size();
+        int rebindTotal = 0, rebindWorst = 0;
+        for (const int value : rebindLatency) {
+            rebindTotal += value;
+            rebindWorst = qMax(rebindWorst, value);
+        }
+        const auto rebindAverage =
+            rebindLatency.isEmpty() ? 0. : double(rebindTotal) / rebindLatency.size();
         qInfo().noquote() << "纹理探针: prepAsync"
                           << QStringLiteral("%1/%2").arg(prepCompleted).arg(coverPrep.size())
                           << "| uploaded" << uploadedThisFrame << "字节 | deferred"
@@ -1223,8 +1253,27 @@ class Renderer {
                           << "| budget"
                           << (uploadBudget > 0 ? QStringLiteral("%1 字节").arg(uploadBudget)
                                                : QStringLiteral("不限"))
-                          << "| 同步兜底" << (coverAsyncDisabled ? "开" : "关");
+                          << "| 同步兜底" << (coverAsyncDisabled ? "开" : "关")
+                          << "| 准入"
+                          << QStringLiteral("%1/%2（未准入跳过 %3）")
+                                 .arg(admittedKeysThisFrame)
+                                 .arg(admittedKeysThisFrame + gatedKeysThisFrame)
+                                 .arg(gatedUpdates)
+                          << "| 取消" << cancelledDemands << "| 在途峰值" << coverBudget.peak()
+                          << "| 纹理" << texturesCreated << QStringLiteral("/ %1 MiB")
+                                                    .arg(double(uploadedBytes) / 1048576., 0, 'f', 2)
+                          << "| 标签" << labelGenerations
+                          << QStringLiteral("(%1 ms)").arg(double(labelNanos) / 1e6, 0, 'f', 2)
+                          << "| 换绑"
+                          << QStringLiteral("%1 帧/最大 %2 样本 %3")
+                                 .arg(rebindAverage, 0, 'f', 2)
+                                 .arg(rebindWorst)
+                                 .arg(rebindLatency.size());
         deferredFrames = 0;
+        // 新字段按窗口清零；prepCompleted/dropped/在途峰值保持累计，便于对照总量。
+        texturesCreated = uploadedBytes = cancelledDemands = gatedUpdates = 0;
+        labelGenerations = 0;
+        labelNanos = 0;
     }
     /**
      * B03：撤掉已经没有任何候选 key 想要（也不在当前场景里）的封面需求。
@@ -1235,6 +1284,13 @@ class Renderer {
             if (!activeTextureKeys.contains(it.key())) {
                 it = coverWanted.erase(it);
                 ++cancelledDemands;
+            } else {
+                ++it;
+            }
+        }
+        for (auto it = admittedFrame.begin(); it != admittedFrame.end();) {
+            if (!activeTextureKeys.contains(it.key())) {
+                it = admittedFrame.erase(it);
             } else {
                 ++it;
             }
@@ -1286,6 +1342,13 @@ class Renderer {
         textureOrder << key;
         // 单帧离屏参考渲染必须当帧出图，是唯一可以绕过准入的门槛例外。
         const bool allowResources = admitted || forceSynchronousCover;
+        if (!allowResources) {
+            ++gatedUpdates;
+        }
+        if (admitted && !forceSynchronousCover && !covers.contains(key) && !admittedFrame.contains(key)) {
+            // 从准入这一刻开始等封面换绑，用于探针统计"焦点稳定→画面到位"的帧数。
+            admittedFrame.insert(key, frameIndex);
+        }
         if (allowResources && (!labels.contains(key) || labelRevisions.value(key) != labelRevision)) {
             if (const auto previous = labels.value(key)) {
                 invalidateBindings(previous);
@@ -1293,11 +1356,15 @@ class Renderer {
             // 覆盖同一 key 时退休的是该 key 的旧对象，而非上一首当前曲目的对象。
             retire(labels.take(key));
             // 与主渲染路径一致：绘制按 1024×440 排版，上传前减半以匹配实际屏幕尺寸。
+            QElapsedTimer labelTimer;
+            labelTimer.start();
             const auto label =
                 glyphs->label(value).scaled(512, 220, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
             labels[key] = texture(label.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
             uploadMipped(labels[key], label);
             labelRevisions[key] = labelRevision;
+            ++labelGenerations;
+            labelNanos += labelTimer.nsecsElapsed();
         }
         // 登记的意图已经不是当前这张图了：撤销意图并作废在途请求，否则迟到的结果会把
         // 已经切走的封面又贴回来。有图才判（默认值取当前 revision，没登记时本分支不触发）；
@@ -1357,6 +1424,7 @@ class Renderer {
             retire(labels.take(old));
             releaseCover(old);
             labelRevisions.remove(old);
+            admittedFrame.remove(old);
         }
     }
     qint64 musicTextureBytes() const {
@@ -2140,7 +2208,13 @@ class Renderer {
         // B02/B03：先更新身份与有效需求，再消费在途结果与上传队列。顺序反了的话，
         // 本帧会先绑上一张即将被撤销的封面，下一帧再换回去——肉眼就是闪一下。
         // 恢复图形设备时只还原"已准入且确实缺纹理"的旧唱片：路过的条目永远不补资源。
+        admittedKeysThisFrame = gatedKeysThisFrame = 0;
         for (auto it = musicTextures.begin(); it != musicTextures.end(); ++it) {
+            if (it->admitted) {
+                ++admittedKeysThisFrame;
+            } else {
+                ++gatedKeysThisFrame;
+            }
             if (it.key() != currentMusicKey && it->admitted && !labels.contains(it.key()) &&
                 !it->item.isEmpty()) {
                 updateMusic(it->item, it->cover, true);

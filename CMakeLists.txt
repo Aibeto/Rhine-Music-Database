@@ -630,6 +630,17 @@ if(MSVC)
 endif()
 add_test(NAME qt_render_policy_regression COMMAND RhineRenderPolicyRegression)
 
+# 快速滚动的冷纹理准入（B01）与封面需求账本（B03）是 header-only 纯逻辑，不碰 QRhi/窗口：
+# 边界差 1ms、逻辑取消提前归还名额都不会崩，只会让界面变慢或并发慢慢失控，只能靠用例拦。
+# 计时器用例需要事件循环，所以在 main 里建 QCoreApplication（不建 GUI）。
+qt_add_executable(RhineMusicTextureAdmissionRegression Qt/tests/MusicTextureAdmissionChecks.cpp)
+target_include_directories(RhineMusicTextureAdmissionRegression PRIVATE Qt/src)
+target_link_libraries(RhineMusicTextureAdmissionRegression PRIVATE Qt6::Core)
+if(MSVC)
+    target_compile_options(RhineMusicTextureAdmissionRegression PRIVATE /utf-8)
+endif()
+add_test(NAME qt_music_texture_admission_regression COMMAND RhineMusicTextureAdmissionRegression)
+
 # Linux 显卡选择里能离线验证的部分：PCI 地址解析、序号 → 环境变量的映射、序号失效时的回退。 写错的后果是"选错卡"或"配置失效后仍注入变量"，只能靠用例拦。三平台都编， sysfs
 # 相关用例在源码里按平台裁剪。
 qt_add_executable(RhineGpuChoiceRegression Qt/tests/LinuxGpuChecks.cpp Qt/src/LinuxGraphics.cpp
