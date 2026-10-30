@@ -1,4 +1,5 @@
 #pragma once
+#include "Gamepad.h"
 #include "Glyphs.h"
 #include "Host.h"
 #include "NativeApplication.h"
@@ -140,6 +141,8 @@ class Engine : public QObject {
 
   private:
     void notifySceneRenderers(bool visualChanged);
+    void gamepadPressed(const QString &button);
+    Gamepad m_gamepad;
     quint64 m_geometryRevision = 0;
     std::atomic<quint64> m_renderFrames{0}, m_gpuResources{0};
     std::atomic<quint64> m_bindingCreations{0};

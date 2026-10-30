@@ -350,6 +350,36 @@ void NativeHud::playerAction(const QStringList &parts) {
 
 /** 动作字符串保持原有输入协议，控制器直接更新原生音乐状态和场景。 */
 void NativeHud::action(QString value) {
+    if (value == "menu") {
+        if (closing) {
+            return;
+        }
+        if (modal.isEmpty()) {
+            openModal("settings");
+        } else {
+            closeModal();
+        }
+        return;
+    }
+    if (value == "home") {
+        lyricsMode = false;
+        if (!modal.isEmpty()) {
+            closeModal();
+        }
+        if (m_scene.viewer) {
+            m_scene.viewer("close");
+        }
+        auto &music = *m_music;
+        while (music.directory) {
+            const auto current = music.directory;
+            music.leaveDirectory();
+            if (music.directory == current) {
+                break;
+            }
+        }
+        m_scene.mode("archive");
+        return;
+    }
     if ((!PlatformFeatures::LocalMusic && (value.startsWith("local:") || value == "provider:local")) ||
         (!PlatformFeatures::OfficialPlayback &&
          (value == "music:official" || value == "player:official" || value == "music:activate")) ||
