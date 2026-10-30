@@ -373,7 +373,10 @@ class Renderer {
     };
     MaterialArena materialArena;
     /// D02 开关：RHINE_VK_UNIFORM_ARENA=1 才走 arena；任何一步不满足就永久退回逐材质 buffer。
-    bool uniformArena = qEnvironmentVariableIntValue("RHINE_VK_UNIFORM_ARENA") == 1;
+    /// E01：请求值与生效值分开存——回退是永久的，日志只写"开了"会把回退读成还在走 arena。
+    const bool uniformArenaRequested = qEnvironmentVariableIntValue("RHINE_VK_UNIFORM_ARENA") == 1;
+    bool uniformArena = uniformArenaRequested;
+    QString arenaFallback;
     struct MaterialBindingEntry {
         QRhiShaderResourceBindings *bindings = nullptr;
         quint64 arena = 0;
@@ -399,12 +402,18 @@ class Renderer {
     };
     InstancePool instancePool;
     /// D04：主目标的深度在没人读时不 store（RHINE_VK_DISCARD_UNUSED_DEPTH=1 才启用）。
-    bool discardUnusedDepth = qEnvironmentVariableIntValue("RHINE_VK_DISCARD_UNUSED_DEPTH") == 1;
+    const bool discardUnusedDepthRequested =
+        qEnvironmentVariableIntValue("RHINE_VK_DISCARD_UNUSED_DEPTH") == 1;
+    bool discardUnusedDepth = discardUnusedDepthRequested;
     /// 本次 resize 定下的策略；它变了必须重建目标（render pass 的 storeOp 写在描述符里）。
     bool sizedDepthStore = true;
-    bool instancePoolEnabled = qEnvironmentVariableIntValue("RHINE_VK_INSTANCE_ARENA") == 1;
+    const bool instancePoolRequested = qEnvironmentVariableIntValue("RHINE_VK_INSTANCE_ARENA") == 1;
+    bool instancePoolEnabled = instancePoolRequested;
+    QString poolFallback;
     /// D03 第二步：材质 arena 的整块直写实验（RHINE_VK_DIRECT_WRITE=1）。
-    bool directWrite = qEnvironmentVariableIntValue("RHINE_VK_DIRECT_WRITE") == 1;
+    const bool directWriteRequested = qEnvironmentVariableIntValue("RHINE_VK_DIRECT_WRITE") == 1;
+    bool directWrite = directWriteRequested;
+    QString directWriteFallback;
     uchar *materialArenaMap = nullptr;
     QHash<QString, QRhiShaderResourceBindings *> postBindings;
     QHash<QString, QString> labelRevisions;
@@ -412,6 +421,10 @@ class Renderer {
     SceneDrawBuffers nativeBuffers;
     quint64 generation = 0;
     quint64 bindingCreations = 0;
+    /// E01：pipeline／布局对象的"活着的"数量。只减真正的退休，不随 map.clear() 减——
+    /// 差值本身就是"只清了哈希、对象还挂在 sized 里"的证据。
+    quint64 pipelinesLive = 0;
+    quint64 layoutsLive = 0;
     quint64 coverUploads = 0;
     quint64 drawCalls = 0;
     QHash<QString, QRhiTexture *> labels, covers;
@@ -796,6 +809,7 @@ class Renderer {
         const quint64 bytes = RhineRender::instancePoolBytes(needBytes, instancePool.capacity);
         if (!bytes) {
             instancePoolEnabled = false;
+            poolFallback = QStringLiteral("单帧实例字节超过 64 MiB 上限");
             qInfo().noquote() << "Vulkan 实例池: 单帧实例字节超过上限，回退逐 draw buffer";
             return false;
         }
@@ -821,6 +835,7 @@ class Renderer {
             materialArena.buffer->beginFullDynamicBufferUpdateForCurrentFrame());
         if (!materialArenaMap) {
             directWrite = false;
+            directWriteFallback = QStringLiteral("后端不支持 beginFullDynamicBufferUpdate");
             qInfo().noquote() << "Vulkan arena: 后端不支持整块直写，回退 updateDynamicBuffer";
         }
     }
@@ -836,6 +851,7 @@ class Renderer {
             return;
         }
         uniformArena = false;
+        arenaFallback = QString::fromUtf8(reason);
         endMaterialArenaWrite();
         for (auto &byCover : materialBindings) {
             for (auto &entry : byCover) {
@@ -1781,6 +1797,28 @@ class Renderer {
         }
         return total;
     }
+    /** E01：本轮实验的实际生效配置（请求值 vs 生效值 + 回退原因）。 */
+    RhineRender::VulkanResourceConfig vulkanConfig() const {
+        RhineRender::VulkanResourceConfig config;
+        config.arenaRequested = uniformArenaRequested;
+        config.arenaEffective = uniformArena && materialArena.buffer;
+        config.directWriteRequested = directWriteRequested;
+        config.directWriteEffective = directWrite && materialArenaMap != nullptr;
+        config.poolRequested = instancePoolRequested;
+        config.poolEffective = instancePoolEnabled && instancePool.buffer;
+        config.discardDepthRequested = discardUnusedDepthRequested;
+        config.discardDepthEffective = discardUnusedDepth && !sizedDepthStore;
+        config.arenaFallback = arenaFallback;
+        config.directWriteFallback = directWriteFallback;
+        config.poolFallback = poolFallback;
+        config.aaMode = qEnvironmentVariable("RHINE_AA_MODE");
+        config.host = qEnvironmentVariableIsSet("RHINE_FG_LAYER") ? QStringLiteral("FG 覆盖层")
+                                                                  : QStringLiteral("QQuickRhiItem");
+        config.motionConfigured = postProcess ? postProcess->motionConfigured() : false;
+        config.motionTarget = motionTarget;
+        config.samples = sampleCount;
+        return config;
+    }
     /** D01：稳态存量。遍历现存的 buffer 容器而不是靠"创建减回收"推算——回收路径有好几条，
      *  漏算一条就会把容量永久记高。 */
     RhineRender::VulkanResourceLive vulkanLive() const {
@@ -1827,6 +1865,14 @@ class Renderer {
             }
         }
         live.shaderResourceBindings = srb;
+        live.arenaSlots = quint64(materialArena.offsets.size());
+        live.arenaHistoricSlots = quint64(materialArena.used);
+        live.arenaCapacitySlots =
+            materialArena.stride ? quint64(materialArena.capacity / materialArena.stride) : 0;
+        live.poolCapacityBytes = instancePool.capacity;
+        live.poolMirror = quint64(instancePool.mirror.size());
+        live.pipelines = pipelinesLive;
+        live.pipelineLayouts = layoutsLive;
         return live;
     }
     QRhiShaderResourceBindings *bindings(std::vector<QRhiShaderResourceBinding> list,
@@ -1849,6 +1895,7 @@ class Renderer {
             return pipelines[key];
         }
         auto p = own(rhi->newGraphicsPipeline(), true);
+        ++pipelinesLive;
         const bool geo = kind == "surface";
 #ifdef Q_OS_LINUX
         // OpenGL 后端：场景目标只有一个 draw buffer，片元着色器不能声明 location=1 的第二个输出，
@@ -1917,6 +1964,7 @@ class Renderer {
 #endif
         if (!pipelineLayouts.contains(kind)) {
             auto layout = own(rhi->newShaderResourceBindings(), true);
+            ++layoutsLive;
             const auto stages =
                 QRhiShaderResourceBinding::VertexStage | QRhiShaderResourceBinding::FragmentStage;
             std::vector<QRhiShaderResourceBinding> values = {
@@ -2941,6 +2989,7 @@ class Renderer {
             if (++vkFrames >= 120) {
                 const auto live = vulkanLive();
                 qInfo().noquote() << RhineRender::formatVulkanResourceLine(vkWindow, live, vkFrames);
+                qInfo().noquote() << RhineRender::formatVulkanConfigLine(vulkanConfig());
                 vkWindow.clear();
                 vkFrames = 0;
             }

@@ -4,6 +4,7 @@
 // 同一个 SRB 的两个动态偏移被去重成一次、arena 换代后还沿用旧缓存、直写漏了槽位。
 // 依赖：Qt6::Core；不创建 QGuiApplication，也不碰 VkDevice。
 #include "render/VulkanResourcePolicy.h"
+#include "render/VulkanResourceProbe.h"
 
 #include <QString>
 #include <cstdio>
@@ -197,6 +198,40 @@ bool directWriteCoverage()
     return ok;
 }
 
+bool configLine()
+{
+    bool ok = true;
+    RhineRender::VulkanResourceConfig off;
+    const auto offLine = RhineRender::formatVulkanConfigLine(off);
+    ok &= check(offLine.contains(QStringLiteral("arena 关")), QStringLiteral("全关时 arena 显示关"),
+                QStringLiteral("arena 关"), offLine);
+    ok &= check(offLine.contains(QStringLiteral("深度不保留 关")),
+                QStringLiteral("全关时深度不保留显示关"), QStringLiteral("深度不保留 关"), offLine);
+
+    RhineRender::VulkanResourceConfig on;
+    on.arenaRequested = true;
+    on.arenaEffective = true;
+    on.discardDepthRequested = true;
+    on.discardDepthEffective = true;
+    const auto onLine = RhineRender::formatVulkanConfigLine(on);
+    ok &= check(onLine.contains(QStringLiteral("arena 开")), QStringLiteral("生效时显示开"),
+                QStringLiteral("arena 开"), onLine);
+    ok &= check(onLine.contains(QStringLiteral("（回退 -）")), QStringLiteral("没回退时占位为 -"),
+                QStringLiteral("（回退 -）"), onLine);
+
+    RhineRender::VulkanResourceConfig fallback;
+    fallback.arenaRequested = true;
+    fallback.arenaEffective = false;
+    fallback.arenaFallback = QStringLiteral("材质槽位超过 256");
+    const auto fallbackLine = RhineRender::formatVulkanConfigLine(fallback);
+    ok &= check(fallbackLine.contains(QStringLiteral("请求开→已回退")),
+                QStringLiteral("请求开但生效关必须显式标出回退"), QStringLiteral("请求开→已回退"),
+                fallbackLine);
+    ok &= check(fallbackLine.contains(QStringLiteral("材质槽位超过 256")),
+                QStringLiteral("回退原因必须打印"), QStringLiteral("材质槽位超过 256"), fallbackLine);
+    return ok;
+}
+
 } // namespace
 
 int main()
@@ -210,6 +245,7 @@ int main()
     ok &= sharedCacheLifetime();
     ok &= depthConsumers();
     ok &= directWriteCoverage();
+    ok &= configLine();
     std::printf("Vulkan 资源策略: %d 项检查，%d 项失败\n", g_checks, g_failures);
     return ok && g_failures == 0 ? 0 : 1;
 }
