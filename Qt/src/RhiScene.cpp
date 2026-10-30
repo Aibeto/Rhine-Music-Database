@@ -17,8 +17,12 @@
 #include <QFile>
 #include <QJsonDocument>
 #include <QMatrix4x4>
+#include <QMutex>
 #include <QPainter>
 #include <QOffscreenSurface>
+#include <QQueue>
+#include <QRunnable>
+#include <QThreadPool>
 // Qt 6.8+ 的 qrhi.h 已提供各后端初始化参数，无需引用不存在的后端头文件。
 #include <rhi/qrhi.h>
 #if QT_CONFIG(vulkan) && __has_include(<vulkan/vulkan.h>) && !defined(Q_OS_DARWIN)
@@ -83,6 +87,14 @@ static_assert(sizeof(Instance) == 80);
 #endif
 // 与主渲染路径一致：封面最高 1024²，带 mip 后单张约 5.3 MiB，预算需按此放宽。
 static constexpr qint64 MUSIC_TEXTURE_BUDGET_BYTES = 64 * 1024 * 1024;
+// A08：封面合成与 mip 链生成搬到工作线程后的三个上限。
+//  · COVER_PREP_MAX_INFLIGHT：同时在算的封面数。切歌很快时若无上限，会瞬间堆出十几份
+//    5 MiB 的中间图；超过上限就让这一帧先不算，下一帧再发（不降级成同步）。
+//  · COVER_UPLOAD_QUEUE_LIMIT：已经算完、等上传预算的成品条数上限，超出丢最旧的。
+//  · COVER_LATENCY_SAMPLES：首次可见延迟只保留最近 N 次，探针报均值/最大值。
+static constexpr int COVER_PREP_MAX_INFLIGHT = 4;
+static constexpr int COVER_UPLOAD_QUEUE_LIMIT = 16;
+static constexpr int COVER_LATENCY_SAMPLES = 8;
 static QMatrix4x4 matrix(QJsonArray a, int offset = 0) {
     QMatrix4x4 m;
     for (int i = 0; i < 16; ++i) {
@@ -131,6 +143,116 @@ struct Target {
     QRhiTexture *texture = nullptr;
     QRhiTextureRenderTarget *rt = nullptr;
     QRhiRenderPassDescriptor *rp = nullptr;
+};
+/**
+ * 一张封面的预处理成品：整条 mip 链的像素首尾相接。
+ * 交付契约是"要么整条链都在，要么判失败"——分层上传必须一次成型，缺层会被后端判成
+ * 纹理不完整并采样为黑，所以渲染线程只认 valid()，不做"先传基层、后面补层"。
+ */
+struct CoverPrepareResult {
+    qint64 revision = 0;      // QImage::cacheKey()，与 coverTextures 同一键空间
+    quint64 serial = 0;       // 请求代号：过期判定看它，不看 revision 还在不在
+    QString key;              // 发起请求的曲目，仅排障与统计
+    int baseSize = 0;         // 基层边长；0 表示预处理失败
+    int requestFrame = 0;     // 发起时的帧号，首次可见延迟由它算
+    QVector<int> levelBytes;  // 每层字节数，顺序与 mip 层一致
+    QByteArray pixels;        // 层内 RGBA8 行优先、不留行尾填充
+    qint64 bytes = 0;         // == pixels.size()，上传预算按它计
+    bool valid() const { return baseSize > 0 && bytes > 0 && !levelBytes.isEmpty(); }
+};
+/** 工作线程 → 渲染线程的唯一共享物：互斥保护的成品队列。 */
+struct CoverMailbox {
+    QMutex mutex;
+    QQueue<CoverPrepareResult> queue;
+};
+/**
+ * 单个封面的合成 + mip 链生成。
+ * 只碰 QImage / QByteArray：不碰 QRhi、不碰 Renderer 成员、不碰 Glyphs（字形图集是
+ * 渲染线程的 GPU 资源），因此可以安全地跑在任意线程上。
+ */
+class CoverPrepareTask : public QRunnable {
+  public:
+    CoverPrepareTask(std::shared_ptr<CoverMailbox> box, QImage source, int coverSize, qint64 revision,
+                     quint64 serial, QString key, int requestFrame)
+        : m_box(std::move(box)), m_source(std::move(source)), m_size(coverSize), m_revision(revision),
+          m_serial(serial), m_key(std::move(key)), m_requestFrame(requestFrame) {}
+    void run() override {
+        auto result = prepare();
+        // 无论成败都入队一条：失败也要让渲染线程知道该改走同步路径，不能静默丢封面。
+        QMutexLocker lock(&m_box->mutex);
+        m_box->queue.enqueue(std::move(result));
+    }
+
+  private:
+    CoverPrepareResult prepare() {
+        CoverPrepareResult result;
+        result.revision = m_revision;
+        result.serial = m_serial;
+        result.key = m_key;
+        result.requestFrame = m_requestFrame;
+        if (m_source.isNull() || m_size <= 0) {
+            return result;  // 无封面占位图要用 Glyphs，留给渲染线程同步画
+        }
+        // 合成口径必须与同步路径逐像素一致，否则异步/同步两条路会画出不同的封面。
+        QImage pixels(m_size, m_size, QImage::Format_RGBA8888_Premultiplied);
+        if (pixels.isNull()) {
+            return result;
+        }
+        pixels.fill(QColor::fromRgbF(.36, .45, .45));
+        {
+            QPainter painter(&pixels);
+            painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+            const auto dimensions = m_source.size().scaled(m_size, m_size, Qt::KeepAspectRatioByExpanding);
+            painter.drawImage(QRectF((m_size - dimensions.width()) / 2.,
+                                     (m_size - dimensions.height()) / 2., dimensions.width(),
+                                     dimensions.height()),
+                              m_source);
+        }  // QPainter 必须先析构：它自己 detach，之后才能安全读像素
+        // 预留 4/3 容量：整条链约 5.6 MiB，逐层追加不预留会反复重分配。
+        result.pixels.reserve(qsizetype(m_size) * m_size * 4 * 4 / 3);
+        // 减半规则与 uploadMipped 完全相同（IgnoreAspectRatio + SmoothTransformation），
+        // 层数也由同一个循环决定，不另行按位宽推断。
+        auto level = pixels;
+        for (;;) {
+            const int width = level.width();
+            const int height = level.height();
+            const int stride = int(level.bytesPerLine());
+            if (width <= 0 || height <= 0) {
+                break;
+            }
+            result.levelBytes.append(width * height * 4);
+            if (stride == width * 4) {
+                result.pixels.append(reinterpret_cast<const char *>(level.constBits()),
+                                     qsizetype(width) * height * 4);
+            } else {
+                // 32 位格式下 QImage 的行跨度恒为 width*4；仍按行搬运，免得某个平台的
+                // 行对齐把行尾填充当成像素传进纹理。
+                for (int y = 0; y < height; ++y) {
+                    result.pixels.append(
+                        reinterpret_cast<const char *>(level.constBits() + qsizetype(y) * stride),
+                        qsizetype(width) * 4);
+                }
+            }
+            if (width == 1 && height == 1) {
+                break;
+            }
+            level = level.scaled(qMax(1, width / 2), qMax(1, height / 2), Qt::IgnoreAspectRatio,
+                                 Qt::SmoothTransformation);
+            if (level.isNull()) {
+                break;
+            }
+        }
+        result.baseSize = m_size;
+        result.bytes = result.pixels.size();
+        return result;
+    }
+    std::shared_ptr<CoverMailbox> m_box;
+    QImage m_source;
+    int m_size = 512;
+    qint64 m_revision = 0;
+    quint64 m_serial = 0;
+    QString m_key;
+    int m_requestFrame = 0;
 };
 class Renderer {
   public:
@@ -230,6 +352,38 @@ class Renderer {
     QRhiTexture *labelTexture = nullptr, *coverTexture = nullptr;
     QStringList textureOrder;
     QSet<QString> activeTextureKeys;
+    // ── A08 封面预处理：线程模型见 CoverPrepareTask；这里只有渲染线程可见的状态 ──────
+    /** 发起预处理的结果。Busy 只是"这一帧不排队"，绝不能因此退回同步路径。 */
+    enum class PrepStart { Started, Busy, Unavailable };
+    struct CoverPrepRequest {
+        quint64 serial = 0;  // 递增请求代号，过期判定的主依据
+        QString key;         // 发起请求的曲目
+        int frame = 0;       // 发起时的帧号
+    };
+    // 邮箱用 shared_ptr 持有：切场景销毁 Renderer 时在途任务还在跑，它们写的是这个
+    // 邮箱而不是 Renderer 成员，最后一个引用释放前内存一直有效，不会出现悬垂写。
+    std::shared_ptr<CoverMailbox> mailbox = std::make_shared<CoverMailbox>();
+    QHash<qint64, CoverPrepRequest> coverPrep;  // revision → 在途请求（同一 cacheKey 只发一次）
+    QHash<QString, qint64> coverWanted;         // key → 该 key 想要的 revision
+    QSet<qint64> coverSyncFallback;             // 预处理失败的 revision：改走同步路径
+    QQueue<CoverPrepareResult> uploadQueue;     // 已算完、等上传预算的成品
+    quint64 coverSerial = 0;
+    bool coverAsyncDisabled = false;  // 线程池拒绝过任务：此后一律同步
+    // 单帧离屏参考渲染（renderReference）只跑一帧，没有"后续帧"可以等异步结果，
+    // 由调用方置位强制同步，否则参考图里的封面会退化成占位图。
+    bool forceSynchronousCover = false;
+    // 每帧封面 mip 上传字节上限；0 表示不限。构造时读一次：运行期改环境变量没意义，
+    // 也避免每帧 getenv。默认 8 MiB，一张 1024² 含 mip 约 5.6 MiB，正好放行一张大封面。
+    qint64 uploadBudget = readUploadBudget();
+    qint64 uploadedThisFrame = 0;
+    int frameIndex = 0;
+    quint64 prepCompleted = 0;      // 探针：已完成数
+    quint64 droppedStale = 0;       // 探针：过期丢弃数
+    quint64 droppedQueue = 0;       // 探针：队列溢出丢弃数
+    quint64 deferredFrames = 0;     // 探针：本周期内因预算顺延过上传的帧数
+    QVector<int> firstVisibleFrames;
+    int probeFrames = 0;
+    bool coverProbe = qEnvironmentVariableIntValue("RHINE_TEXTURE_PROBE") == 1;
     QSize size;
     QSize viewSize;
     std::unique_ptr<Glyphs> glyphs;
@@ -821,16 +975,272 @@ class Renderer {
             resources.erase(it);
         }
     }
+    /**
+     * RHINE_TEXTURE_UPLOAD_BUDGET_MB：每帧封面 mip 上传字节上限，默认 8 MiB，0 = 不限。
+     * 只认整数兆字节；非数字/未设置都退回默认值，免得一个笔误把上传彻底关死。
+     */
+    static qint64 readUploadBudget() {
+        bool ok = false;
+        const int megabytes = qEnvironmentVariableIntValue("RHINE_TEXTURE_UPLOAD_BUDGET_MB", &ok);
+        return ok ? qMax(0, megabytes) * qint64(1024 * 1024) : qint64(8) * 1024 * 1024;
+    }
+    /**
+     * 把某个 key 的封面切到 coverTextures 里已经就绪的那张。
+     * 旧纹理只在这个 key 是最后一个引用者时才退休：同专辑多曲、以及所有无封面曲目
+     * （cacheKey 恒为 0）共享同一张纹理，提前退休会让别人的 SRB 指向已释放对象。
+     */
+    void bindCoverTexture(const QString &key, qint64 revision) {
+        const auto previousRevision = coverRevisions.value(key);
+        const auto previous = covers.value(key);
+        const auto next = coverTextures.value(revision);
+        covers[key] = next;
+        coverRevisions[key] = revision;
+        coverWanted.remove(key);
+        if (previous && previous != next) {
+            retireCoverRevision(key, previousRevision, previous);
+        }
+    }
+    /** 某 key 不再使用这张封面纹理：仍有别的 key 指向它时只解绑引用，不退休对象。 */
+    void retireCoverRevision(const QString &key, qint64 revision, QRhiTexture *texture) {
+        if (!texture) {
+            return;
+        }
+        for (auto it = covers.cbegin(); it != covers.cend(); ++it) {
+            if (it.key() != key && it.value() == texture) {
+                return;
+            }
+        }
+        invalidateBindings(texture);
+        if (coverTextures.value(revision) == texture) {
+            coverTextures.remove(revision);
+        }
+        retire(texture);
+    }
+    /** 同步路径（A08 之前的原样实现）：合成、逐层生成 mip、上传、换绑，一帧内完成。 */
+    void uploadCoverSync(const QString &key, const QImage &image) {
+        const qint64 coverRevision = image.cacheKey();
+        // 高分辨率封面直接进入贴图
+        const auto coverSize = image.isNull() ? 512 : std::clamp(image.width(), 512, 1024);
+        QImage pixels(coverSize, coverSize, QImage::Format_RGBA8888_Premultiplied);
+        pixels.fill(QColor::fromRgbF(.36, .45, .45));
+        QPainter painter(&pixels);
+        painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
+        if (!image.isNull()) {
+            const auto dimensions =
+                image.size().scaled(coverSize, coverSize, Qt::KeepAspectRatioByExpanding);
+            painter.drawImage(QRectF((coverSize - dimensions.width()) / 2.,
+                                     (coverSize - dimensions.height()) / 2., dimensions.width(),
+                                     dimensions.height()),
+                              image);
+        } else {
+            painter.setPen(QPen(QColor::fromRgbF(.7, .72, .64), 2));
+            painter.drawEllipse(QRectF(52, 52, 408, 408));
+            glyphs->text(painter, "RHINE LAB", 156, 370, 28, "demibold", 1, QColor(215, 220, 204));
+        }
+        painter.end();
+        const auto cover = texture(pixels.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        uploadMipped(cover, pixels);
+        coverTextures[coverRevision] = cover;
+        ++coverUploads;
+        bindCoverTexture(key, coverRevision);
+    }
+    /**
+     * 发起一次封面预处理。同一 cacheKey 由 coverPrep 去重，调用方已保证不会重入。
+     * Busy 表示"在算的太多，这一帧先不发"，下一帧还会再试；Unavailable 才是真的没法
+     * 异步（线程池拒绝），调用方必须退回同步路径。
+     */
+    PrepStart startCoverPrep(const QString &key, const QImage &image, int coverSize, qint64 revision) {
+        if (coverPrep.size() >= COVER_PREP_MAX_INFLIGHT) {
+            return PrepStart::Busy;
+        }
+        const CoverPrepRequest request{++coverSerial, key, frameIndex};
+        auto task = new CoverPrepareTask(mailbox, image, coverSize, revision, request.serial, key,
+                                         request.frame);
+        // 用 tryStart 而不是 start：线程池正在析构时必须能看出来，否则封面会静默消失。
+        if (!QThreadPool::globalInstance()->tryStart(task)) {
+            // 失败时 Qt 对 runnable 的所有权在不同版本里不一致（有的版本会替调用方删），
+            // 这里不 delete：最坏是关停瞬间漏一个 QRunnable，换的是绝不重复释放。
+            coverAsyncDisabled = true;
+            qWarning("封面预处理线程池不可用，封面回退同步路径");
+            return PrepStart::Unavailable;
+        }
+        coverPrep.insert(revision, request);
+        return PrepStart::Started;
+    }
+    /** 把整条 mip 链一次性传给 GPU：任何一层缺席都会让后端判纹理不完整、采样成黑。 */
+    QRhiTexture *uploadCoverTexture(const CoverPrepareResult &result) {
+        auto cover =
+            texture(QSize(result.baseSize, result.baseSize), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
+        QVector<QRhiTextureUploadEntry> entries;
+        entries.reserve(result.levelBytes.size());
+        qsizetype offset = 0;
+        for (int level = 0; level < result.levelBytes.size(); ++level) {
+            const auto byteCount = result.levelBytes.at(level);
+            entries.append(QRhiTextureUploadEntry(
+                0, level, QRhiTextureSubresourceUploadDescription(result.pixels.mid(offset, byteCount))));
+            offset += byteCount;
+        }
+        QRhiTextureUploadDescription description;
+        description.setEntries(entries.cbegin(), entries.cend());
+        updates->uploadTexture(cover, description);
+        return cover;
+    }
+    /**
+     * 按每帧字节预算上传已就绪的封面。预算 0 表示不限。
+     * 队首那条即使单张就超预算也放行（前提是本帧还没传过别的），否则小预算配大封面会
+     * 永久饿死：它永远轮不到，又永远排在最前面。
+     */
+    void uploadPendingCovers() {
+        while (!uploadQueue.isEmpty()) {
+            const auto &head = uploadQueue.head();
+            if (uploadBudget > 0 && uploadedThisFrame > 0 &&
+                uploadedThisFrame + head.bytes > uploadBudget) {
+                break;  // 剩下的留给后续帧，成品留在队列里不丢
+            }
+            auto result = uploadQueue.dequeue();
+            // 排队期间可能已经切歌/淘汰：成品代表"算完那一刻"的意图，不一定是"现在"的。
+            // 没人再要就别建纹理，否则会留下一张 textureOrder 永远选不到、也就永远不淘汰的
+            // 孤儿纹理（textureOrder 里根本没有这个 key）。
+            if (coverTextures.contains(result.revision) ||
+                !coverWanted.values().contains(result.revision)) {
+                ++droppedStale;
+                continue;
+            }
+            const auto cost = result.bytes;
+            const auto cover = uploadCoverTexture(result);
+            coverTextures[result.revision] = cover;
+            ++coverUploads;
+            // 同一个 revision 可能同时被多首同专辑曲目等着，一次全部换绑。
+            for (const auto &key : coverWanted.keys()) {
+                if (coverWanted.value(key) == result.revision) {
+                    bindCoverTexture(key, result.revision);
+                }
+            }
+            // 首次可见延迟：请求帧 → 真正成为该 key 封面的帧。
+            firstVisibleFrames.append(frameIndex - result.requestFrame);
+            while (firstVisibleFrames.size() > COVER_LATENCY_SAMPLES) {
+                firstVisibleFrames.removeFirst();
+            }
+            uploadedThisFrame += cost;
+            if (uploadBudget > 0 && uploadedThisFrame >= uploadBudget) {
+                break;
+            }
+        }
+        if (!uploadQueue.isEmpty()) {
+            ++deferredFrames;
+        }
+    }
+    /**
+     * 每帧一次：工作线程回来的成品先判过期，再入队，最后按预算上传。
+     * 只在这里创建 QRhi 纹理，工作线程永远不碰 GPU 对象。
+     */
+    void drainCoverPrep() {
+        // 预算按帧重置：这是"每帧最多传多少"的上限，不是全局总量。
+        uploadedThisFrame = 0;
+        QQueue<CoverPrepareResult> incoming;
+        {
+            QMutexLocker lock(&mailbox->mutex);
+            incoming.swap(mailbox->queue);
+        }
+        for (auto &result : incoming) {
+            // 过期判定看三件事：请求代号还是不是当前那一个（切歌/淘汰会作废代号）、
+            // 是否还有 key 想要这个 revision、以及是不是已经有别的路径把它做出来了。
+            const auto request = coverPrep.value(result.revision);
+            const bool current = request.serial != 0 && request.serial == result.serial;
+            if (current) {
+                // 每个在途请求恰好收一条结果，收到就注销。放在判活之前：既不注销会被
+                // coverWorkPending() 当成"还在路上"而永久请求新帧，也不给重发留机会。
+                coverPrep.remove(result.revision);
+            }
+            if (!current || coverTextures.contains(result.revision) ||
+                !coverWanted.values().contains(result.revision)) {
+                ++droppedStale;
+                continue;  // 整块 QByteArray 随 result 析构一起释放
+            }
+            if (!result.valid()) {
+                // 工作线程失败（内存不足 / 缩放产出空图）：记下这个 revision 改走同步，
+                // 封面不能静默消失，更不能让空纹理顶上去。
+                coverSyncFallback.insert(result.revision);
+                // 撤掉"想要"登记，下一帧 updateMusic 才会重新进入派发、走到同步兜底。
+                // 留着的话它会把这次失败当成"仍在处理中"，封面就永远停在占位图。
+                for (auto it = coverWanted.begin(); it != coverWanted.end();) {
+                    if (it.value() == result.revision) {
+                        it = coverWanted.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                qWarning("封面预处理失败（revision=%lld），改走同步路径",
+                         static_cast<long long>(result.revision));
+                continue;
+            }
+            ++prepCompleted;
+            uploadQueue.enqueue(std::move(result));
+        }
+        while (uploadQueue.size() > COVER_UPLOAD_QUEUE_LIMIT) {
+            uploadQueue.dequeue();
+            ++droppedQueue;
+        }
+        uploadPendingCovers();
+        reportCoverProbe();
+    }
+    /** 还有预处理在路上、或成品没传完：需要再要一帧，否则结果会一直躺在队列里。 */
+    bool coverWorkPending() const { return !uploadQueue.isEmpty() || !coverPrep.isEmpty(); }
+    /** RHINE_TEXTURE_PROBE=1 时每 120 帧一行；字段名固定，方便直接 grep/喂脚本。 */
+    void reportCoverProbe() {
+        if (!coverProbe || (++probeFrames % 120) != 0) {
+            return;
+        }
+        int total = 0, worst = 0;
+        for (const int value : firstVisibleFrames) {
+            total += value;
+            worst = qMax(worst, value);
+        }
+        const auto average =
+            firstVisibleFrames.isEmpty() ? 0. : double(total) / firstVisibleFrames.size();
+        qInfo().noquote() << "纹理探针: prepAsync"
+                          << QStringLiteral("%1/%2").arg(prepCompleted).arg(coverPrep.size())
+                          << "| uploaded" << uploadedThisFrame << "字节 | deferred"
+                          << QStringLiteral("%1 条 / 顺延 %2 帧").arg(uploadQueue.size()).arg(deferredFrames)
+                          << "| dropped" << (droppedStale + droppedQueue)
+                          << QStringLiteral("(过期 %1 / 队列 %2)").arg(droppedStale).arg(droppedQueue)
+                          << "| firstVisibleFrames"
+                          << QStringLiteral("平均 %1 最大 %2 样本 %3")
+                                 .arg(average, 0, 'f', 2)
+                                 .arg(worst)
+                                 .arg(firstVisibleFrames.size())
+                          << "| budget"
+                          << (uploadBudget > 0 ? QStringLiteral("%1 字节").arg(uploadBudget)
+                                               : QStringLiteral("不限"))
+                          << "| 同步兜底" << (coverAsyncDisabled ? "开" : "关");
+        deferredFrames = 0;
+    }
+    /**
+     * 作废某 key 名下的在途预处理：结果回来时判不过请求代号，直接丢弃。
+     * 只在"这张图已经没人要"时调用——还被别的 key 要着的 revision 必须留着。
+     */
+    void discardCoverPrepFor(const QString &key) {
+        for (auto it = coverPrep.begin(); it != coverPrep.end();) {
+            if (it.value().key == key && !coverWanted.values().contains(it.key())) {
+                it = coverPrep.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
     void releaseCover(const QString &key) {
         const auto revision = coverRevisions.take(key);
         const auto previous = covers.take(key);
+        // 这个 key 不再需要自己的封面了：连带撤掉"想要"登记和在途请求。
+        // 否则迟到的结果会新建一张无人引用、又永远不会被淘汰的纹理（textureOrder 里
+        // 已经没有这个 key，淘汰循环永远选不到它）。
+        coverWanted.remove(key);
+        discardCoverPrepFor(key);
         // 同专辑曲目及无封面的曲目共享纹理，最后一个引用退出后才退休 GPU 对象。
-        if (!previous || covers.values().contains(previous)) {
+        if (!previous) {
             return;
         }
-        invalidateBindings(previous);
-        coverTextures.remove(revision);
-        retire(previous);
+        retireCoverRevision(key, revision, previous);
     }
     void updateMusic(const QJsonObject &value, QImage image) {
         const auto key = value["key"].toString("empty");
@@ -853,35 +1263,45 @@ class Renderer {
             uploadMipped(labels[key], label);
             labelRevisions[key] = labelRevision;
         }
-        if (!covers.contains(key) || (!image.isNull() && coverRevisions.value(key) != coverRevision)) {
-            releaseCover(key);
-            if (!coverTextures.contains(coverRevision)) {
-                // 高分辨率封面直接进入贴图
+        // 登记的意图已经不是当前这张图了：撤销意图并作废在途请求，否则迟到的结果会把
+        // 已经切走的封面又贴回来。有图才判（默认值取当前 revision，没登记时本分支不触发）；
+        // 空图沿用原语义——一旦该 key 有了封面，后续空图不再改写它。
+        if (!image.isNull() && coverWanted.value(key, coverRevision) != coverRevision) {
+            coverWanted.remove(key);
+            discardCoverPrepFor(key);
+        }
+        const bool coverChanging =
+            !covers.contains(key) || (!image.isNull() && coverRevisions.value(key) != coverRevision);
+        // 已经为这个 revision 登记过意图（在途/排队/等预算）就什么都不做。
+        // 若每帧重新发起，上一张结果会被判成过期并被丢掉，封面永远上不了屏。
+        if (coverChanging && coverWanted.value(key, qint64(-1)) != coverRevision) {
+            // 先登记"这个 key 想要哪个 revision"：异步结果回来时靠它判断还有人要不要，
+            // 也是整条链唯一一处声明意图的地方。旧封面此刻不退休——换绑时由
+            // bindCoverTexture 一并处理，这样等待期间画面仍是上一张封面而不是占位灰块。
+            coverWanted[key] = coverRevision;
+            if (coverTextures.contains(coverRevision)) {
+                // 同专辑别的曲目（或无封面共享的 revision 0）已经做好了，直接复用，不重算。
+                bindCoverTexture(key, coverRevision);
+            } else if (!coverPrep.contains(coverRevision)) {
+                // 同一 cacheKey 只发起一次预处理：切走又切回来时请求还挂着，等它就是。
                 const auto coverSize = image.isNull() ? 512 : std::clamp(image.width(), 512, 1024);
-                QImage pixels(coverSize, coverSize, QImage::Format_RGBA8888_Premultiplied);
-                pixels.fill(QColor::fromRgbF(.36, .45, .45));
-                QPainter painter(&pixels);
-                painter.setRenderHints(QPainter::Antialiasing | QPainter::SmoothPixmapTransform);
-                if (!image.isNull()) {
-                    const auto dimensions =
-                        image.size().scaled(coverSize, coverSize, Qt::KeepAspectRatioByExpanding);
-                    painter.drawImage(QRectF((coverSize - dimensions.width()) / 2.,
-                                             (coverSize - dimensions.height()) / 2., dimensions.width(),
-                                             dimensions.height()),
-                                      image);
-                } else {
-                    painter.setPen(QPen(QColor::fromRgbF(.7, .72, .64), 2));
-                    painter.drawEllipse(QRectF(52, 52, 408, 408));
-                    glyphs->text(painter, "RHINE LAB", 156, 370, 28, "demibold", 1, QColor(215, 220, 204));
+                // 三种情况必须走同步：无封面占位要用 Glyphs（共享的 GPU 字形图集，跨线程会
+                // 竞态）；离屏参考渲染只跑一帧，等不到异步结果；线程池已拒绝过任务或这个
+                // revision 预处理失败过。同步路径的产出与异步完全一致，只是当帧完成。
+                const bool synchronous = image.isNull() || forceSynchronousCover || coverAsyncDisabled ||
+                                         coverSyncFallback.contains(coverRevision);
+                const auto started = synchronous ? PrepStart::Unavailable
+                                                 : startCoverPrep(key, image, coverSize, coverRevision);
+                if (started == PrepStart::Busy) {
+                    // 在算的太多，这一帧先不让它排队：撤销登记，下一帧再试。
+                    // 这是软的拥塞信号，绝不能当成"异步不可用"而退回同步路径。
+                    coverWanted.remove(key);
+                } else if (started == PrepStart::Unavailable) {
+                    uploadCoverSync(key, image);  // 同步兜底，当帧完成
                 }
-                painter.end();
-                const auto cover = texture(pixels.size(), QRhiTexture::RGBA8, QRhiTexture::MipMapped);
-                uploadMipped(cover, pixels);
-                coverTextures[coverRevision] = cover;
-                ++coverUploads;
+                // Started：本帧什么都不做，继续显示上一张可用封面；材质侧若拿不到这个 key
+                // 会自动回落 placeholderCover，绝不出现"只有基层、缺 mip"的半成品纹理。
             }
-            covers[key] = coverTextures.value(coverRevision);
-            coverRevisions[key] = coverRevision;
         }
         labelTexture = labels.value(key);
         coverTexture = covers.value(key);
@@ -1665,6 +2085,10 @@ class Renderer {
 #endif
         updates->updateDynamicBuffer(globalBuffer, 0, sizeof(g), &g);
         ++generation;
+        // 帧号与成品回收入口：两者都必须在 updateMusic 之前，本帧就绪的封面才能当帧换绑，
+        // 否则每次切歌都要白等一帧（首次可见延迟直接翻倍）。
+        ++frameIndex;
+        drainCoverPrep();
         // 每帧重置 arena：实例数据按帧重建，偏移从 0 开始。
         activeTextureKeys.clear();
         activeTextureKeys.insert(item["key"].toString("empty"));
@@ -1946,6 +2370,11 @@ class ItemRenderer : public QQuickRhiItemRenderer {
         const auto previousPostDraws = renderer->postProcess->drawCalls;
 #endif
         renderer->render(cb, frame, renderTarget()->pixelSize(), item, cover, renderTarget(), musicTextures);
+        // 引擎静止时会休眠、不再出帧；封面预处理回来的成品必须有人把它取走并上传，
+        // 所以只要还有活儿在路上就主动再要一帧（update() 是渲染线程的安全入口）。
+        if (renderer->coverWorkPending()) {
+            update();
+        }
 #ifdef Q_OS_DARWIN
         backend->renderTelemetry.publish(renderer->size, renderer->viewSize, 1, renderer->implementation,
                                          true);
@@ -2089,6 +2518,9 @@ QImage renderReference(const QString &root, const QJsonObject &frame, const QJso
     }
     RhineRendering::Renderer renderer(root, rhi.get());
     renderer.nativeBuffers = buffers;
+    // 参考图只渲一帧就 readback，没有后续帧可以等异步成品；强制同步，否则截图里的封面
+    // 会退化成占位图（这类离屏截图是对比用的基准，画面必须与实时路径一致）。
+    renderer.forceSynchronousCover = true;
 #ifdef Q_OS_DARWIN
     if (settings) {
         renderer.settings = *settings;
