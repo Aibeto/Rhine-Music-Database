@@ -11,6 +11,7 @@ struct Provider {
 };
 const QVector<Provider> providers = [] {
     QVector<Provider> values{
+        {"siren", "塞壬唱片", "MONSTER SIREN", "官网曲库"},
         {"netease", "网易云音乐", "NETEASE", "搜索 · 个人音乐 · 推荐 · 播放 · 歌单编辑"},
         {"qq", "QQ 音乐", "QQ MUSIC", "全类搜索 · 每日推荐 · 个人音乐 · 歌单编辑"},
         {"kugou", "酷狗音乐", "KUGOU", "标准版 / 概念版 · 个人歌单 · 推荐与榜单 · 播放"},
@@ -202,7 +203,8 @@ void NativeHud::modalDraw(double width) {
     } else if (modal == "confirm") {
         limited(confirmTitle, x + 53, y + 260, 24, usable - 106, "demibold");
         text(music.isLocal() ? "只移除本地索引，磁盘音乐文件保持原样。"
-                             : "此操作将同步至" + music.providerName() + "。",
+                             : (music.isSiren() ? "只删除本机歌单，不会同步到塞壬唱片。"
+                                                : "此操作将同步至" + music.providerName() + "。"),
              x + 53, y + 330, 16);
         button("确认删除", x + 53, y + 450, 180, 45, "confirm:yes", 16);
         button("取消", x + 270, y + 450, 150, 45, "close-modal", 16);
@@ -266,10 +268,12 @@ void NativeHud::platformChoices(double x, double y, double width, bool expanded)
                 text(lines.at(row), left + 16, y + 75 + row * 21, 14);
             }
             const bool authenticated = m_host->hasCredential(provider.id);
-            const auto note = provider.id == "local"
-                                  ? QStringLiteral("独立本地库 / 无需登录")
-                                  : (authenticated ? QStringLiteral("本机已保存登录")
-                                                   : QStringLiteral("未登录 / 可选择后扫码"));
+            const auto note =
+                provider.id == "local"
+                    ? QStringLiteral("独立本地库 / 无需登录")
+                    : (provider.id == "siren" ? QStringLiteral("官网曲库 / 无需登录")
+                                              : (authenticated ? QStringLiteral("本机已保存登录")
+                                                               : QStringLiteral("未登录 / 可选择后扫码")));
             limited(note, left + 16, y + 150, 12, cardWidth - 32);
         }
     }
@@ -280,8 +284,11 @@ void NativeHud::platformPanel(double x, double y, double width) {
     rule(x + 53, y + 490, width - 106, 0.2);
     text("切换平台会停止当前播放，各平台账号与个人音乐独立保存。", x + 53, y + 520, 15);
     text("网易云与 QQ 支持歌单编辑；酷狗支持读取与播放。", x + 53, y + 558, 15);
+    text("塞壬唱片", x + 53, y + 590, 15);
     if (m_music->isLocal()) {
         button("文件夹管理 ＋", x + 53, y + 660, 330, 48, "discover", 16);
+    } else if (m_music->isSiren()) {
+        text("塞壬唱片官网曲库", x + 53, y + 675, 15);
     } else {
         button("账号登录 / " + m_music->providerName(), x + 53, y + 660, 330, 48, "music:login", 16);
     }
@@ -307,8 +314,11 @@ const QHash<QString, QualityDescription> qualityDescriptions{
 /** 音质选项采用统一档案标记；重点档位展开为卡片，普通档位保持紧凑行高。 */
 void NativeHud::qualityChoice(const QString &id, int number, double x, double y, double width,
                               bool featured) {
-    const auto description = qualityDescriptions.value(id);
-    const bool selected = m_music->player.quality == id;
+    const auto description =
+        m_music->provider == "siren" && id == "lossless"
+            ? QualityDescription{"官网原始音源", "ORIGINAL SOURCE", "直接使用塞壬唱片官网提供的音源文件", ""}
+            : qualityDescriptions.value(id);
+    const bool selected = m_music->isSiren() ? id == "lossless" : m_music->player.quality == id;
     const auto height = featured ? 174. : 57.;
     const auto accent = dark ? QJsonArray{0.69, 0.74, 0.53, 1} : QJsonArray{0.43, 0.48, 0.34, 1};
     auto tint = accent;
@@ -377,7 +387,8 @@ void NativeHud::qualityPanel(double x, double y, double width) {
     fill(left, y + 195, 3, 48, accent);
     text("实际音源 / SOURCE", left + 17, y + 199, 10, "demibold", 0.6);
     text(actual, left + 17, y + 219, 18, "demibold");
-    const auto preference = qualityDescriptions.value(player.quality).title;
+    const auto preference =
+        music.isSiren() ? QStringLiteral("官网原始音源") : qualityDescriptions.value(player.quality).title;
     limited("已选偏好：" + preference, left + usable * 0.52, y + 219, 14, usable * 0.48);
     rule(left, y + 257, usable, 0.25);
     QStringList featured{"jymaster", "hires"};
@@ -385,6 +396,8 @@ void NativeHud::qualityPanel(double x, double y, double width) {
         featured = {"best", "lossless"};
     } else if (music.provider == "kugou") {
         featured = {"hires", "lossless"};
+    } else if (music.provider == "siren") {
+        featured = {};
     }
     const auto cardWidth = (usable - 18) / 2;
     for (int index = 0; index < featured.size(); ++index) {

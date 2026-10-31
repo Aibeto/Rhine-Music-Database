@@ -3,7 +3,45 @@ const originalFetch = global.fetch;
 // 新的共用 QQ 接口使用 Fetch；本地桥接 HTTP 仍走真实回环服务。
 global.fetch = async (input, init) => {
     const request = new Request(input, init);
-    if (new URL(request.url).hostname !== 'u.y.qq.com') {
+    const url = new URL(request.url);
+    if (url.hostname === 'monster-siren.hypergryph.com') {
+        const songs = [{ cid: '048755', name: '本地歌曲', albumCid: '6648', artists: ['塞壬唱片-MSR'] }];
+        const albums = [
+            {
+                cid: '6648',
+                name: '本地专辑',
+                coverUrl: 'https://web.hycdn.cn/siren/pic/20260101/cover.jpg',
+                artistes: ['塞壬唱片-MSR'],
+            },
+        ];
+        const song = {
+            cid: '048755',
+            name: '本地歌曲',
+            albumCid: '6648',
+            sourceUrl: 'https://res01.hycdn.cn/test.wav',
+            lyricUrl: null,
+            mvUrl: null,
+            mvCoverUrl: null,
+            artists: ['塞壬唱片-MSR'],
+        };
+        let data;
+        if (url.pathname === '/api/songs') {
+            data = { list: songs };
+        } else if (url.pathname === '/api/albums') {
+            data = albums;
+        } else if (url.pathname.startsWith('/api/song/')) {
+            data = song;
+        } else if (url.pathname.startsWith('/api/album/')) {
+            data = {
+                ...albums[0],
+                songs: [{ cid: '048755', name: '本地歌曲', artistes: ['塞壬唱片-MSR'] }],
+            };
+        } else {
+            throw new Error('Unexpected Monster Siren fixture path: ' + url.pathname);
+        }
+        return Response.json({ code: 0, msg: '', data });
+    }
+    if (url.hostname !== 'u.y.qq.com') {
         return originalFetch(input, init);
     }
     const raw =

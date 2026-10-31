@@ -224,7 +224,8 @@ void Host::requestJson(QString route, QJsonObject values, JsonReply callback) {
             operationCode = operation == "preview" ? 2 : 1;
         }
         const int requestProvider = int(std::max<qsizetype>(
-            0, QStringList{"other", "netease", "qq", "kugou", "local"}.indexOf(routeProvider(route))));
+            0,
+            QStringList{"other", "netease", "qq", "kugou", "local", "siren"}.indexOf(routeProvider(route))));
         recordPlaybackDiagnostic(
             "request-start",
             {{"requestSerial", serial}, {"operation", operationCode}, {"provider", requestProvider}});
@@ -552,7 +553,7 @@ bool Host::hasCredential(QString value) const {
  * 切换音乐来源，保持各来源的凭据与缓存隔离。
  */
 void Host::setProvider(QString value) {
-    if (value != "qq" && value != "netease" && value != "kugou" && value != "local") {
+    if (value != "qq" && value != "netease" && value != "kugou" && value != "local" && value != "siren") {
         return;
     }
     if (remote) {
@@ -723,7 +724,8 @@ void Host::loadCover(QString input, TextReply callback, int maximumDimension) {
     const auto domain = url.host();
     if (!(domain == "music.126.net" || domain.endsWith(".music.126.net") || domain == "music.163.com" ||
           domain.endsWith(".music.163.com") || domain == "y.gtimg.cn" || domain == "qpic.y.qq.com" ||
-          domain == "y.qq.com" || domain.endsWith(".kugou.com") || domain.endsWith(".kgimg.com"))) {
+          domain == "y.qq.com" || domain.endsWith(".kugou.com") || domain.endsWith(".kgimg.com") ||
+          domain == "hycdn.cn" || domain.endsWith(".hycdn.cn"))) {
         callback({});
         return;
     }

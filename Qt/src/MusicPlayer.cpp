@@ -50,6 +50,15 @@ QString MusicPlayer::sourceQuality(const QString &provider, const QJsonObject &a
     if (format.isEmpty()) {
         format = QFileInfo(url.path()).suffix().toLower();
     }
+    if (provider == "siren") {
+        if (format == "wav" || format == "flac" || format == "ape" || format == "alac") {
+            return "sq";
+        }
+        if (format == "mp3" || format == "m4a" || format == "aac") {
+            return "hq";
+        }
+        return {};
+    }
     if (provider == "qq") {
         // 登录接口可能没有 quality；前缀是实际获准播放的媒体文件类型。
         if (file.startsWith("F000") || file.startsWith("A000")) {
@@ -105,6 +114,9 @@ QVector<QPair<QString, QString>> MusicPlayer::qualityOptions(const QString &prov
                 {"exhigh", "HQ 高品音质"},
                 {"lossless", "SQ 无损音质"},
                 {"hires", "Hi-Res 高解析音质"}};
+    }
+    if (provider == "siren") {
+        return {{"lossless", "官网原始音源"}};
     }
     return {
         {"standard", "标准"},           {"higher", "较高"},      {"exhigh", "极高"}, {"lossless", "SQ 无损"},
@@ -368,6 +380,9 @@ void MusicPlayer::prepare(QJsonObject track, quint64 generation, bool reload) {
     // 酷狗不支持 ape，转换为通用无损
     if (m_api->provider == "kugou" && quality == "ape") {
         effectiveQuality = "lossless";
+    }
+    if (m_api->provider == "siren") {
+        effectiveQuality = "original";
     }
 
     m_api->call(

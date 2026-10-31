@@ -21,11 +21,20 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
     auto &music = *m_music;
     const auto name = parts.value(1);
     const auto last = parts.constLast().toInt();
+    // 塞壬唱片本地操作
+    if (music.isSiren() && QStringList{"login", "logout", "qr", "login-method", "kugou-edition", "subscribe",
+                                       "refresh-personal", "activate"}
+                               .contains(name)) {
+        return;
+    }
     if (music.isLocal() &&
         QStringList{"login", "logout", "qr", "login-method", "kugou-edition", "like", "like-current",
                     "subscribe", "create-playlist", "delete-playlist", "rename-playlist", "add-to-playlist",
-                    "playlist-pick", "official", "source", "refresh-personal", "activate", "remove-track"}
+                    "playlist-pick", "refresh-personal", "activate", "remove-track"}
             .contains(name)) {
+        return;
+    }
+    if (music.isLocal() && (name == "source" || name == "official")) {
         return;
     }
     if (name == "sort-menu") {
@@ -344,6 +353,11 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
                 owner->closeModal();
             }
         });
+    } else if (name == "open-all-siren") {
+        if (!modal.isEmpty()) {
+            closeModal();
+        }
+        music.openSirenAllSongs();
     } else if (name == "qr") {
         music.startLogin();
     } else if (name == "logout") {

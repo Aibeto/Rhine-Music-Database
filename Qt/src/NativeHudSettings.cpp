@@ -274,6 +274,9 @@ void NativeHud::paintSettingsCustomSection(const QString &renderer, const QRectF
         if (m_music->isLocal()) {
             accountLabel = QStringLiteral("文件夹管理 / 导入与索引");
             accountAction = "discover";
+        } else if (m_music->isSiren()) {
+            // 塞壬唱片使用官网曲库，没有账号登录入口。
+            accountLabel = QStringLiteral("塞壬唱片");
         } else if (m_music->uid.isEmpty()) {
             accountLabel = QStringLiteral("登录 / ") + m_music->providerName();
             accountAction = "music:login";
@@ -282,14 +285,21 @@ void NativeHud::paintSettingsCustomSection(const QString &renderer, const QRectF
             accountAction = "music:logout";
         }
         const auto account = QRectF(body.left(), body.top() + 98, 320, 46);
-        actionBlock(account, accountLabel, accountAction, accountLabel);
+        if (accountAction.isEmpty()) {
+            text(fit(accountLabel, 15, account.width(), "regular"), account.left() + 2, account.top() + 15,
+                 15, "regular", 0, baseInk);
+        } else {
+            actionBlock(account, accountLabel, accountAction, accountLabel);
+        }
         static const QHash<QString, QString> memberships{{"free", QStringLiteral("免费账号")},
                                                          {"green", QStringLiteral("绿钻会员")},
                                                          {"super", QStringLiteral("超级会员")},
                                                          {"unknown", QStringLiteral("会员状态未知")}};
-        const auto note = m_music->provider == "qq" && !m_music->uid.isEmpty()
-                              ? memberships.value(m_music->vipLevel, QStringLiteral("会员状态未知"))
-                              : QStringLiteral("各平台账号独立保存");
+        const auto note = m_music->isSiren()
+                              ? QStringLiteral("官网曲库 / 无需登录")
+                              : (m_music->provider == "qq" && !m_music->uid.isEmpty()
+                                     ? memberships.value(m_music->vipLevel, QStringLiteral("会员状态未知"))
+                                     : QStringLiteral("各平台账号独立保存"));
         text(fit(note, 12, body.right() - account.right() - 20, "regular"), account.right() + 16,
              body.top() + 114, 12, "regular", 0, muted);
         return;

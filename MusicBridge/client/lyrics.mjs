@@ -2,6 +2,9 @@
 export async function fetchLyrics(api, provider, track) {
     const metadata = { title: track.title, artist: track.artist };
     let body;
+    if (provider === 'siren') {
+        return api.lyrics(track);
+    }
     if (provider === 'qq') {
         body = await api.request('/getLyric', { songmid: track.id, isFormat: false, ...metadata });
     } else if (provider === 'kugou') {

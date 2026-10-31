@@ -72,7 +72,7 @@ void MusicLibrary::rememberIdentityName(QString source, QString name) {
 }
 
 void MusicLibrary::restoreIdentityName() {
-    if (isLocal()) {
+    if (isLocal() || isSiren()) {
         return;
     }
     const auto source = provider == "netease" ? "qq" : "netease";
@@ -95,6 +95,11 @@ void MusicLibrary::restoreCachedAccount() {
     if (isLocal()) {
         uid.clear();
         nickname = QStringLiteral("本地音乐");
+        return;
+    }
+    if (isSiren()) {
+        uid.clear();
+        nickname = QStringLiteral("本地收藏");
         return;
     }
     const auto authenticated = host->authenticated();
@@ -132,7 +137,7 @@ void MusicLibrary::refreshQQFeatures() {
 }
 
 void MusicLibrary::restoreAccount(Completion done) {
-    if (isLocal()) {
+    if (isLocal() || isSiren()) {
         if (done) {
             done(true);
         }
@@ -194,7 +199,7 @@ void MusicLibrary::switchProvider(QString source, QString edition, Completion do
     }
     const auto editionChanged =
         source == "kugou" && QStringList{"standard", "lite"}.contains(edition) && edition != kugouEdition;
-    if (!QStringList{"netease", "qq", "kugou", "local"}.contains(source) ||
+    if (!QStringList{"netease", "qq", "kugou", "local", "siren"}.contains(source) ||
         (source == provider && !editionChanged)) {
         if (done) {
             done(true);
@@ -245,10 +250,13 @@ void MusicLibrary::switchProvider(QString source, QString edition, Completion do
     }
     totals.fill(0);
     offsets.fill(0);
+    sirenOffsets.fill(0);
     hasMore.fill(true);
     rowMemory.fill(0);
     likedIDs.reset();
     likedCursor = 0;
+    sirenCatalogLoading = false;
+    m_pendingSirenSearch = false;
     albumCursor = 0;
     playlistCursor = 0;
     searchCursor = 0;
@@ -271,8 +279,17 @@ void MusicLibrary::switchProvider(QString source, QString edition, Completion do
     loginMethod = "qr";
     if (isLocal()) {
         refreshLocal();
+    } else if (isSiren()) {
+        columns = {"搜索结果", "喜欢的歌曲", "我的歌单", "全部歌曲", "全部专辑"};
     } else {
         columns = {"搜索结果", "喜欢的歌曲", "我的歌单", "收藏歌单", "收藏专辑"};
+    }
+    if (isSiren()) {
+        if (!collections) {
+            collections = std::make_unique<LocalCollections>(source, QString(), this);
+        }
+        reloadSirenCollections();
+        loadSirenCatalog();
     }
     status = QStringLiteral("已切换至") + providerName();
     changed();
@@ -506,7 +523,7 @@ void MusicLibrary::confirmLogin(quint64 token, bool captcha) {
 }
 
 void MusicLibrary::startLogin() {
-    if (isLocal()) {
+    if (isLocal() || isSiren()) {
         return;
     }
     if (!canRegenerateLogin()) {
@@ -651,7 +668,7 @@ void MusicLibrary::pollQR(quint64 token, int count) {
 
 /** 退出只清理当前来源凭据与私有资料，并撤销该账号的全部异步更新。 */
 void MusicLibrary::logout() {
-    if (isLocal()) {
+    if (isLocal() || isSiren()) {
         return;
     }
     const auto clearSelection = selectedLane > 0 || privateSelection;

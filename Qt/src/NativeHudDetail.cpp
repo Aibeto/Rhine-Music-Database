@@ -116,7 +116,7 @@ void NativeHud::detail(double width, double opacity) {
         card.quality = quality == "standard" ? "标准" : "高品质";
     }
     card.primaryActions = {{"▶ 播放歌曲", "music:play"}, {}, {}};
-    if (music.canMutate("/like")) {
+    if (music.canMutate("/like") && (!music.isSiren() || item["kind"] == "song")) {
         bool liked = (music.likedIDs && MusicData::indexOf(*music.likedIDs, item["id"]) >= 0) ||
                      MusicData::indexOfId(music.lists[1], item["id"].toString()) >= 0;
         QString label = liked ? "♥ 已喜欢" : "♡ 喜欢";
@@ -439,7 +439,7 @@ void NativeHud::container(double width, double opacity) {
         }
         card.subscribe = {label, "music:subscribe", subscribed};
     }
-    if (!music.isLocal() && !item["virtual"].toBool()) {
+    if (!music.isLocal() && !item["virtual"].toBool() && !item["localCollection"].toBool()) {
         card.source = {music.providerName() + " ↗", "music:source"};
     }
     if (albums && music.directory && music.directory->albumsMore) {

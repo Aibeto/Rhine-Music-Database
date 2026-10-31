@@ -17,6 +17,9 @@ QString MusicApi::providerName(const QString &provider) {
     if (provider == "kugou") {
         return QStringLiteral("酷狗音乐");
     }
+    if (provider == "siren") {
+        return QStringLiteral("塞壬唱片");
+    }
     return QStringLiteral("网易云音乐");
 }
 

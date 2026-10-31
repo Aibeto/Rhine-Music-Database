@@ -19,6 +19,7 @@ const OPERATIONS = new Set([
     'playback',
     'preview',
     'trackPage',
+    'catalog',
     'discover',
     'categories',
     'lyrics',
@@ -46,7 +47,7 @@ export async function dispatch(message, request) {
     const [, prefix, provider, operation] = String(message.route).split('/');
     if (
         prefix !== 'native' ||
-        !['netease', 'qq', 'kugou'].includes(provider) ||
+        !['netease', 'qq', 'kugou', 'siren'].includes(provider) ||
         !OPERATIONS.has(operation) ||
         !Array.isArray(message.params?.args)
     ) {
@@ -112,6 +113,10 @@ export async function dispatch(message, request) {
         api = new QQAPI(base);
     } else if (provider === 'kugou') {
         api = new KugouAPI(base);
+    } else if (provider === 'siren') {
+        // 塞壬模块
+        const { SirenAPI } = await import('./siren.mjs');
+        api = new SirenAPI(base);
     }
     if (operation !== 'lyrics' && typeof api[operation] !== 'function') {
         return { body: { code: 400, message: '此来源不支持该接口' }, cookies: [] };

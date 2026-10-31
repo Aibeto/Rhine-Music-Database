@@ -295,8 +295,9 @@ bool AudioPlayer::load(QString input, bool offline, bool alternative, QString pr
     const auto host = url.host();
     const bool qq = provider == "qq" && (host == "qqmusic.qq.com" || host.endsWith(".qqmusic.qq.com"));
     const bool kugou = provider == "kugou" && (host.endsWith(".kugou.com") || host.endsWith(".kugou.net"));
+    const bool siren = provider == "siren" && (host == "hycdn.cn" || host.endsWith(".hycdn.cn"));
     const bool trusted =
-        qq || kugou ||
+        qq || kugou || siren ||
         (provider == "netease" && (host == "music.126.net" || host.endsWith(".music.126.net") ||
                                    host == "music.163.com" || host.endsWith(".music.163.com")));
     const QStringList providers{"qq.com", "gtimg.com", "kuwo.cn", "kugou.com", "migu.cn"};
@@ -325,7 +326,7 @@ bool AudioPlayer::load(QString input, bool offline, bool alternative, QString pr
     } else if (url.scheme() == "http") {
         sourceKind = 2;
     }
-    sourceProvider = QStringList{"other", "netease", "qq", "kugou", "local"}.indexOf(provider);
+    sourceProvider = QStringList{"other", "netease", "qq", "kugou", "local", "siren"}.indexOf(provider);
     sourceProvider = std::max(0, sourceProvider);
     decodedBuffers = 0;
     decodedBytes = 0;

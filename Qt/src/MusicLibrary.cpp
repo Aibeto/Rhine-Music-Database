@@ -17,14 +17,22 @@ MusicLibrary::MusicLibrary(Host *host, const QJsonObject &content, QObject *pare
     : QObject(parent), host(host), api(host), player(host, &api), m_identityApi(host) {
     kugouEdition = host->preference("kugou-edition") == "lite" ? "lite" : "standard";
     provider = host->preference("provider");
-    if (!QStringList{"netease", "qq", "kugou", "local"}.contains(provider)) {
+    if (!QStringList{"netease", "qq", "kugou", "local", "siren"}.contains(provider)) {
         provider = "netease";
     }
     if (provider == "local" && !PlatformFeatures::LocalMusic) {
         provider = "netease";
     }
+    if (provider == "siren") {
+        columns = {"搜索结果", "喜欢的歌曲", "我的歌单", "全部歌曲", "全部专辑"};
+        collections = std::make_unique<LocalCollections>(provider, QString(), this);
+        reloadSirenCollections();
+    }
     api.provider = provider;
     host->setProvider(provider);
+    if (isSiren()) {
+        loadSirenCatalog();
+    }
     for (const auto &source : {"netease", "qq"}) {
         identityNames[source] = host->preference("welcome-name-" + QString::fromUtf8(source));
     }
@@ -122,6 +130,24 @@ QString MusicLibrary::sourceMessage(int lane) const {
     if (provider == "kugou" && lane == 4) {
         return QStringLiteral("此渠道暂不支持收藏专辑");
     }
+    if (isSiren()) {
+        if (sirenCatalogLoading) {
+            return QStringLiteral("正在读取塞壬唱片曲库…");
+        }
+        if (personalLoading) {
+            return QStringLiteral("正在读取") + columns[lane] + QStringLiteral("，请稍候…");
+        }
+        if (!m_sourceErrors[lane].isEmpty()) {
+            return m_sourceErrors[lane] + QStringLiteral("，可点击加载更多重试");
+        }
+        if (lane == 1) {
+            return QStringLiteral("暂无喜欢的歌曲，在歌曲详情或播放栏点击红心即可加入");
+        }
+        if (lane == 2) {
+            return QStringLiteral("暂无本地歌单，点击上方“创建歌单”开始整理");
+        }
+        return QStringLiteral("暂无") + columns[lane];
+    }
     if (restoringAccount) {
         return QStringLiteral("正在恢复") + providerName() + QStringLiteral("登录，请稍候…");
     }
@@ -145,6 +171,9 @@ QString MusicLibrary::accountKey() const {
 }
 
 QString MusicLibrary::identityName() const {
+    if (isSiren()) {
+        return {};
+    }
     for (const auto &source : {"netease", "qq", "kugou"}) {
         if (!identityNames.value(source).isEmpty()) {
             return identityNames.value(source);
@@ -455,6 +484,10 @@ void MusicLibrary::search(QString text, QString kind, bool more) {
             QString::fromUtf8(
                 QJsonDocument(QJsonArray::fromStringList(searchHistory)).toJson(QJsonDocument::Compact)));
     }
+    if (isSiren()) {
+        searchSirenLocal(query, searchKind, start, more);
+        return;
+    }
     searchLoading = true;
     status = QStringLiteral("正在检索…");
     changed();
@@ -495,7 +528,7 @@ void MusicLibrary::search(QString text, QString kind, bool more) {
 void MusicLibrary::suggest(QString text) {
     const auto token = ++m_suggestGeneration;
     suggestions.clear();
-    if (text.trimmed().isEmpty() || provider == "kugou" || isLocal()) {
+    if (text.trimmed().isEmpty() || provider == "kugou" || isLocal() || isSiren()) {
         return;
     }
     const auto qq = provider == "qq";
@@ -529,7 +562,7 @@ void MusicLibrary::showSource(int lane) {
         changed();
         return;
     }
-    privateSelection = lane > 0 && !isLocal();
+    privateSelection = lane > 0 && !isLocal() && !isSiren();
     if (directory) {
         leaveDirectory(false);
     }
@@ -538,7 +571,11 @@ void MusicLibrary::showSource(int lane) {
     const auto physical = physicalSlots[lane].value(rowMemory[lane], -1);
     emit selectionRequested(physical, {});
     observe(physical);
-    if (lane > 0 && !isLocal()) {
+    if (isSiren()) {
+        if (lane > 0 && lists[lane].isEmpty()) {
+            loadMoreSource(lane);
+        }
+    } else if (lane > 0 && !isLocal()) {
         if (restoringAccount) {
             loadMoreSource(lane);
         } else if (uid.isEmpty()) {
@@ -703,6 +740,14 @@ void MusicLibrary::loadMoreSource(int lane) {
         return;
     }
     if (lane < 0 || lane >= 5) {
+        return;
+    }
+    if (isSiren()) {
+        if (lane == 0) {
+            search(keyword, {}, true);
+        } else {
+            loadSirenSource(lane);
+        }
         return;
     }
     if (provider == "kugou" && lane == 4) {
@@ -948,6 +993,13 @@ MusicLibrary::QueueSource MusicLibrary::directorySource() const {
         }
         return source;
     }
+    if (isSiren() && selectedLane == 3) {
+        source.items = lists[3];
+        for (const auto &value : lists[3]) {
+            source.ids.append(value.toObject()["id"]);
+        }
+        return source;
+    }
     if (selectedLane == 1) {
         source.items = lists[1];
         if (likedIDs) {
@@ -959,11 +1011,11 @@ MusicLibrary::QueueSource MusicLibrary::directorySource() const {
 
 /** 一键播放 */
 void MusicLibrary::playDirectory() {
-    if (!directory && selectedLane != 1) {
+    if (!directory && selectedLane != 1 && !(isSiren() && selectedLane == 3)) {
         return;
     }
     // 补全喜欢的歌曲后再播放
-    if (!directory && !isLocal() && hasMore[1]) {
+    if (!directory && selectedLane == 1 && !isLocal() && hasMore[1]) {
         m_playLiked = true;
         loadMoreSource(1);
         return;
@@ -1017,6 +1069,9 @@ QString MusicLibrary::sourceURL(QJsonObject value) const {
     }
     if (source == "kugou") {
         return QStringLiteral("https://www.kugou.com/");
+    }
+    if (source == "siren") {
+        return QStringLiteral("https://monster-siren.hypergryph.com/music");
     }
     const QHash<QString, QString> paths{{"song", "songDetail"},
                                         {"album", "albumDetail"},

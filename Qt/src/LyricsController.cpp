@@ -1,5 +1,7 @@
 #include "LyricsController.h"
+#include <QDateTime>
 #include <QJsonDocument>
+#include <QTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QPointer>
@@ -8,7 +10,7 @@
 #include <cmath>
 
 namespace {
-const QStringList PROVIDERS{"netease", "qq", "kugou"};
+const QStringList PROVIDERS{"netease", "qq", "kugou", "siren"};
 constexpr int CACHE_LIMIT = 12;
 
 QString comparable(QString value) {
@@ -101,10 +103,14 @@ bool LyricsController::validDocument(const QJsonObject &document) {
 
 bool LyricsController::sameRecording(const QJsonObject &track, const QJsonObject &candidate) {
     const auto sourceArtists = artists(track);
-    return comparable(track["title"].toString()) == comparable(candidate["title"].toString()) &&
-           !sourceArtists.isEmpty() && sourceArtists == artists(candidate) &&
-           recordingVersion(track) == recordingVersion(candidate) && track["duration"].toDouble() > 0 &&
-           candidate["duration"].toDouble() > 0 &&
+    const bool sameTitle = comparable(track["title"].toString()) == comparable(candidate["title"].toString());
+    const bool sameVersion = recordingVersion(track) == recordingVersion(candidate);
+    if (track["provider"] == "siren") {
+        // 检查标题与版本一致即可
+        return sameTitle && sameVersion;
+    }
+    return sameTitle && !sourceArtists.isEmpty() && sourceArtists == artists(candidate) && sameVersion &&
+           track["duration"].toDouble() > 0 && candidate["duration"].toDouble() > 0 &&
            std::abs(track["duration"].toDouble() - candidate["duration"].toDouble()) <= 2000;
 }
 
@@ -145,6 +151,9 @@ void LyricsController::clearCache() {
         return;
     }
     m_cache = {};
+    m_lyricsRetryAfter.clear();
+    m_neteaseLyricsBlockedUntil = 0;
+    m_lastNeteaseLyricRequest = 0;
     persist();
 }
 
@@ -254,11 +263,35 @@ void LyricsController::load(const QJsonObject &track, bool retry) {
     }
     if (!retry) {
         for (const auto &entry : m_cache) {
-            if (entry.toObject()["key"].toString() == currentKey) {
-                accept(entry.toObject()["document"].toObject(), track);
-                return;
+            if (entry.toObject()["key"].toString() != currentKey) {
+                continue;
             }
+            const auto document = entry.toObject()["document"].toObject();
+            // 塞壬歌词歌词为网易云；旧版本缓存过的官网歌词直接忽略。
+            if (track["provider"] == "siren" && document["source"].toString() == "siren") {
+                continue;
+            }
+            accept(document, track);
+            return;
         }
+    }
+    if (track["provider"] == "siren") {
+        if (m_lyricsRetryAfter.value(currentKey) > QDateTime::currentMSecsSinceEpoch()) {
+            status = "empty";
+            message = QStringLiteral("暂无歌词");
+            emit changed();
+            return;
+        }
+        status = "loading";
+        message = QStringLiteral("正在从网易云读取歌词…");
+        emit changed();
+        auto pending = std::make_shared<Load>();
+        pending->generation = m_generation;
+        pending->track = track;
+        pending->needsCover = track["cover"].toString().isEmpty();
+        pending->lyricSource = "netease";
+        supplement(pending);
+        return;
     }
     status = "loading";
     message = QStringLiteral("正在读取歌词…");
@@ -266,6 +299,7 @@ void LyricsController::load(const QJsonObject &track, bool retry) {
     auto pending = std::make_shared<Load>();
     pending->generation = m_generation;
     pending->track = track;
+    pending->needsCover = track["cover"].toString().isEmpty();
     api(track["provider"].toString("netease"))
         .call(
             "lyrics", {track},
@@ -286,8 +320,15 @@ void LyricsController::load(const QJsonObject &track, bool retry) {
 
 void LyricsController::supplement(const Pending &pending) {
     const auto source = pending->track["provider"].toString("netease");
+    if (source == "siren" && pending->lyricSource == "netease" &&
+        m_neteaseLyricsBlockedUntil > QDateTime::currentMSecsSinceEpoch()) {
+        pending->networkFailed = true;
+        finish(pending);
+        return;
+    }
     while (pending->provider < PROVIDERS.size() &&
            (PROVIDERS[pending->provider] == source ||
+            (PROVIDERS[pending->provider] == "siren" && source != "siren") ||
             (!pending->lyricSource.isEmpty() && PROVIDERS[pending->provider] != pending->lyricSource))) {
         ++pending->provider;
     }
@@ -308,12 +349,29 @@ void LyricsController::search(const Pending &pending) {
         supplement(pending);
         return;
     }
+    if (pending->track["provider"].toString() == "siren" && PROVIDERS[pending->provider] == "netease") {
+        const auto now = QDateTime::currentMSecsSinceEpoch();
+        const auto wait = 1500 - (now - m_lastNeteaseLyricRequest);
+        if (wait > 0) {
+            QTimer::singleShot(int(wait), this, [this, pending] {
+                if (valid(pending)()) {
+                    search(pending);
+                }
+            });
+            return;
+        }
+        m_lastNeteaseLyricRequest = now;
+    }
     api(PROVIDERS[pending->provider])
         .call(
             "search", {pending->queries[pending->query], "song", 0},
             [this, pending](MusicReply result) {
                 if (!result.ok()) {
                     pending->networkFailed = true;
+                    if (pending->track["provider"].toString() == "siren" &&
+                        PROVIDERS[pending->provider] == "netease") {
+                        m_neteaseLyricsBlockedUntil = QDateTime::currentMSecsSinceEpoch() + 60000;
+                    }
                     ++pending->provider;
                     supplement(pending);
                     return;
@@ -359,6 +417,10 @@ void LyricsController::fetchCandidate(const Pending &pending) {
             [this, pending, candidate](MusicReply result) {
                 if (!result.ok()) {
                     pending->networkFailed = true;
+                    if (pending->track["provider"].toString() == "siren" &&
+                        PROVIDERS[pending->provider] == "netease") {
+                        m_neteaseLyricsBlockedUntil = QDateTime::currentMSecsSinceEpoch() + 60000;
+                    }
                     ++pending->provider;
                     supplement(pending);
                     return;
@@ -391,8 +453,17 @@ void LyricsController::finish(const Pending &pending) {
         return;
     }
     status = pending->networkFailed ? "error" : "empty";
-    message = pending->networkFailed ? QStringLiteral("歌词暂不可用，点击重试")
-                                     : QStringLiteral("暂无歌词 / 纯音乐");
+    if (pending->track["provider"] == "siren") {
+        const auto delay = pending->networkFailed ? 60000 : 10 * 60 * 1000;
+        m_lyricsRetryAfter.insert(trackKey(pending->track), QDateTime::currentMSecsSinceEpoch() + delay);
+    }
+    if (pending->networkFailed) {
+        message = pending->track["provider"].toString() == "siren"
+                      ? QStringLiteral("暂无歌词（网易云暂时限流）")
+                      : QStringLiteral("歌词暂不可用，点击重试");
+    } else {
+        message = QStringLiteral("暂无歌词 / 纯音乐");
+    }
     emit changed();
 }
 
@@ -413,6 +484,7 @@ void LyricsController::accept(QJsonObject document, const QJsonObject &track) {
         }
     }
     m_cache = cache;
+    m_lyricsRetryAfter.remove(currentKey);
     persist();
     emit changed();
 }

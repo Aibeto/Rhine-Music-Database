@@ -67,8 +67,14 @@ void NativeHud::openModal(QString kind) {
         QStringList{"login", "quality", "playlist-picker", "playlist-form"}.contains(kind)) {
         return;
     }
+    if (m_music->isSiren() && kind == "login") {
+        return;
+    }
     if (kind == "discover" && m_music->isLocal()) {
         kind = "local";
+    }
+    if (kind == "discover" && m_music->isSiren()) {
+        return;
     }
     ++m_searchGeneration;
     if (m_scene.pointer) {
@@ -646,6 +652,9 @@ void NativeHud::action(QString value) {
         return;
     }
     if (value == "discover") {
+        if (music.isSiren()) {
+            return;
+        }
         openModal("discover");
         if (!music.isLocal()) {
             music.discover->load();

@@ -140,7 +140,10 @@ set(RHINE_APP_SOURCES
     Qt/src/MusicData.h
     Qt/src/LocalMusicLibrary.cpp
     Qt/src/LocalMusicLibrary.h
+    Qt/src/LocalCollections.cpp
+    Qt/src/LocalCollections.h
     Qt/src/MusicLocal.cpp
+    Qt/src/MusicSiren.cpp
     Qt/src/NativeHudLocal.cpp
     Qt/src/MusicLibrary.cpp
     Qt/src/MusicLibrary.h

@@ -23,8 +23,8 @@ void NativeHud::playerBar(double x, double y, double width) {
     const auto liked = m_music->songLiked(player.current);
     state.liked = liked.value_or(false);
     state.likeKnown = liked.has_value();
-    state.canLike = state.hasTrack && !m_music->uid.isEmpty() && !m_music->writeLoading &&
-                    m_music->canMutate("/like") &&
+    state.canLike = state.hasTrack && (m_music->isSiren() || !m_music->uid.isEmpty()) &&
+                    !m_music->writeLoading && m_music->canMutate("/like") &&
                     player.current.value("provider").toString(m_music->provider) == m_music->provider;
     state.seekable = player.state["seekable"].toBool();
     state.applicationVolume = PlatformFeatures::ApplicationVolume;

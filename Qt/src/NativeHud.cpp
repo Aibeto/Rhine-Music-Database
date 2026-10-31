@@ -311,17 +311,20 @@ void NativeHud::navigation(double width) {
     const auto x = navigationLeft(width) + 210;
     if (m_music->isLocal()) {
         control("文件夹管理 ＋", x - 210, 118, 184, "discover");
-    } else {
+    } else if (!m_music->isSiren()) {
         control("发现音乐 ↗", x - 210, 118, 184, "discover");
     }
     control("音乐检索  /", x, 118, 184, "search");
-    control(m_music->isLocal() ? "本地曲库" : "＋ 我的音乐", x + 200, 118, 184, "saved");
+    control(m_music->isLocal() ? "本地曲库" : (m_music->isSiren() ? "＋ 塞壬曲库" : "＋ 我的音乐"), x + 200,
+            118, 184, "saved");
     control(m_host->updater.available() ? "设置 · 更新" : "设置", x + 400, 118, 120, "settings");
 }
 void NativeHud::footer(double width) {
     fill(59, 971, 5, 5, {119.0 / 255, 123.0 / 255, 96.0 / 255, 1});
     QString session = m_music->isLocal() ? "LOCAL LIBRARY" : "GUEST SESSION";
-    if (!m_music->uid.isEmpty()) {
+    if (m_music->isSiren()) {
+        session = "SIREN RECORDS";
+    } else if (!m_music->uid.isEmpty()) {
         session = "NETEASE SESSION";
         if (m_music->provider == "qq") {
             session = "QQ SESSION";
@@ -349,9 +352,9 @@ void NativeHud::empty(double width) {
         action = "music:directory-info";
     } else if (music.selectedLane > 0) {
         title = music.sourceLoading() ? QStringLiteral("正在同步音乐资料…") : music.libraryName();
-        label = "查看我的音乐 →";
+        label = music.isSiren() ? QStringLiteral("查看曲库 →") : QStringLiteral("查看我的音乐 →");
         action = "saved";
-        if (!music.isLocal() && music.uid.isEmpty() && !music.restoringAccount) {
+        if (!music.isLocal() && !music.isSiren() && music.uid.isEmpty() && !music.restoringAccount) {
             title = "登录后查看";
             label = "登录" + music.providerName() + " →";
             action = "music:login";
@@ -383,6 +386,9 @@ void NativeHud::archive(double width) {
              QStringList{"playlist", "album", "folder"}.contains(music.directory->item["kind"].toString())) ||
             (!music.directory && music.selectedLane == 1)) {
             control("播放全部 →", 59, music.directory ? 319 : 211, 310, "music:play-loaded");
+        } else if (!music.directory && music.isSiren() && music.selectedLane == 3) {
+            control("播放全部 →", 59, 211, 310, "music:play-loaded");
+            control("在资料库中打开 →", 59, 265, 310, "music:open-all-siren");
         }
         const bool showTrackList = trackListMode && item["kind"] == "song";
         if (!showTrackList) {

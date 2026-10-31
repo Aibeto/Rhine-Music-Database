@@ -89,6 +89,12 @@ async function main() {
         assert.equal(nativeSearch.body.code, 200);
         assert.deepEqual(nativeSearch.body.value.items, []);
         assert.equal(nativeSearch.body.value.total, 0);
+        // 塞壬唱片使用独立 fetch 目录
+        const sirenSearch = await request('native-siren', '/native/siren/search', {
+            args: ['', 'album', 0],
+        });
+        assert.equal(sirenSearch.body.code, 200, JSON.stringify(sirenSearch.body));
+        assert.equal(sirenSearch.body.value.items[0].title, '本地专辑');
         const audio = await request('audio', '/song/url/v1', {
             id: '1',
             level: 'lossless',

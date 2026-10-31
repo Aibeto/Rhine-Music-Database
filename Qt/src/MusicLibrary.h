@@ -1,6 +1,7 @@
 #pragma once
 #include "MusicPlayer.h"
 #include "LocalMusicLibrary.h"
+#include "LocalCollections.h"
 #include <QHash>
 #include <QSet>
 #include <array>
@@ -44,11 +45,20 @@ class MusicLibrary : public QObject {
     bool isLocal() const {
         return provider == "local";
     }
+    bool isSiren() const {
+        return provider == "siren";
+    }
     void refreshLocal();
+    void loadSirenSource(int lane);
+    void loadSirenCatalog();
+    void searchSirenLocal(QString query, QString kind, int start, bool more);
+    bool openSirenAllSongs();
     void clearCaches();
     void searchLocal(QString text, QString kind = {});
     void importLocal(const QStringList &paths);
     std::unique_ptr<LocalMusicLibrary> local;
+    std::unique_ptr<LocalCollections> collections;
+    void reloadSirenCollections();
     void observe(int selected);
     void choose(QJsonObject value, bool containerDetails = false,
                 std::optional<bool> showDetails = std::nullopt);
@@ -83,10 +93,10 @@ class MusicLibrary : public QObject {
     QString accountKey() const;
     QString identityName() const;
     bool editable() const {
-        return provider == "netease" || provider == "qq";
+        return provider == "netease" || provider == "qq" || provider == "siren";
     }
     bool sourceLoading() const {
-        return restoringAccount || searchLoading || personalLoading;
+        return restoringAccount || searchLoading || personalLoading || sirenCatalogLoading;
     }
     QString sourceMessage(int lane) const;
     bool restoringAccount = false;
@@ -130,6 +140,11 @@ class MusicLibrary : public QObject {
     std::array<QJsonArray, 5> lists;
     std::array<int, 5> totals{};
     std::array<int, 5> offsets{};
+    std::array<int, 5> sirenOffsets{};
+    QJsonArray sirenSongs;
+    QJsonArray sirenAlbums;
+    bool sirenCatalogLoading = false;
+    bool m_pendingSirenSearch = false;
     std::array<bool, 5> hasMore{true, true, true, true, true};
     std::array<int, 5> rowMemory{};
     std::array<QVector<int>, 5> physicalSlots;

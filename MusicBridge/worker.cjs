@@ -437,7 +437,7 @@ readline
             message = JSON.parse(line);
             const collect =
                 message._collectPlaybackDiagnostics === true &&
-                /^\/native\/(netease|qq|kugou)\/(playback|preview)$/.test(message.route);
+                /^\/native\/(netease|qq|kugou|siren)\/(playback|preview)$/.test(message.route);
             const events = collect ? [] : undefined;
             if (events) {
                 events.started = performance.now();

@@ -184,8 +184,30 @@ bool MusicLibrary::restoreSessionState(const QJsonObject &saved) {
     } else if (saved["detailLoading"].toBool() && !current.isEmpty()) {
         choose(current, directoryInfo, wantsSongDetails);
     }
+    if (isSiren()) {
+        if (!collections) {
+            collections = std::make_unique<LocalCollections>(provider, QString(), this);
+        }
+        // 必须在恢复 likedCursor 之后重建：本地列表从磁盘重建，旧游标不能沿用。
+        reloadSirenCollections();
+        if (!sirenSongs.isEmpty()) {
+            lists[3] = sirenSongs;
+            lists[4] = sirenAlbums;
+            totals[3] = int(lists[3].size());
+            totals[4] = int(lists[4].size());
+            hasMore[3] = false;
+            hasMore[4] = false;
+        }
+        for (int lane = 3; lane <= 4; ++lane) {
+            sirenOffsets[lane] = int(lists[lane].size());
+        }
+    }
     if (!directory && selectedLane > 0 && lists[selectedLane].isEmpty()) {
-        m_pendingLane = selectedLane;
+        if (isSiren()) {
+            loadMoreSource(selectedLane);
+        } else {
+            m_pendingLane = selectedLane;
+        }
     }
     return true;
 }

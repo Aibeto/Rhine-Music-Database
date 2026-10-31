@@ -16,6 +16,11 @@ QJsonArray without(const QJsonArray &values, const QString &field, const QJsonVa
 }
 
 bool MusicLibrary::canMutate(const QString &route) const {
+    if (isSiren()) {
+        return QStringList{"/like", "/playlist/create", "/playlist/name/update", "/playlist/delete",
+                           "/playlist/tracks"}
+            .contains(route);
+    }
     if (provider == "netease") {
         return true;
     }
@@ -40,6 +45,10 @@ bool MusicLibrary::canMutate(const QString &route) const {
 }
 
 bool MusicLibrary::canEditPlaylist(const QJsonObject &value) const {
+    if (isSiren()) {
+        return collections && value["kind"] == "playlist" &&
+               value["creatorID"].toString() == collections->creatorID();
+    }
     // “我喜欢的音乐”由账号维护，不能改名、删除或按普通歌单处理。
     if (value["special"].toBool()) {
         return false;
@@ -93,8 +102,13 @@ void MusicLibrary::resetLikeState() {
 
 /** 读取当前账号下的歌曲喜欢状态 */
 std::optional<bool> MusicLibrary::songLiked(const QJsonObject &value) const {
-    if (uid.isEmpty() || value["kind"] != "song" || value.value("provider").toString(provider) != provider ||
-        !canMutate("/like")) {
+    if (value["kind"] != "song" || value.value("provider").toString(provider) != provider) {
+        return std::nullopt;
+    }
+    if (isSiren()) {
+        return likedIDs ? std::optional<bool>(MusicData::indexOf(*likedIDs, value["id"]) >= 0) : std::nullopt;
+    }
+    if (uid.isEmpty() || !canMutate("/like")) {
         return std::nullopt;
     }
     if (provider == "qq") {
@@ -113,6 +127,9 @@ std::optional<bool> MusicLibrary::songLiked(const QJsonObject &value) const {
 
 /** 为正在播放的歌曲补齐喜欢状态 */
 void MusicLibrary::refreshPlaybackLike() {
+    if (isSiren()) {
+        return;
+    }
     const auto track = player.current;
     if (writeLoading || uid.isEmpty() || track["kind"] != "song" ||
         track.value("provider").toString(provider) != provider || !canMutate("/like")) {
@@ -149,6 +166,25 @@ void MusicLibrary::refreshPlaybackLike() {
 /** 写操作串行化并核对账号代数；成功后才更新本地集合和失效元数据缓存。 */
 void MusicLibrary::mutate(QString route, QJsonObject values, std::function<void(QJsonObject)> success,
                           Completion done) {
+    if (isSiren() && route == "/playlist/delete") {
+        const auto id = values["id"].toString();
+        const bool ok = collections && collections->deletePlaylist(id);
+        if (ok) {
+            lists[2] = collections->playlists();
+            totals[2] = int(lists[2].size());
+            status = QStringLiteral("已删除歌单");
+            if (success) {
+                success({{"id", id}});
+            }
+        } else {
+            status = QStringLiteral("无法删除歌单");
+        }
+        changed();
+        if (done) {
+            done(ok);
+        }
+        return;
+    }
     if (!canMutate(route) || writeLoading || uid.isEmpty()) {
         if (!editable()) {
             status = providerName() + QStringLiteral("当前支持读取与播放");
@@ -214,6 +250,39 @@ void MusicLibrary::like(QJsonObject value) {
         value = current;
     }
     if (value["kind"] != "song") {
+        return;
+    }
+    if (isSiren()) {
+        if (!collections) {
+            return;
+        }
+        const auto id = value["id"].toString();
+        const auto before = collections->likedIDs();
+        const bool enabled = !collections->isLiked(id);
+        if (!collections->setLiked(id, enabled)) {
+            status = QStringLiteral("无法写入本地收藏");
+            changed();
+            return;
+        }
+        const auto ids = collections->likedIDs();
+        likedIDs = QJsonArray::fromStringList(ids);
+        const int oldTotal = int(before.size());
+        if (enabled) {
+            if (likedCursor >= oldTotal) {
+                lists[1] = MusicData::unique(lists[1], {value});
+                likedCursor = std::min(likedCursor + 1, int(ids.size()));
+            }
+        } else {
+            const int index = MusicData::indexOfId(lists[1], id);
+            lists[1] = without(lists[1], "id", id);
+            if (index >= 0 && index < likedCursor) {
+                --likedCursor;
+            }
+        }
+        totals[1] = int(ids.size());
+        hasMore[1] = likedCursor < totals[1];
+        status = enabled ? QStringLiteral("已加入喜欢的歌曲") : QStringLiteral("已从喜欢的歌曲移除");
+        changed();
         return;
     }
     if (uid.isEmpty()) {
@@ -352,6 +421,42 @@ void MusicLibrary::playlistForm(QString kind, QString name, QString id, Completi
         }
         return;
     }
+    if (isSiren()) {
+        if (!collections) {
+            if (done) {
+                done(false);
+            }
+            return;
+        }
+        bool ok = false;
+        if (kind == "create") {
+            ok = !collections->createPlaylist(name).isEmpty();
+            if (ok) {
+                lists[2] = collections->playlists();
+                totals[2] = int(lists[2].size());
+                status = QStringLiteral("已创建歌单：") + name;
+            } else {
+                status = QStringLiteral("无法创建歌单，请检查名称或数量上限");
+            }
+        } else if (kind == "rename") {
+            ok = collections->renamePlaylist(id, name);
+            if (ok) {
+                lists[2] = collections->playlists();
+                totals[2] = int(lists[2].size());
+                if (directory && directory->item["id"] == id) {
+                    directory->item["title"] = name;
+                }
+                status = QStringLiteral("已重命名歌单");
+            } else {
+                status = QStringLiteral("无法重命名歌单");
+            }
+        }
+        changed();
+        if (done) {
+            done(ok);
+        }
+        return;
+    }
     if (kind == "rename" && MusicData::indexOfId(lists[2], id) < 0 &&
         !(directory && directory->item["id"] == id && directory->item["creatorID"] == uid)) {
         status = QStringLiteral("只能编辑自己创建的歌单");
@@ -398,6 +503,68 @@ void MusicLibrary::playlistTrack(QString id, QJsonObject value, bool remove, Com
     if (value["kind"] != "song") {
         if (done) {
             done(false);
+        }
+        return;
+    }
+    if (isSiren()) {
+        if (!collections) {
+            if (done) {
+                done(false);
+            }
+            return;
+        }
+        const auto songID = value["id"].toString();
+        const bool existed = collections->tracks(id).contains(songID);
+        const bool ok = remove ? collections->removeTrack(id, songID) : collections->addTrack(id, songID);
+        if (!ok) {
+            status = QStringLiteral("无法写入本地歌单");
+            changed();
+            if (done) {
+                done(false);
+            }
+            return;
+        }
+        const auto previous = lists[2];
+        auto updated = collections->playlists();
+        for (qsizetype row = 0; row < updated.size(); ++row) {
+            auto item = updated.at(row).toObject();
+            for (const auto &old : previous) {
+                const auto object = old.toObject();
+                if (object["id"] == item["id"] && !object["cover"].toString().isEmpty()) {
+                    item["cover"] = object["cover"];
+                    break;
+                }
+            }
+            updated.replace(row, item);
+        }
+        lists[2] = updated;
+        totals[2] = int(lists[2].size());
+        if (directory && directory->item["id"] == id && (remove ? existed : !existed)) {
+            const auto contained = MusicData::indexOfId(directory->songs, songID) >= 0;
+            const auto songs = remove ? without(directory->songs, "id", songID)
+                                      : MusicData::unique(directory->songs, {value});
+            directory->updateSongs(songs, directory->sortField);
+            if (remove) {
+                const auto old = MusicData::indexOf(directory->ids, songID);
+                if (old >= 0 && old < directory->cursor) {
+                    --directory->cursor;
+                }
+                directory->ids = without(directory->ids, {}, songID);
+                directory->item["trackCount"] = std::max(0, directory->item["trackCount"].toInt() - 1);
+                directory->index = std::min(directory->index, std::max(0, int(directory->songs.size()) - 1));
+            } else {
+                if (!contained) {
+                    directory->item["trackCount"] = directory->item["trackCount"].toInt() + 1;
+                }
+                if (MusicData::indexOf(directory->ids, songID) < 0) {
+                    directory->ids.append(songID);
+                }
+            }
+        }
+        status = remove ? QStringLiteral("已从歌单移除") : QStringLiteral("已加入歌单");
+        changed();
+        if (done) {
+            done(true);
         }
         return;
     }

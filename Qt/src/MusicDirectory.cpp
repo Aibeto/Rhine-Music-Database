@@ -96,6 +96,22 @@ void MusicLibrary::enterDirectory(QJsonObject value) {
         changed();
         return;
     }
+    if (isSiren() && value["kind"] == "playlist" && value["localCollection"].toBool()) {
+        next->ids = QJsonArray::fromStringList(collections ? collections->tracks(value["id"].toString())
+                                                           : QStringList{});
+        next->songs = {};
+        next->cursor = 0;
+        next->albumsMore = false;
+        next->item["trackCount"] = int(next->ids.size());
+        directoryLoading = false;
+        if (next->ids.isEmpty()) {
+            status = QStringLiteral("歌单暂无可读取曲目");
+            changed();
+        } else {
+            loadDirectoryPage(std::optional<int>(0));
+        }
+        return;
+    }
     api.call(
         "detail", {value},
         [this, next, value](MusicReply result) {
