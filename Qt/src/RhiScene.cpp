@@ -455,6 +455,7 @@ class Renderer {
     quint64 layoutsLive = 0;
     quint64 coverUploads = 0;
     quint64 drawCalls = 0;
+    quint64 skippedWithoutInstances = 0;
     QHash<QString, QRhiTexture *> labels, covers;
     QHash<qint64, QRhiTexture *> coverTextures;
     QRhiTexture *labelTexture = nullptr, *coverTexture = nullptr;
@@ -2543,15 +2544,17 @@ class Renderer {
                 groups.insert(key, index);
                 result.append(draw);
                 result.last().data["count"] = 0;
-                bytes.append(QByteArray());
                 // 材质插值每帧变化，但批次缓冲区按几何和槽位复用，不能按材质值反复创建。
                 slot = slotCounters[geometryKey]++;
+                // 三个账本按 **result 下标** 对齐：非新建分组的输入不再往里追加，
+                // 否则输入条数与结果条数一错位，池化就会拿到别人的实例字节。
+                bytes.append(QByteArray());
+                keys.append(RhineRender::BatchSlotKey{key.vertices, key.indices, key.start, key.count, key.side,
+                                                      key.order, key.label, key.cover, slot});
+                batched.append(true);
             } else {
                 index = group.value();
             }
-            keys.append(RhineRender::BatchSlotKey{key.vertices, key.indices, key.start, key.count, key.side,
-                                                  key.order, key.label, key.cover, slot});
-            batched.append(true);
             bytes[index].append(instances.value(data["id"].toInt()).bytes);
             result[index].data["count"] = result[index].data["count"].toInt() + data["count"].toInt();
         }
@@ -2561,7 +2564,7 @@ class Renderer {
             hotPath.batchBytes.fetch_add(quint64(chunk.size()));
         }
         for (int i = 0; i < result.size(); ++i) {
-            if (!batched[i]) {
+            if (!batched[i] || bytes[i].isEmpty()) {
                 continue;
             }
             if (instancePoolEnabled) {
@@ -2731,6 +2734,13 @@ class Renderer {
         for (const auto &item : items) {
             const auto &draw = *item.draw;
             const auto &data = draw.data;
+            // 池化与逐 draw buffer 的分工决定了这里必须拿到有效实例缓冲：nullptr 说明
+            // 批次账本和池镜像对不上（历史 bug 是账本按输入下标而不是结果下标追加）。
+            // 宁可这一帧少画一个批次，也不要把空指针交给 setVertexInput 直接崩掉。
+            if (!draw.instances) {
+                ++skippedWithoutInstances;
+                continue;
+            }
             if (item.pass != boundPass) {
                 cb->setGraphicsPipeline(item.pass);
                 ++pipelineBinds;
