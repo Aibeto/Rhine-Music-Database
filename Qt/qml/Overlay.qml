@@ -196,10 +196,10 @@ Item {
                 }
             }
         }
-        // 检索结果可滚动
+        // 检索与个人库
         MouseArea {
             id: searchScrollArea
-            visible: rhine.state.modal === "search"
+            visible: rhine.state.modal === "search" || rhine.state.modal === "saved"
             enabled: visible
             x: rhine.state.searchListX || 0
             y: (rhine.state.searchListY || 0) + (rhine.state.modalOffset || 0)
@@ -425,14 +425,14 @@ Item {
         width: searchInput.width
         height: searchInput.height
         color: rhine.state.dark ? "#ffffff" : "#141613"
-        // 检索条背景由原生面板绘制；个人库仍使用原来的轻遮罩。
-        opacity: rhine.state.modal === "search" ? 0 : (rhine.state.modalOpacity || 0) * 0.045
+        // 检索条背景由原生面板绘制；其他弹窗仍使用原来的轻遮罩。
+        opacity: (rhine.state.modal === "search" || rhine.state.modal === "saved") ? 0 : (rhine.state.modalOpacity || 0) * 0.045
     }
     TextInput {
         id: searchInput
         objectName: "musicSearchInput"
         verticalAlignment: TextInput.AlignVCenter
-        leftPadding: (rhine.state.modal === "search" ? 18 : 14) * overlay.stageScale
+        leftPadding: 18 * overlay.stageScale
         rightPadding: 14 * overlay.stageScale
         renderType: Text.NativeRendering
         visible: rhine.state.modal === "search" || rhine.state.modal === "saved"
@@ -443,7 +443,7 @@ Item {
         height: 54 * overlay.stageScale
         font.family: rhineFontFamily
         font.pixelSize: 22 * overlay.stageScale
-        color: rhine.state.modal === "search" ? (rhine.state.dark ? "#e9e7da" : "#222a25") : (rhine.state.dark ? "#ebebeb" : "#141613")
+        color: (rhine.state.modal === "search" || rhine.state.modal === "saved") ? (rhine.state.dark ? "#e9e7da" : "#222a25") : (rhine.state.dark ? "#ebebeb" : "#141613")
         opacity: rhine.state.modalOpacity || 0
         clip: true
         cursorVisible: activeFocus && !rhine.performance.idle
@@ -469,7 +469,7 @@ Item {
             font: searchInput.font
             leftPadding: searchInput.leftPadding
             verticalAlignment: Text.AlignVCenter
-            color: rhine.state.modal === "search" ? (rhine.state.dark ? "#a2aa9d" : "#626b60") : "#777777"
+            color: (rhine.state.modal === "search" || rhine.state.modal === "saved") ? (rhine.state.dark ? "#a2aa9d" : "#626b60") : "#777777"
         }
     }
     // 通用设置文本输入：位置由 Schema 行控制区提供，原生面板只负责背景与命中。

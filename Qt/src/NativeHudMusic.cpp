@@ -125,12 +125,12 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
     } else if (name == "hint") {
         query = decode(value.mid(11));
         listOffset = 0;
-        resetSearchView();
+        resetResultViews();
         music.search(query);
     } else if (name == "kind") {
         ++m_searchGeneration;
         listOffset = 0;
-        resetSearchView();
+        resetResultViews();
         activeGroup.clear();
         const auto kind = QStringList{"song", "album", "playlist", "artist"}.value(last, "song");
         const auto text = query.isEmpty() ? music.keyword : query;
@@ -145,7 +145,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         groupBy = QStringList{"none", "artist", "album"}.value(last, "none");
         activeGroup.clear();
         listOffset = 0;
-        resetSearchView();
+        resetResultViews();
     } else if (name == "expand") {
         ++m_searchGeneration;
         const auto lane = modal == "saved" ? musicCollection : 0;
@@ -155,7 +155,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
                                         [&key](const Row &row) { return row.value["key"] == key; });
         activeGroup = key;
         listOffset = 0;
-        resetSearchView();
+        resetResultViews();
         if (group != groups.cend()) {
             music.setGroupView(group->value["title"].toString(), group->indices, lane);
         }
@@ -164,7 +164,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         ++m_searchGeneration;
         activeGroup.clear();
         listOffset = 0;
-        resetSearchView();
+        resetResultViews();
     } else if (name == "artist") {
         music.openSongArtist(last);
         artistTab = "songs";
@@ -189,6 +189,7 @@ void NativeHud::musicAction(const QStringList &parts, const QString &value) {
         ++m_searchGeneration;
         musicCollection = last;
         listOffset = 0;
+        resetResultViews();
         if (music.lists[last].isEmpty()) {
             music.loadMoreSource(last);
         }

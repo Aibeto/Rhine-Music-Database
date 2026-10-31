@@ -90,12 +90,14 @@ class NativeHud : public QObject {
     QString themeMode;
     int listOffset = 0;
     int musicCollection = 1;
-    // 检索结果可滚动
-    static constexpr double SearchListTop = 328;
-    static constexpr double SearchListBottom = 758;
-    static constexpr double SearchRowHeight = 72;
+    // 检索与个人库共用同一结果视口和行高。
+    static constexpr double ResultListTop = 328;
+    static constexpr double ResultListBottom = 758;
+    static constexpr double ResultRowHeight = 72;
     double searchScroll = 0;
     int searchRowCount = 0;
+    double savedScroll = 0;
+    int savedRowCount = 0;
     // 通用文本设置的 QML 编辑浮层状态；清空 id 即隐藏。
     QString editingSettingId;
     QString editingSettingText;
@@ -175,6 +177,7 @@ class NativeHud : public QObject {
     quint64 m_searchGeneration = 0;
     // 首屏不足一屏时自动补页，记录上次自动补页后的条数，避免空页循环请求。
     int m_searchAutoFillSize = -1;
+    int m_savedAutoFillSize = -1;
     std::optional<Page> m_page;
     QString m_trackListScope;
     int m_trackListTarget = -1;
@@ -264,16 +267,25 @@ class NativeHud : public QObject {
     void loginPanel(double x, double y, double width);
     void libraryPanel(double x, double y, double width);
     void savedPanel(double x, double y, double width);
+    // 个人库沿用检索页的工具条、结果列表和页脚结构，外框几何仍由弹窗宿主决定。
+    void libraryToolbar(double x, double y, double width);
+    void libraryResultList(double x, double y, double width);
+    void libraryFooter(double x, double y, double width);
+    void libraryOutlineButton(const QRectF &rect, const QString &label, const QString &action, double size,
+                              bool plus = false);
+    double libraryToolbarActionWidth() const;
+    double savedScrollMaximum() const;
+    void ensureSavedFilled();
     // 检索面板按工具条、结果列表和页脚拆分，外框几何仍由弹窗宿主决定。
     void searchPanel(double x, double y, double width);
     void searchToolbar(double x, double y, double width);
     void searchResultList(double x, double y, double width);
-    void searchResultRow(const Row &entry, double x, double y, double width, const QString &query);
+    void resultListRow(const Row &entry, double x, double y, double width, const QString &query, int lane);
     void searchTitle(const QString &title, const QString &query, double x, double y, double size,
                      double width);
     void searchFooter(double x, double y, double width);
     double searchScrollMaximum() const;
-    void resetSearchView();
+    void resetResultViews();
     void ensureSearchFilled();
     void discoverPanel(double x, double y, double width);
     void localPanel(double x, double y, double width);

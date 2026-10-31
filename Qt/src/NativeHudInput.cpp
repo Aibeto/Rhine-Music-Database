@@ -71,14 +71,14 @@ void NativeHud::wheel(double x, double y, double delta, std::optional<int> steps
             const auto bounds = modalBounds(width);
             y -= motion.offset;
             const auto inside = x >= bounds.x() + 53 && x <= bounds.right() - 10 &&
-                                y >= bounds.y() + SearchListTop && y <= bounds.y() + SearchListBottom;
+                                y >= bounds.y() + ResultListTop && y <= bounds.y() + ResultListBottom;
             if (!inside) {
                 return;
             }
-            const auto movement = distance.value_or(step * SearchRowHeight);
+            const auto movement = distance.value_or(step * ResultRowHeight);
             searchScroll =
-                HudScroll::applyWheel(searchScroll, searchRowCount * SearchRowHeight,
-                                      SearchListBottom - SearchListTop, distance, step, SearchRowHeight);
+                HudScroll::applyWheel(searchScroll, searchRowCount * ResultRowHeight,
+                                      ResultListBottom - ResultListTop, distance, step, ResultRowHeight);
             // 接近已载入内容末尾时预取下一页；加载标志会阻止连续请求。
             if (movement > 0 && searchScroll >= searchScrollMaximum() - 160 &&
                 query.trimmed() == music.keyword && !music.sourceLoading() && music.hasMore[0]) {
@@ -91,12 +91,15 @@ void NativeHud::wheel(double x, double y, double delta, std::optional<int> steps
         }
         const auto bounds = modalBounds(width);
         y -= motion.offset;
-        if (x < bounds.x() + 53 || x > bounds.right() - 53 || y < 475 || y > 867) {
+        if (x < bounds.x() + 53 || x > bounds.right() - 10 || y < bounds.y() + ResultListTop ||
+            y > bounds.y() + ResultListBottom) {
             return;
         }
-        const auto values = rows(musicCollection);
-        listOffset = std::clamp(listOffset + step, 0, std::max(0, int(values.size()) - 5));
-        if (step > 0 && listOffset + 5 >= values.size() && !music.sourceLoading() &&
+        const auto movement = distance.value_or(step * ResultRowHeight);
+        savedScroll =
+            HudScroll::applyWheel(savedScroll, savedRowCount * ResultRowHeight,
+                                  ResultListBottom - ResultListTop, distance, step, ResultRowHeight);
+        if (movement > 0 && savedScroll >= savedScrollMaximum() - 160 && !music.sourceLoading() &&
             music.hasMore[musicCollection]) {
             music.loadMoreSource(musicCollection);
         }

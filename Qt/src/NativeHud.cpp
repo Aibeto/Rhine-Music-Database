@@ -178,12 +178,12 @@ QJsonObject NativeHud::state() const {
     };
     return {{"inputX", bounds.x() + 53},
             {"inputY", bounds.y() + 180},
-            {"inputWidth", bounds.width() - 106},
+            {"inputWidth", bounds.width() - 106 - libraryToolbarActionWidth()},
             // QML 手势层与原生结果视口共用同一组舞台坐标。
             {"searchListX", bounds.x() + 53},
-            {"searchListY", bounds.y() + SearchListTop},
+            {"searchListY", bounds.y() + ResultListTop},
             {"searchListWidth", bounds.width() - 106},
-            {"searchListHeight", SearchListBottom - SearchListTop},
+            {"searchListHeight", ResultListBottom - ResultListTop},
             {"playerBounds", rect(playerBounds)},
             {"seek", rect(playerSeekRect)},
             {"volume", rect(playerVolumeRect)},

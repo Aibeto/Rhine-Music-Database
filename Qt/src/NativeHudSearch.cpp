@@ -131,7 +131,7 @@ void NativeHud::searchToolbar(double x, double y, double width) {
 void NativeHud::searchResultList(double x, double y, double width) {
     const auto left = x + SearchInset;
     const auto usable = width - SearchInset * 2;
-    const QRectF viewport(left, y + SearchListTop, usable, SearchListBottom - SearchListTop);
+    const QRectF viewport(left, y + ResultListTop, usable, ResultListBottom - ResultListTop);
     const auto values = rows(0);
     const auto muted = mutedInk(ink());
     searchRowCount = int(values.size());
@@ -140,22 +140,22 @@ void NativeHud::searchResultList(double x, double y, double width) {
 
     if (values.isEmpty()) {
         const auto message = m_music->sourceMessage(0);
-        text(fit(message, 18, usable, "demibold"), left, y + SearchListTop + 92, 18, "demibold");
+        text(fit(message, 18, usable, "demibold"), left, y + ResultListTop + 92, 18, "demibold");
         const auto hint = m_music->isLocal() ? QStringLiteral("在文件夹管理中导入音乐后即可检索。")
                                              : QStringLiteral("输入歌曲、歌手、专辑或歌单名称后按 ENTER。");
-        text(fit(hint, 12, usable, "regular"), left, y + SearchListTop + 128, 12, "regular", 0, muted);
+        text(fit(hint, 12, usable, "regular"), left, y + ResultListTop + 128, 12, "regular", 0, muted);
         return;
     }
 
     const auto firstHit = hits.size();
     save();
     clip(viewport.x(), viewport.y(), viewport.width(), viewport.height());
-    const auto first = std::max(0, int(std::floor(searchScroll / SearchRowHeight)) - 1);
+    const auto first = std::max(0, int(std::floor(searchScroll / ResultRowHeight)) - 1);
     const auto last = std::min(int(values.size()) - 1,
-                               int(std::ceil((searchScroll + viewport.height()) / SearchRowHeight)) + 1);
+                               int(std::ceil((searchScroll + viewport.height()) / ResultRowHeight)) + 1);
     for (int index = first; index <= last; ++index) {
-        const auto rowY = y + SearchListTop + index * SearchRowHeight - searchScroll;
-        searchResultRow(values.at(index), x, rowY, width, m_music->keyword);
+        const auto rowY = y + ResultListTop + index * ResultRowHeight - searchScroll;
+        resultListRow(values.at(index), x, rowY, width, m_music->keyword, 0);
     }
     restore();
     HudScroll::clipHits(hits, int(firstHit), viewport);
@@ -165,14 +165,15 @@ void NativeHud::searchResultList(double x, double y, double width) {
     const auto railHeight = viewport.height() - 16;
     const auto track = QRectF(railX, railTop, 3, railHeight);
     const auto rail =
-        HudScroll::rail(track, searchRowCount * SearchRowHeight, viewport.height(), searchScroll, 30.);
+        HudScroll::rail(track, searchRowCount * ResultRowHeight, viewport.height(), searchScroll, 30.);
     fill(track.x(), track.y(), track.width(), track.height(), faintInk(ink(), 0.10));
     if (rail.visible) {
         fill(rail.thumb.x(), rail.thumb.y(), rail.thumb.width(), rail.thumb.height(), faintInk(ink(), 0.45));
     }
 }
 
-void NativeHud::searchResultRow(const Row &entry, double x, double y, double width, const QString &query) {
+void NativeHud::resultListRow(const Row &entry, double x, double y, double width, const QString &query,
+                              int lane) {
     const auto left = x + SearchInset;
     const auto usable = width - SearchInset * 2;
     const auto titleWidth = width - 308;
@@ -180,7 +181,7 @@ void NativeHud::searchResultRow(const Row &entry, double x, double y, double wid
     const auto &value = entry.value;
     const auto title = value["title"].toString();
 
-    rule(left, y + SearchRowHeight - 1, usable, 0.16);
+    rule(left, y + ResultRowHeight - 1, usable, 0.16);
     text(fit(value["id"].toString(), 10, 92, "regular"), left, y + 20, 10, "regular", 0, muted);
     searchTitle(title, query, left + SearchTitleX, y + 11, 18, titleWidth);
 
@@ -205,8 +206,8 @@ void NativeHud::searchResultRow(const Row &entry, double x, double y, double wid
     const auto action =
         value["kind"].toString() == "group"
             ? "music:expand:" + QString::fromUtf8(QUrl::toPercentEncoding(value["key"].toString()))
-            : "music:result:0:" + QString::number(entry.index);
-    hit(left, y, usable, SearchRowHeight, action, title);
+            : "music:result:" + QString::number(lane) + ":" + QString::number(entry.index);
+    hit(left, y, usable, ResultRowHeight, action, title);
 }
 
 /** 标题按完整字宽截断后，再给匹配关键词画下划线。 */
@@ -252,13 +253,16 @@ void NativeHud::searchFooter(double x, double y, double width) {
 }
 
 double NativeHud::searchScrollMaximum() const {
-    return HudScroll::maximum(searchRowCount * SearchRowHeight, SearchListBottom - SearchListTop);
+    return HudScroll::maximum(searchRowCount * ResultRowHeight, ResultListBottom - ResultListTop);
 }
 
-void NativeHud::resetSearchView() {
+void NativeHud::resetResultViews() {
     searchScroll = 0;
     searchRowCount = 0;
     m_searchAutoFillSize = -1;
+    savedScroll = 0;
+    savedRowCount = 0;
+    m_savedAutoFillSize = -1;
 }
 
 void NativeHud::ensureSearchFilled() {
@@ -271,7 +275,7 @@ void NativeHud::ensureSearchFilled() {
         return;
     }
     m_searchAutoFillSize = count;
-    if (count * SearchRowHeight < SearchListBottom - SearchListTop) {
+    if (count * ResultRowHeight < ResultListBottom - ResultListTop) {
         m_music->loadMoreSource(0);
     }
 }

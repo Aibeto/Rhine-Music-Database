@@ -56,6 +56,7 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
     });
     connect(music, &MusicLibrary::invalidated, this, &NativeHud::finishPage);
     connect(music, &MusicLibrary::invalidated, this, &NativeHud::ensureSearchFilled);
+    connect(music, &MusicLibrary::invalidated, this, &NativeHud::ensureSavedFilled);
     connect(music, &MusicLibrary::invalidated, this,
             [this] { QTimer::singleShot(0, this, &NativeHud::continueSort); });
 }
@@ -85,7 +86,7 @@ void NativeHud::openModal(QString kind) {
     motion.set(true, lastTime, reduced);
     query.clear();
     listOffset = 0;
-    resetSearchView();
+    resetResultViews();
     settingsScroll = 0;
     discoverScroll = 0;
     activeGroup.clear();
@@ -100,6 +101,8 @@ void NativeHud::openModal(QString kind) {
         if (m_music->lists[musicCollection].isEmpty()) {
             m_music->loadMoreSource(musicCollection);
         }
+        // 首屏不足一屏时继续补页，滚动列表不再依赖翻页按钮。
+        ensureSavedFilled();
     }
     if (kind == "search") {
         query = m_music->keyword;
@@ -126,7 +129,7 @@ void NativeHud::closeModal() {
 void NativeHud::setQuery(QString value) {
     query = value;
     listOffset = 0;
-    resetSearchView();
+    resetResultViews();
     activeGroup.clear();
     const auto token = ++m_searchGeneration;
     if (modal == "search") {
@@ -487,7 +490,7 @@ void NativeHud::action(QString value) {
             activeGroup.clear();
             query.clear();
             listOffset = 0;
-            resetSearchView();
+            resetResultViews();
             trackOffset = 0;
             music.switchProvider(provider);
         }
