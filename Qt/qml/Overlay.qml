@@ -472,6 +472,46 @@ Item {
             color: rhine.state.modal === "search" ? (rhine.state.dark ? "#a2aa9d" : "#626b60") : "#777777"
         }
     }
+    // 通用设置文本输入：位置由 Schema 行控制区提供，原生面板只负责背景与命中。
+    Rectangle {
+        id: settingEditBackground
+        visible: rhine.state.editingSetting === true
+        x: (rhine.state.editingSettingX || 0) * overlay.stageScale
+        y: ((rhine.state.editingSettingY || 0) + (rhine.state.modalOffset || 0)) * overlay.stageScale
+        width: (rhine.state.editingSettingWidth || 0) * overlay.stageScale
+        height: (rhine.state.editingSettingHeight || 0) * overlay.stageScale
+        color: rhine.state.dark ? "#2b332c" : "#e5e7da"
+        border.width: 1 * overlay.stageScale
+        border.color: rhine.state.dark ? "#4a554b" : "#aab0a0"
+    }
+    TextInput {
+        id: settingEditInput
+        objectName: "musicSettingEditInput"
+        visible: rhine.state.editingSetting === true
+        x: settingEditBackground.x + 12 * overlay.stageScale
+        y: settingEditBackground.y
+        width: Math.max(0, settingEditBackground.width - 24 * overlay.stageScale)
+        height: settingEditBackground.height
+        verticalAlignment: TextInput.AlignVCenter
+        font.family: rhineFontFamily
+        font.pixelSize: 16 * overlay.stageScale
+        color: rhine.state.dark ? "#e9e7da" : "#222a25"
+        clip: true
+        selectByMouse: true
+        cursorVisible: activeFocus && !rhine.performance.idle
+        Accessible.name: "设置文本"
+        onTextEdited: rhine.settingEditText(text)
+        onVisibleChanged: {
+            if (visible) {
+                text = rhine.state.editingSettingValue || "";
+                forceActiveFocus();
+            } else {
+                inputLayer.forceActiveFocus();
+            }
+        }
+        Keys.onReturnPressed: rhine.settingEditAccepted()
+        Keys.onEscapePressed: rhine.settingEditCancel()
+    }
     // 两条呈现路径共用真实宿主的窗口按钮、拖动与边缘缩放。
     Loader {
         id: chromeLoader

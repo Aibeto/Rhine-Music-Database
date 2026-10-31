@@ -38,6 +38,10 @@ NativeHud::NativeHud(Host *host, Glyphs *glyphs, MusicLibrary *music, HudSceneAc
 #ifdef Q_OS_DARWIN
     // Apple 平台的呈现节奏由系统合成器固定，设置页不提供该开关，状态恒为关闭。
     vsync = false;
+    // macOS 只有 Metal 后端
+    if (host->preference("graphics-backend") != "metal") {
+        host->setPreference("graphics-backend", "metal");
+    }
 #else
     vsync = host->preference("vsync") != "off";
 #endif
@@ -72,6 +76,9 @@ void NativeHud::openModal(QString kind) {
     }
     modal = kind;
     closing = false;
+    editingSettingId.clear();
+    editingSettingText.clear();
+    editingSettingRect = QRectF();
     // 换页时收起所有下拉块，避免展开状态跨页面残留。
     expandedPreference.clear();
     cacheMessage.clear();
@@ -97,6 +104,10 @@ void NativeHud::openModal(QString kind) {
     if (kind == "search") {
         query = m_music->keyword;
     }
+    if (kind == "settings") {
+        // 首次绘制前也先测量内容高度，会话恢复才能按真实上限钳制滚动位置。
+        refreshSettingsLayout();
+    }
 }
 
 void NativeHud::closeModal() {
@@ -105,6 +116,9 @@ void NativeHud::closeModal() {
     if (modal == "login") {
         m_music->cancelLogin();
     }
+    editingSettingId.clear();
+    editingSettingText.clear();
+    editingSettingRect = QRectF();
     closing = true;
     motion.set(false, lastTime, reduced);
 }
@@ -354,6 +368,13 @@ void NativeHud::playerAction(const QStringList &parts) {
 
 /** 动作字符串保持原有输入协议，控制器直接更新原生音乐状态和场景。 */
 void NativeHud::action(QString value) {
+    if (!editingSettingId.isEmpty() && !value.startsWith("setting-edit:")) {
+        cancelSettingEdit();
+    }
+    if (value.startsWith("setting-edit:")) {
+        beginSettingEdit(value.mid(13));
+        return;
+    }
     if (value == "menu") {
         if (closing) {
             return;
@@ -393,7 +414,22 @@ void NativeHud::action(QString value) {
     if (modal == "settings" && !closing &&
         (value == "settings:scroll-up" || value == "settings:scroll-down")) {
         const auto movement = value == "settings:scroll-down" ? 120. : -120.;
-        settingsScroll = std::clamp(settingsScroll + movement, 0., settingsScrollMaximum());
+        settingsScroll =
+            HudScroll::clampOffset(settingsScroll + movement, settingsContentBottom - SettingsViewportTop,
+                                   SettingsViewportBottom - SettingsViewportTop);
+        return;
+    }
+    if (value == "settings:restore-defaults") {
+        restoreSettingsDefaults();
+        return;
+    }
+    if (value.startsWith("setting:")) {
+        // Schema 控件使用 setting:<id>:<value> 写入；旧版动作字符串仍由各自分支处理。
+        const auto rest = value.mid(8);
+        const auto colon = rest.indexOf(':');
+        if (colon > 0) {
+            applySettingValue(rest.left(colon), rest.mid(colon + 1));
+        }
         return;
     }
 
@@ -708,7 +744,8 @@ void NativeHud::action(QString value) {
         // 列表高度参与内容总高度，所以展开后立即重新夹紧滚动位置，避免停在超出末尾的位置。
         const auto key = value.mid(7);
         expandedPreference = expandedPreference == key ? QString() : key;
-        settingsScroll = std::clamp(settingsScroll, 0., std::max(0., settingsScrollMaximum()));
+        // 展开/收起会改变测量高度，立即重算上限再钳制滚动位置。
+        refreshSettingsLayout();
     } else if (value.startsWith("fsr-quality:")) {
         // FSR 超分档位：渲染器每帧读取，下一帧生效（内部尺寸变化会触发渲染目标重建）。
         const auto quality = value.mid(12);
@@ -809,8 +846,10 @@ void NativeHud::key(QString value, bool command) {
         return;
     }
     if (modal == "settings" && !closing && (value == "ArrowDown" || value == "ArrowUp")) {
-        const auto movement = value == "ArrowDown" ? 50. : -50.;
-        settingsScroll = std::clamp(settingsScroll + movement, 0., settingsScrollMaximum());
+        const auto movement = value == "ArrowDown" ? 66. : -66.;
+        settingsScroll =
+            HudScroll::clampOffset(settingsScroll + movement, settingsContentBottom - SettingsViewportTop,
+                                   SettingsViewportBottom - SettingsViewportTop);
         return;
     }
     if (value == "Enter" && command) {

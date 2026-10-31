@@ -1013,11 +1013,11 @@ const QStringList &preferenceKeys() {
         // Linux 显卡选择：存的是 /sys/class/drm 里 cardN 的序号（0 基），不是型号。
         // 换卡后序号可能指向另一张卡或不存在，启动时由 initializeLinuxGraphics 校验并回退。
         "gpu-index", "vsync", "supersample", "render-scale", "aa-mode", "aa-scale", "msaa", "fsr-quality",
-        "fsr-sharpness", "fg", "close-behavior", "auto-update", "volume", "quality",
-        "alternate-source", "provider", "lyrics-cache", "lyrics-global-offset-ms", "welcome-name-netease",
-        "welcome-name-qq", "welcome-name-kugou", "account-id-netease", "account-id-qq", "account-id-kugou",
-        "kugou-edition", "welcome-name-kugou-standard", "welcome-name-kugou-lite",
-        "account-id-kugou-standard", "account-id-kugou-lite"};
+        "fsr-sharpness", "fg", "close-behavior", "auto-update", "volume", "quality", "alternate-source",
+        "provider", "lyrics-cache", "lyrics-global-offset-ms", "welcome-name-netease", "welcome-name-qq",
+        "welcome-name-kugou", "account-id-netease", "account-id-qq", "account-id-kugou", "kugou-edition",
+        "welcome-name-kugou-standard", "welcome-name-kugou-lite", "account-id-kugou-standard",
+        "account-id-kugou-lite"};
     return keys;
 }
 } // namespace
@@ -1055,6 +1055,9 @@ void Host::setPreference(QString key, QString value) {
         emit preferenceChanged(key, value);
 #endif
     }
+}
+bool Host::isPreferenceKey(const QString &key) {
+    return preferenceKeys().contains(key);
 }
 bool Host::activates() const {
     return offline ? false : platformActivates();

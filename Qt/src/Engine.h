@@ -68,6 +68,9 @@ class Engine : public QObject {
     int frameIntervalMs() const;
     Q_INVOKABLE void query(QString query);
     Q_INVOKABLE void key(QString key, bool command);
+    Q_INVOKABLE void settingEditText(QString text);
+    Q_INVOKABLE void settingEditAccepted();
+    Q_INVOKABLE void settingEditCancel();
     Q_INVOKABLE void pointer(QString type, double x, double y);
     Q_INVOKABLE void wheel(double x, double y, double delta, bool pixels = false);
     Q_INVOKABLE void snapshot(QString path);

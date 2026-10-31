@@ -158,17 +158,17 @@ void NativeHud::searchResultList(double x, double y, double width) {
         searchResultRow(values.at(index), x, rowY, width, m_music->keyword);
     }
     restore();
-    clipHits(firstHit, viewport);
+    HudScroll::clipHits(hits, int(firstHit), viewport);
 
     const auto railX = x + width - 24;
     const auto railTop = viewport.top() + 8;
     const auto railHeight = viewport.height() - 16;
-    fill(railX, railTop, 3, railHeight, faintInk(ink(), 0.10));
-    if (maximum > 0) {
-        const auto contentHeight = searchRowCount * SearchRowHeight;
-        const auto thumbHeight = std::max(30., railHeight * viewport.height() / contentHeight);
-        const auto thumbY = railTop + (searchScroll / maximum) * (railHeight - thumbHeight);
-        fill(railX, thumbY, 3, thumbHeight, faintInk(ink(), 0.45));
+    const auto track = QRectF(railX, railTop, 3, railHeight);
+    const auto rail =
+        HudScroll::rail(track, searchRowCount * SearchRowHeight, viewport.height(), searchScroll, 30.);
+    fill(track.x(), track.y(), track.width(), track.height(), faintInk(ink(), 0.10));
+    if (rail.visible) {
+        fill(rail.thumb.x(), rail.thumb.y(), rail.thumb.width(), rail.thumb.height(), faintInk(ink(), 0.45));
     }
 }
 
@@ -251,31 +251,8 @@ void NativeHud::searchFooter(double x, double y, double width) {
     text(label, x + width - SearchInset - labelWidth, y + SearchFooterY, 9, "regular", 0.04, muted);
 }
 
-/** 列表绘制使用局部裁切，命中区域同步裁切，避免半行挡住页脚或表头。 */
-void NativeHud::clipHits(int first, const QRectF &area) {
-    QJsonArray clipped;
-    for (qsizetype index = 0; index < hits.size(); ++index) {
-        auto entry = hits.at(index).toObject();
-        if (index >= first) {
-            const QRectF rectangle(entry["x"].toDouble(), entry["y"].toDouble(), entry["width"].toDouble(),
-                                   entry["height"].toDouble());
-            const auto visible = rectangle.intersected(area);
-            if (visible.isEmpty()) {
-                continue;
-            }
-            entry["x"] = visible.x();
-            entry["y"] = visible.y();
-            entry["width"] = visible.width();
-            entry["height"] = visible.height();
-        }
-        clipped.append(entry);
-    }
-    hits = clipped;
-}
-
 double NativeHud::searchScrollMaximum() const {
-    const auto content = searchRowCount * SearchRowHeight;
-    return std::max(0., content - (SearchListBottom - SearchListTop));
+    return HudScroll::maximum(searchRowCount * SearchRowHeight, SearchListBottom - SearchListTop);
 }
 
 void NativeHud::resetSearchView() {

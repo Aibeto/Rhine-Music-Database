@@ -1,6 +1,8 @@
 #pragma once
 #include "Glyphs.h"
+#include "HudScroll.h"
 #include "MusicLibrary.h"
+#include "SettingsSchema.h"
 #include "UiMotion.h"
 #include <QCache>
 #include <QPointF>
@@ -54,6 +56,13 @@ class NativeHud : public QObject {
     void closeModal();
     void setQuery(QString value);
     void pageResults(int direction);
+    // 重新测量设置页内容高度；会话恢复和展开下拉前必须调用。
+    void refreshSettingsLayout();
+    // 通用文本设置的编辑入口；QML 浮层通过这三个方法提交/取消。
+    void beginSettingEdit(const QString &id);
+    void setSettingEditText(const QString &text);
+    void commitSettingEdit();
+    void cancelSettingEdit();
     bool animating(double time) const;
     bool supportsTrackList() const;
     QVector<Row> rows(int lane);
@@ -87,6 +96,10 @@ class NativeHud : public QObject {
     static constexpr double SearchRowHeight = 72;
     double searchScroll = 0;
     int searchRowCount = 0;
+    // 通用文本设置的 QML 编辑浮层状态；清空 id 即隐藏。
+    QString editingSettingId;
+    QString editingSettingText;
+    QRectF editingSettingRect;
     // 六行同专辑
     static constexpr int AlbumTrackRowCount = 6;
     static constexpr double AlbumTrackTop = 630;
@@ -104,7 +117,8 @@ class NativeHud : public QObject {
     // 清除缓存后的结果提示；重新打开设置页时清空。
     QString cacheMessage;
     double settingsScrollMaximum() const {
-        return settingsContentBottom - SettingsViewportBottom;
+        return HudScroll::maximum(settingsContentBottom - SettingsViewportTop,
+                                  SettingsViewportBottom - SettingsViewportTop);
     }
     bool dark = false;
     bool reduced = false;
@@ -258,7 +272,6 @@ class NativeHud : public QObject {
     void searchTitle(const QString &title, const QString &query, double x, double y, double size,
                      double width);
     void searchFooter(double x, double y, double width);
-    void clipHits(int first, const QRectF &area);
     double searchScrollMaximum() const;
     void resetSearchView();
     void ensureSearchFilled();
@@ -268,7 +281,11 @@ class NativeHud : public QObject {
     void playerPanel(double x, double y, double width);
     void platformChoices(double x, double y, double width, bool expanded = false);
     void platformPanel(double x, double y, double width);
-    void settings(double x, double y, double width);
+    void settingsPanel(double x, double y, double width);
+    void paintSettingsCustomSection(const QString &renderer, const QRectF &body, double scroll);
+    SettingsSchema::SettingsContext settingsContext() const;
+    void applySettingValue(const QString &id, const QString &value);
+    void restoreSettingsDefaults();
     void qualityPanel(double x, double y, double width);
     void qualityChoice(const QString &id, int number, double x, double y, double width, bool featured);
     void logo(double x, double y, double width);

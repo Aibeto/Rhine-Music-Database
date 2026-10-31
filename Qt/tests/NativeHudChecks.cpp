@@ -697,7 +697,6 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
             hud.openModal("settings");
             hud.draw(archiveFrame, 1920, 50);
             const auto settingsCloseHit = getHit(hud.hits, "close-modal");
-
             // 验证 settings 面板渲染
             if (!hasAction(hud.hits, "close-modal")) {
                 qCritical() << "Settings panel missing close button" << provider << (dark ? "dark" : "light");
@@ -709,9 +708,32 @@ bool runNativeHudChecks(const QString &root, Glyphs &glyphs) {
                 ok = false;
             }
 
-            const QStringList requiredSettings{
-                "theme",   "motion",        "startup-animation",  "detail-autoplay", "single-play-mode",
-                "quality", "disc-rotation", "performance:toggle", "update:check",    "replay"};
+            // Schema 的 setting:<id>:<value> 路由必须真实更新 HUD 缓存与场景主题。
+            const bool settingsInitialDark = hud.dark;
+            hud.action("setting:theme:dark");
+            if (!hud.dark) {
+                qCritical() << "Schema theme setting did not switch to dark";
+                ok = false;
+            }
+            hud.action("setting:theme:light");
+            if (hud.dark) {
+                qCritical() << "Schema theme setting did not switch to light";
+                ok = false;
+            }
+            hud.action(settingsInitialDark ? "setting:theme:dark" : "setting:theme:light");
+            hud.draw(archiveFrame, 1920, 50);
+
+            const QStringList requiredSettings{"theme",
+                                               "motion",
+                                               "startup-animation",
+                                               "detail-autoplay",
+                                               "single-play-mode",
+                                               "quality",
+                                               "disc-rotation",
+                                               "performance:toggle",
+                                               "update:check",
+                                               "replay",
+                                               "settings:restore-defaults"};
             QStringList reachableSettings = requiredSettings;
 #if defined(Q_OS_MACOS) || defined(Q_OS_WIN)
             // 关闭行为只在持有托盘入口的桌面平台出现。

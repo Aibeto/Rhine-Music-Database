@@ -158,6 +158,12 @@ set(RHINE_APP_SOURCES
     Qt/src/NativeHudLibrary.cpp
     Qt/src/NativeHudSearch.cpp
     Qt/src/NativeHudDiscover.cpp
+    Qt/src/SettingsSchema.cpp
+    Qt/src/SettingsSchema.h
+    Qt/src/SettingsCard.cpp
+    Qt/src/SettingsCard.h
+    Qt/src/NativeHudSettings.cpp
+    Qt/src/HudScroll.h
     Qt/src/DiscoverMusicCard.cpp
     Qt/src/DiscoverArtwork.cpp
     Qt/src/NativeHudModal.cpp

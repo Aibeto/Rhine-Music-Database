@@ -60,6 +60,8 @@ class Host : public QObject {
     Q_INVOKABLE void clearCache();
     Q_INVOKABLE QString preference(QString key) const;
     Q_INVOKABLE void setPreference(QString key, QString value);
+    // 设置 Schema 与回归测试共用同一份偏好键白名单。
+    static bool isPreferenceKey(const QString &key);
     Q_INVOKABLE bool activates() const;
     Q_INVOKABLE void setActivates(bool value);
     Q_INVOKABLE QString asset(QString name) const;

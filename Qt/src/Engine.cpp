@@ -604,6 +604,18 @@ void Engine::key(QString value, bool command) {
     app->hud.key(value, command);
     wake();
 }
+void Engine::settingEditText(QString text) {
+    app->hud.setSettingEditText(text);
+    wake();
+}
+void Engine::settingEditAccepted() {
+    app->hud.commitSettingEdit();
+    wake();
+}
+void Engine::settingEditCancel() {
+    app->hud.cancelSettingEdit();
+    wake();
+}
 void Engine::pointer(QString type, double x, double y) {
     if (type == "pointermove") {
         if (m_pointerX == x && m_pointerY == y && !m_pointerPending) {

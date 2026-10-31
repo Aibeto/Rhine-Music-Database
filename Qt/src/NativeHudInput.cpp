@@ -20,12 +20,16 @@ void NativeHud::wheel(double x, double y, double delta, std::optional<int> steps
     }
     auto &music = *m_music;
     if (modal == "settings") {
+        if (!editingSettingId.isEmpty()) {
+            cancelSettingEdit();
+        }
         const auto bounds = modalBounds(width);
         const auto localY = y - motion.offset;
-        if (!closing && x >= bounds.left() && x <= bounds.right() &&
+        if (!closing && x >= bounds.x() + 53 && x <= bounds.right() - 53 &&
             localY >= bounds.top() + SettingsViewportTop && localY <= bounds.top() + SettingsViewportBottom) {
             settingsScroll =
-                std::clamp(settingsScroll + distance.value_or(step * 50.), 0., settingsScrollMaximum());
+                HudScroll::applyWheel(settingsScroll, settingsContentBottom - SettingsViewportTop,
+                                      SettingsViewportBottom - SettingsViewportTop, distance, step, 66.);
         }
         return;
     }
@@ -45,7 +49,9 @@ void NativeHud::wheel(double x, double y, double delta, std::optional<int> steps
             const auto viewport = DiscoverMusicCard::layout(bounds, music.discover->items.size()).viewport;
             if (!closing && !categoryPicker && viewport.contains(x, y - motion.offset)) {
                 const auto movement = distance.value_or(step * 60.);
-                discoverScroll = std::clamp(discoverScroll + movement, 0., discoverScrollMaximum);
+                discoverScroll =
+                    HudScroll::applyWheel(discoverScroll, viewport.height() + discoverScrollMaximum,
+                                          viewport.height(), distance, step, 60.);
                 // 只在滚动接近已载入内容末尾时续载，绘制过程不发起列表请求。
                 if (movement > 0 && discoverScroll >= discoverScrollMaximum - 120 &&
                     !music.discover->loading && music.discover->more) {
@@ -70,7 +76,9 @@ void NativeHud::wheel(double x, double y, double delta, std::optional<int> steps
                 return;
             }
             const auto movement = distance.value_or(step * SearchRowHeight);
-            searchScroll = std::clamp(searchScroll + movement, 0., searchScrollMaximum());
+            searchScroll =
+                HudScroll::applyWheel(searchScroll, searchRowCount * SearchRowHeight,
+                                      SearchListBottom - SearchListTop, distance, step, SearchRowHeight);
             // 接近已载入内容末尾时预取下一页；加载标志会阻止连续请求。
             if (movement > 0 && searchScroll >= searchScrollMaximum() - 160 &&
                 query.trimmed() == music.keyword && !music.sourceLoading() && music.hasMore[0]) {
