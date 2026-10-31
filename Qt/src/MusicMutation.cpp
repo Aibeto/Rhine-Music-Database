@@ -257,7 +257,6 @@ void MusicLibrary::like(QJsonObject value) {
             return;
         }
         const auto id = value["id"].toString();
-        const auto before = collections->likedIDs();
         const bool enabled = !collections->isLiked(id);
         if (!collections->setLiked(id, enabled)) {
             status = QStringLiteral("无法写入本地收藏");
@@ -266,12 +265,10 @@ void MusicLibrary::like(QJsonObject value) {
         }
         const auto ids = collections->likedIDs();
         likedIDs = QJsonArray::fromStringList(ids);
-        const int oldTotal = int(before.size());
         if (enabled) {
-            if (likedCursor >= oldTotal) {
-                lists[1] = MusicData::unique(lists[1], {value});
-                likedCursor = std::min(likedCursor + 1, int(ids.size()));
-            }
+            // 收藏列表从新到旧
+            lists[1] = MusicData::unique(QJsonArray{value}, lists[1]);
+            likedCursor = std::min(likedCursor + 1, int(ids.size()));
         } else {
             const int index = MusicData::indexOfId(lists[1], id);
             lists[1] = without(lists[1], "id", id);
@@ -541,8 +538,9 @@ void MusicLibrary::playlistTrack(QString id, QJsonObject value, bool remove, Com
         totals[2] = int(lists[2].size());
         if (directory && directory->item["id"] == id && (remove ? existed : !existed)) {
             const auto contained = MusicData::indexOfId(directory->songs, songID) >= 0;
+            // 歌单曲目从新到旧
             const auto songs = remove ? without(directory->songs, "id", songID)
-                                      : MusicData::unique(directory->songs, {value});
+                                      : MusicData::unique(QJsonArray{value}, directory->songs);
             directory->updateSongs(songs, directory->sortField);
             if (remove) {
                 const auto old = MusicData::indexOf(directory->ids, songID);
@@ -557,7 +555,8 @@ void MusicLibrary::playlistTrack(QString id, QJsonObject value, bool remove, Com
                     directory->item["trackCount"] = directory->item["trackCount"].toInt() + 1;
                 }
                 if (MusicData::indexOf(directory->ids, songID) < 0) {
-                    directory->ids.append(songID);
+                    directory->ids.prepend(songID);
+                    ++directory->cursor;
                 }
             }
         }

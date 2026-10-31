@@ -85,9 +85,10 @@ bool LocalCollections::save() {
 }
 
 QStringList LocalCollections::likedIDs() const {
+    // 存储按添加顺序追加，读取时反转为从新到旧。
     QStringList result;
-    for (const auto &value : m_liked) {
-        result.append(value.toString());
+    for (qsizetype index = m_liked.size() - 1; index >= 0; --index) {
+        result.append(m_liked.at(index).toString());
     }
     return result;
 }
@@ -166,8 +167,10 @@ QStringList LocalCollections::tracks(const QString &id) const {
     if (index < 0) {
         return result;
     }
-    for (const auto &value : m_playlists.at(index).toObject()["trackIDs"].toArray()) {
-        result.append(value.toString());
+    // 曲目按加入顺序存储，读取时反转为从新到旧。
+    const auto tracks = m_playlists.at(index).toObject()["trackIDs"].toArray();
+    for (qsizetype row = tracks.size() - 1; row >= 0; --row) {
+        result.append(tracks.at(row).toString());
     }
     return result;
 }
